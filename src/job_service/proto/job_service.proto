@@ -1,0 +1,75 @@
+// SPDX-License-Identifier: MPL-2.0
+syntax = "proto3";
+
+package video_editor.jobs.v1;
+
+enum JobKind {
+  JOB_KIND_UNSPECIFIED = 0;
+  JOB_KIND_PROBE = 1;
+  JOB_KIND_THUMBNAIL = 2;
+  JOB_KIND_WAVEFORM = 3;
+  JOB_KIND_PROXY = 4;
+  JOB_KIND_RENDER_CACHE = 5;
+  JOB_KIND_EXPORT = 6;
+  JOB_KIND_TRANSCRIBE = 7;
+}
+
+enum JobState {
+  JOB_STATE_UNSPECIFIED = 0;
+  JOB_STATE_ACCEPTED = 1;
+  JOB_STATE_RUNNING = 2;
+  JOB_STATE_SUCCEEDED = 3;
+  JOB_STATE_FAILED = 4;
+  JOB_STATE_CANCELLED = 5;
+}
+
+message JobSpec {
+  string job_id = 1;
+  JobKind kind = 2;
+  uint64 project_revision = 3;
+  string project_checkpoint = 4;
+  repeated string input_uris = 5;
+  string output_uri = 6;
+  string preset_id = 7;
+  bytes options = 8;
+}
+
+message StartJob { JobSpec spec = 1; }
+message CancelJob { string job_id = 1; }
+message Shutdown { bool finish_active_jobs = 1; }
+
+message WorkerRequest {
+  uint32 protocol_major = 1;
+  uint32 protocol_minor = 2;
+  oneof request {
+    StartJob start = 10;
+    CancelJob cancel = 11;
+    Shutdown shutdown = 12;
+  }
+}
+
+message JobError {
+  string category = 1;
+  int32 native_code = 2;
+  string user_message = 3;
+  string diagnostic = 4;
+  bool retryable = 5;
+}
+
+message JobEvent {
+  string job_id = 1;
+  JobState state = 2;
+  double progress = 3;
+  string phase = 4;
+  JobError error = 5;
+  string result_uri = 6;
+  bytes result = 7;
+  map<string, string> metadata = 8;
+}
+
+message WorkerEvent {
+  uint32 protocol_major = 1;
+  uint32 protocol_minor = 2;
+  JobEvent event = 10;
+}
+
