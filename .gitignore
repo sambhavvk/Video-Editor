@@ -1,0 +1,33 @@
+# Build outputs
+/build/
+/build-*/
+/out/
+CMakeUserPresets.json
+CMakeFiles/
+CMakeCache.txt
+compile_commands.json
+
+# Generated sources
+/generated/
+
+# Editors and operating systems
+.idea/
+.vscode/
+*.user
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Runtime state and media caches
+*.veproj-wal
+*.veproj-shm
+*.veproj-journal
+/.cache/
+/artifacts/
+
+# Test output
+Testing/
+test-results/
+coverage/
+
