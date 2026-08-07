@@ -1,0 +1,61 @@
+// SPDX-License-Identifier: MPL-2.0
+#include "video_editor/asset_service/asset_service.h"
+
+#include <gtest/gtest.h>
+
+#include <filesystem>
+#include <fstream>
+
+namespace video_editor::assets {
+namespace {
+
+class TemporaryFile {
+public:
+  explicit TemporaryFile(const std::string& contents) {
+    static int sequence = 0;
+    path_ = std::filesystem::temp_directory_path() /
+            ("video-editor-fingerprint-" + std::to_string(++sequence) + ".bin");
+    std::ofstream output(path_, std::ios::binary | std::ios::trunc);
+    output << contents;
+  }
+  ~TemporaryFile() { std::filesystem::remove(path_); }
+  [[nodiscard]] const std::filesystem::path& path() const { return path_; }
+
+private:
+  std::filesystem::path path_;
+};
+
+TEST(Fingerprint, StableForUnchangedFileAndDetectsContentChanges) {
+  TemporaryFile first("creator-media-one");
+  TemporaryFile identical("creator-media-one");
+  TemporaryFile second("creator-media-two");
+  const auto fingerprint_a = fingerprint_file(first.path(), true);
+  const auto fingerprint_b = fingerprint_file(identical.path(), true);
+  const auto fingerprint_c = fingerprint_file(second.path(), true);
+
+  ASSERT_TRUE(fingerprint_a);
+  ASSERT_TRUE(fingerprint_b);
+  ASSERT_TRUE(fingerprint_c);
+  EXPECT_TRUE(fingerprint_a.value().content_matches(fingerprint_b.value()));
+  EXPECT_FALSE(fingerprint_a.value().content_matches(fingerprint_c.value()));
+  EXPECT_EQ(fingerprint_a.value().full_sha256, fingerprint_b.value().full_sha256);
+}
+
+TEST(ProxyPolicy, RecommendsProxyOnlyForDifficultFourKVideo) {
+  AssetRecord asset;
+  media::StreamDescriptor stream;
+  stream.codec_name = "h264";
+  media::VideoDescription video;
+  video.width = 3840;
+  video.height = 2160;
+  stream.video = video;
+  asset.descriptor.streams.push_back(stream);
+  EXPECT_TRUE(AssetService::should_recommend_proxy(asset));
+
+  asset.descriptor.streams.front().video->width = 1920;
+  asset.descriptor.streams.front().video->height = 1080;
+  EXPECT_FALSE(AssetService::should_recommend_proxy(asset));
+}
+
+} // namespace
+} // namespace video_editor::assets

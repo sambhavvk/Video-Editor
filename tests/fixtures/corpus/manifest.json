@@ -1,0 +1,40 @@
+{
+  "$schema": "./manifest.schema.json",
+  "license": "MPL-2.0",
+  "schemaVersion": 1,
+  "status": "scaffold",
+  "minimumAssetCount": 200,
+  "requiredCategories": [
+    "vfr",
+    "b-frames",
+    "non-zero-starting-pts",
+    "rotation",
+    "interlaced",
+    "8-bit-color",
+    "10-bit-color",
+    "hdr-input",
+    "alpha",
+    "image-sequence",
+    "corrupt-media",
+    "unusual-channel-layout",
+    "variable-sample-rate",
+    "unusual-sar",
+    "field-order",
+    "missing-timestamps"
+  ],
+  "assets": [
+    {
+      "id": "manifest-smoke",
+      "path": "files/manifest-smoke.txt",
+      "bytes": 159,
+      "sha256": "87a7a24b89e8e551fa2db838babede02e88766a108fd0287be90225f4a691c34",
+      "categories": ["infrastructure"],
+      "provenance": {
+        "kind": "generated",
+        "license": "MPL-2.0",
+        "description": "Text-only checksum verifier fixture committed with the repository.",
+        "generationRecipe": "Keep the exact UTF-8 bytes stored in files/manifest-smoke.txt."
+      }
+    }
+  ]
+}

@@ -1,0 +1,3 @@
+SPDX-License-Identifier: MPL-2.0
+Video Editor corpus manifest smoke fixture.
+This file verifies path, byte-count, and SHA-256 handling without shipping media.
