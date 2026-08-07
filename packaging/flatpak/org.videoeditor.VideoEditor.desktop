@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: CC0-1.0
+
+[Desktop Entry]
+Type=Application
+Name=Video Editor
+GenericName=Non-destructive Video Editor
+Comment=Create, caption, mix, and deliver videos offline
+Exec=VideoEditor %U
+Icon=org.videoeditor.VideoEditor
+Terminal=false
+Categories=AudioVideo;AudioVideoEditing;Qt;
+Keywords=video;editor;timeline;captions;audio;
+StartupNotify=true
+StartupWMClass=VideoEditor
+

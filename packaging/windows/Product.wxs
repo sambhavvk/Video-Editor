@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: MPL-2.0 -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="Video Editor"
+    Manufacturer="Video Editor contributors"
+    Version="$(var.ProductVersion)"
+    UpgradeCode="4E539C4E-0B5D-4EAF-8F41-5C55866E6135"
+    Language="1033"
+    Scope="perMachine">
+    <SummaryInformation Description="Offline-first non-destructive video editor" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Video Editor is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Video Editor" />
+    </StandardDirectory>
+
+    <Feature Id="MainFeature" Title="Video Editor" Level="1">
+      <!-- WiX 5's Files element harvests the complete CMake install tree. -->
+      <Files Directory="INSTALLFOLDER" Include="$(var.InstallRoot)\**" />
+    </Feature>
+  </Package>
+</Wix>

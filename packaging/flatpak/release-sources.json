@@ -1,0 +1,30 @@
+{
+  "$schema": "./release-sources.schema.json",
+  "license": "MPL-2.0",
+  "schemaVersion": 1,
+  "releaseBlocking": true,
+  "reason": "The development manifest consumes the local checkout and the official LGPL dependency bundle has not been reviewed or pinned.",
+  "sources": [
+    {
+      "name": "video-editor-source",
+      "status": "release-blocking",
+      "archiveUrl": null,
+      "sha256": null,
+      "requiredResolution": "Use an immutable release archive and record its real HTTPS URL and SHA-256."
+    },
+    {
+      "name": "ffmpeg-lgpl-8.1.2",
+      "status": "release-blocking",
+      "archiveUrl": null,
+      "sha256": null,
+      "requiredResolution": "Pin the approved FFmpeg source and configuration; GPL and nonfree components are forbidden."
+    },
+    {
+      "name": "distribution-dependency-lock",
+      "status": "release-blocking",
+      "archiveUrl": null,
+      "sha256": null,
+      "requiredResolution": "Pin Protobuf, libebur128, OpenSSL, SQLite, and any libraries not supplied at the required ABI by the runtime."
+    }
+  ]
+}

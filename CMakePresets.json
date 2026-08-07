@@ -1,0 +1,105 @@
+{
+  "version": 8,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 30,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "VIDEO_EDITOR_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "dev",
+      "displayName": "Developer Debug",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "VIDEO_EDITOR_ENABLE_SANITIZERS": "OFF"
+      }
+    },
+    {
+      "name": "asan",
+      "displayName": "Address/Undefined Sanitizers",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "VIDEO_EDITOR_ENABLE_SANITIZERS": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "core-only",
+      "displayName": "Core without Qt or FFmpeg",
+      "inherits": "dev",
+      "cacheVariables": {
+        "VIDEO_EDITOR_BUILD_DESKTOP_UI": "OFF",
+        "VIDEO_EDITOR_BUILD_MEDIA": "OFF",
+        "VIDEO_EDITOR_BUILD_WORKERS": "OFF"
+      }
+    },
+    {
+      "name": "windows-dev",
+      "displayName": "Windows Developer (LLVM clang-cl)",
+      "inherits": "base",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_C_COMPILER": "clang-cl",
+        "CMAKE_CXX_COMPILER": "clang-cl",
+        "VIDEO_EDITOR_ENABLE_SANITIZERS": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "dev", "configurePreset": "dev" },
+    { "name": "asan", "configurePreset": "asan" },
+    { "name": "release", "configurePreset": "release" },
+    { "name": "core-only", "configurePreset": "core-only" },
+    { "name": "windows-dev", "configurePreset": "windows-dev" }
+  ],
+  "testPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    },
+    {
+      "name": "asan",
+      "configurePreset": "asan",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    },
+    {
+      "name": "core-only",
+      "configurePreset": "core-only",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    },
+    {
+      "name": "windows-dev",
+      "configurePreset": "windows-dev",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    }
+  ]
+}
