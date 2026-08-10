@@ -1,0 +1,30 @@
+// SPDX-License-Identifier: MPL-2.0
+#pragma once
+
+#include <string_view>
+
+namespace video_editor::media::dependency_versions {
+
+inline constexpr std::string_view kFfmpegRelease{"@VIDEO_EDITOR_FFMPEG_VERSION@"};
+
+inline constexpr unsigned kAvformatMajor = @VIDEO_EDITOR_EXPECTED_AVFORMAT_MAJOR@U;
+inline constexpr unsigned kAvformatMinor = @VIDEO_EDITOR_EXPECTED_AVFORMAT_MINOR@U;
+inline constexpr unsigned kAvformatPatch = @VIDEO_EDITOR_EXPECTED_AVFORMAT_PATCH@U;
+
+inline constexpr unsigned kAvcodecMajor = @VIDEO_EDITOR_EXPECTED_AVCODEC_MAJOR@U;
+inline constexpr unsigned kAvcodecMinor = @VIDEO_EDITOR_EXPECTED_AVCODEC_MINOR@U;
+inline constexpr unsigned kAvcodecPatch = @VIDEO_EDITOR_EXPECTED_AVCODEC_PATCH@U;
+
+inline constexpr unsigned kAvutilMajor = @VIDEO_EDITOR_EXPECTED_AVUTIL_MAJOR@U;
+inline constexpr unsigned kAvutilMinor = @VIDEO_EDITOR_EXPECTED_AVUTIL_MINOR@U;
+inline constexpr unsigned kAvutilPatch = @VIDEO_EDITOR_EXPECTED_AVUTIL_PATCH@U;
+
+inline constexpr unsigned kSwresampleMajor = @VIDEO_EDITOR_EXPECTED_SWRESAMPLE_MAJOR@U;
+inline constexpr unsigned kSwresampleMinor = @VIDEO_EDITOR_EXPECTED_SWRESAMPLE_MINOR@U;
+inline constexpr unsigned kSwresamplePatch = @VIDEO_EDITOR_EXPECTED_SWRESAMPLE_PATCH@U;
+
+inline constexpr unsigned kSwscaleMajor = @VIDEO_EDITOR_EXPECTED_SWSCALE_MAJOR@U;
+inline constexpr unsigned kSwscaleMinor = @VIDEO_EDITOR_EXPECTED_SWSCALE_MINOR@U;
+inline constexpr unsigned kSwscalePatch = @VIDEO_EDITOR_EXPECTED_SWSCALE_PATCH@U;
+
+} // namespace video_editor::media::dependency_versions
