@@ -26,6 +26,15 @@ enum class RenderErrorCode : std::uint8_t {
   AssetUnavailable,
   ProviderFailure,
   StaleRequest,
+  GpuUnavailable,
+  GpuInvalidFrame,
+  GpuUploadFailed,
+  GpuRenderFailed,
+  GpuDownloadFailed,
+  GpuPresentationUnavailable,
+  GpuPresentFailed,
+  GpuDeviceLost,
+  GpuUnsupportedTimeline,
 };
 
 struct RenderError {
@@ -37,7 +46,9 @@ template <typename T> struct RenderResult {
   std::optional<T> value;
   std::optional<RenderError> error;
 
-  [[nodiscard]] explicit operator bool() const noexcept { return value.has_value(); }
+  [[nodiscard]] explicit operator bool() const noexcept {
+    return value.has_value();
+  }
   [[nodiscard]] static RenderResult success(T result) {
     return {.value = std::move(result), .error = std::nullopt};
   }
@@ -68,9 +79,10 @@ public:
 
   void begin_epoch(std::uint64_t request_epoch) noexcept;
   [[nodiscard]] std::uint64_t current_epoch() const noexcept;
-  [[nodiscard]] RenderResult<VideoFrame>
-  request_frame(const edit::TimelineSnapshot& snapshot, edit::Time time,
-                const PreviewProfile& profile, std::uint64_t request_epoch) const;
+  [[nodiscard]] RenderResult<VideoFrame> request_frame(const edit::TimelineSnapshot& snapshot,
+                                                       edit::Time time,
+                                                       const PreviewProfile& profile,
+                                                       std::uint64_t request_epoch) const;
 
 private:
   std::shared_ptr<FrameProvider> provider_;
@@ -78,4 +90,3 @@ private:
 };
 
 } // namespace video_editor::render
-

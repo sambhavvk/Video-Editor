@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "video_editor/media_codec/runtime.h"
 
+#include "video_editor/media_codec/dependency_versions.h"
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -26,10 +28,14 @@ LibraryVersion unpack_version(const unsigned version) {
 
 bool has_option(const std::string_view configuration, const std::string_view option) {
   auto lower = std::string(configuration);
-  std::transform(lower.begin(), lower.end(), lower.begin(), [](const unsigned char value) {
-    return static_cast<char>(std::tolower(value));
-  });
+  std::transform(lower.begin(), lower.end(), lower.begin(),
+                 [](const unsigned char value) { return static_cast<char>(std::tolower(value)); });
   return lower.find(option) != std::string::npos;
+}
+
+[[nodiscard]] constexpr bool matches(const LibraryVersion actual, const unsigned major,
+                                     const unsigned minor, const unsigned patch) noexcept {
+  return actual.major == major && actual.minor == minor && actual.patch == patch;
 }
 
 } // namespace
@@ -45,15 +51,17 @@ RuntimeInfo runtime_info() {
       .license = avcodec_license(),
   };
 
-  info.expected_abi = info.avformat.major == 62U && info.avcodec.major == 62U &&
-                      info.avutil.major == 60U && info.swresample.major == 6U &&
-                      info.swscale.major == 9U;
-  info.lgpl_compatible_configuration =
-      !has_option(info.configuration, "--enable-gpl") &&
-      !has_option(info.configuration, "--enable-nonfree") &&
-      info.license.find("LGPL") != std::string::npos;
+  using namespace dependency_versions;
+  info.expected_abi =
+      matches(info.avformat, kAvformatMajor, kAvformatMinor, kAvformatPatch) &&
+      matches(info.avcodec, kAvcodecMajor, kAvcodecMinor, kAvcodecPatch) &&
+      matches(info.avutil, kAvutilMajor, kAvutilMinor, kAvutilPatch) &&
+      matches(info.swresample, kSwresampleMajor, kSwresampleMinor, kSwresamplePatch) &&
+      matches(info.swscale, kSwscaleMajor, kSwscaleMinor, kSwscalePatch);
+  info.lgpl_compatible_configuration = !has_option(info.configuration, "--enable-gpl") &&
+                                       !has_option(info.configuration, "--enable-nonfree") &&
+                                       info.license.find("LGPL") != std::string::npos;
   return info;
 }
 
 } // namespace video_editor::media
-

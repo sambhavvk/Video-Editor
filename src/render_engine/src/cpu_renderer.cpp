@@ -2,7 +2,9 @@
 #include "video_editor/render_engine/cpu_renderer.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <numbers>
 #include <stdexcept>
 
 namespace video_editor::render {
@@ -37,51 +39,111 @@ edit::Time source_time_for(const edit::Clip& clip, const edit::Time timeline_tim
   return clip.reversed ? clip.source_range.end() - offset : clip.source_range.start + offset;
 }
 
-void composite(const CpuFrame& source, CpuFrame& destination, const edit::Clip& clip) {
-  const double scale_x = std::max(std::abs(clip.transform.scale.x), 0.0001);
-  const double scale_y = std::max(std::abs(clip.transform.scale.y), 0.0001);
-  const int displayed_width = std::max(1, static_cast<int>(std::lround(source.width() * scale_x)));
-  const int displayed_height = std::max(1, static_cast<int>(std::lround(source.height() * scale_y)));
-  const int origin_x = ((destination.width() - displayed_width) / 2) +
-                       static_cast<int>(std::lround(clip.transform.position.x));
-  const int origin_y = ((destination.height() - displayed_height) / 2) +
-                       static_cast<int>(std::lround(clip.transform.position.y));
-  const float opacity = static_cast<float>(std::clamp(clip.transform.opacity, 0.0, 1.0));
+[[nodiscard]] bool inside_crop(const int x, const int y, const CpuFrame& source,
+                               const edit::Transform& transform) noexcept {
+  const double pixel_center_x = static_cast<double>(x) + 0.5;
+  const double pixel_center_y = static_cast<double>(y) + 0.5;
+  const double width = static_cast<double>(source.width());
+  const double height = static_cast<double>(source.height());
+  return pixel_center_x >= transform.crop_left * width &&
+         pixel_center_x < (1.0 - transform.crop_right) * width &&
+         pixel_center_y >= transform.crop_top * height &&
+         pixel_center_y < (1.0 - transform.crop_bottom) * height;
+}
 
-  const int crop_left = static_cast<int>(std::clamp(clip.transform.crop_left, 0.0, 1.0) *
-                                         static_cast<double>(displayed_width));
-  const int crop_right = static_cast<int>(std::clamp(clip.transform.crop_right, 0.0, 1.0) *
-                                          static_cast<double>(displayed_width));
-  const int crop_top = static_cast<int>(std::clamp(clip.transform.crop_top, 0.0, 1.0) *
-                                        static_cast<double>(displayed_height));
-  const int crop_bottom = static_cast<int>(std::clamp(clip.transform.crop_bottom, 0.0, 1.0) *
-                                           static_cast<double>(displayed_height));
+[[nodiscard]] std::array<float, 4> sample_bilinear(const CpuFrame& source, const double x,
+                                                   const double y,
+                                                   const edit::Transform& transform) {
+  constexpr double boundary_epsilon = 1.0e-9;
+  const double maximum_x = static_cast<double>(source.width() - 1);
+  const double maximum_y = static_cast<double>(source.height() - 1);
+  if (x < -boundary_epsilon || y < -boundary_epsilon || x > maximum_x + boundary_epsilon ||
+      y > maximum_y + boundary_epsilon) {
+    return {};
+  }
+  const double bounded_x = std::clamp(x, 0.0, maximum_x);
+  const double bounded_y = std::clamp(y, 0.0, maximum_y);
 
-  for (int output_y = crop_top; output_y < displayed_height - crop_bottom; ++output_y) {
-    const int destination_y = origin_y + output_y;
-    if (destination_y < 0 || destination_y >= destination.height()) {
+  const int x0 = static_cast<int>(std::floor(bounded_x));
+  const int y0 = static_cast<int>(std::floor(bounded_y));
+  const int x1 = std::min(x0 + 1, source.width() - 1);
+  const int y1 = std::min(y0 + 1, source.height() - 1);
+  const double fraction_x = bounded_x - static_cast<double>(x0);
+  const double fraction_y = bounded_y - static_cast<double>(y0);
+  const std::array<int, 4> sample_x{x0, x1, x0, x1};
+  const std::array<int, 4> sample_y{y0, y0, y1, y1};
+  const std::array<double, 4> weight{(1.0 - fraction_x) * (1.0 - fraction_y),
+                                     fraction_x * (1.0 - fraction_y),
+                                     (1.0 - fraction_x) * fraction_y, fraction_x * fraction_y};
+  std::array<float, 4> sampled{};
+  for (std::size_t tap = 0; tap < weight.size(); ++tap) {
+    if (!inside_crop(sample_x[tap], sample_y[tap], source, transform)) {
       continue;
     }
-    const int source_y = std::clamp((output_y * source.height()) / displayed_height, 0,
-                                    source.height() - 1);
-    for (int output_x = crop_left; output_x < displayed_width - crop_right; ++output_x) {
-      const int destination_x = origin_x + output_x;
-      if (destination_x < 0 || destination_x >= destination.width()) {
+    const auto pixel = source.pixel(sample_x[tap], sample_y[tap]);
+    for (std::size_t channel = 0; channel < sampled.size(); ++channel) {
+      sampled[channel] += static_cast<float>(static_cast<double>(pixel[channel]) * weight[tap]);
+    }
+  }
+  return sampled;
+}
+
+void blend_premultiplied(const std::array<float, 4>& sampled, const float opacity,
+                         const edit::BlendMode mode, std::span<float, 4> destination) {
+  const float original_source_alpha = std::clamp(sampled[3], 0.0F, 1.0F);
+  const float source_alpha = original_source_alpha * opacity;
+  const float destination_alpha = std::clamp(destination[3], 0.0F, 1.0F);
+  for (std::size_t channel = 0; channel < 3U; ++channel) {
+    const float source_premultiplied = sampled[channel] * opacity;
+    const float source_straight =
+        original_source_alpha > 0.0F
+            ? std::clamp(sampled[channel] / original_source_alpha, 0.0F, 1.0F)
+            : 0.0F;
+    const float destination_straight =
+        destination_alpha > 0.0F ? std::clamp(destination[channel] / destination_alpha, 0.0F, 1.0F)
+                                 : 0.0F;
+    const float blended = blend_channel(mode, source_straight, destination_straight);
+    destination[channel] = std::clamp(((1.0F - source_alpha) * destination[channel]) +
+                                          ((1.0F - destination_alpha) * source_premultiplied) +
+                                          (source_alpha * destination_alpha * blended),
+                                      0.0F, 1.0F);
+  }
+  destination[3] =
+      std::clamp(source_alpha + destination_alpha - (source_alpha * destination_alpha), 0.0F, 1.0F);
+}
+
+void composite(const CpuFrame& source, CpuFrame& destination, const edit::Clip& clip,
+               const std::uint32_t sequence_width, const std::uint32_t sequence_height) {
+  const auto& transform = clip.transform;
+  const double preview_x =
+      static_cast<double>(destination.width()) / static_cast<double>(sequence_width);
+  const double preview_y =
+      static_cast<double>(destination.height()) / static_cast<double>(sequence_height);
+  const double destination_anchor_x =
+      (static_cast<double>(destination.width() - 1) * 0.5) + transform.position.x * preview_x;
+  const double destination_anchor_y =
+      (static_cast<double>(destination.height() - 1) * 0.5) + transform.position.y * preview_y;
+  const double source_anchor_x = transform.anchor_x * static_cast<double>(source.width() - 1);
+  const double source_anchor_y = transform.anchor_y * static_cast<double>(source.height() - 1);
+  const double radians = transform.rotation_degrees * std::numbers::pi / 180.0;
+  const double cosine = std::cos(radians);
+  const double sine = std::sin(radians);
+  const float opacity = static_cast<float>(transform.opacity);
+
+  for (int destination_y = 0; destination_y < destination.height(); ++destination_y) {
+    const double delta_y = static_cast<double>(destination_y) - destination_anchor_y;
+    for (int destination_x = 0; destination_x < destination.width(); ++destination_x) {
+      const double delta_x = static_cast<double>(destination_x) - destination_anchor_x;
+      const double unrotated_x = cosine * delta_x + sine * delta_y;
+      const double unrotated_y = -sine * delta_x + cosine * delta_y;
+      const double source_x = source_anchor_x + unrotated_x / transform.scale.x;
+      const double source_y = source_anchor_y + unrotated_y / transform.scale.y;
+      const auto sampled = sample_bilinear(source, source_x, source_y, transform);
+      if (sampled[3] <= 0.0F || opacity <= 0.0F) {
         continue;
       }
-      const int source_x = std::clamp((output_x * source.width()) / displayed_width, 0,
-                                      source.width() - 1);
-      const auto source_pixel = source.pixel(source_x, source_y);
-      auto destination_pixel = destination.pixel(destination_x, destination_y);
-      const float source_alpha = std::clamp(source_pixel[3] * opacity, 0.0F, 1.0F);
-      const float inverse_alpha = 1.0F - source_alpha;
-      for (std::size_t channel = 0; channel < 3U; ++channel) {
-        const float blended = blend_channel(clip.blend_mode, source_pixel[channel],
-                                            destination_pixel[channel]);
-        destination_pixel[channel] = (blended * source_alpha) +
-                                     (destination_pixel[channel] * inverse_alpha);
-      }
-      destination_pixel[3] = source_alpha + (destination_pixel[3] * inverse_alpha);
+      blend_premultiplied(sampled, opacity, clip.blend_mode,
+                          destination.pixel(destination_x, destination_y));
     }
   }
 }
@@ -103,12 +165,13 @@ std::uint64_t CpuRenderer::current_epoch() const noexcept {
 }
 
 RenderResult<VideoFrame> CpuRenderer::request_frame(const edit::TimelineSnapshot& snapshot,
-                                                     const edit::Time time,
-                                                     const PreviewProfile& profile,
-                                                     const std::uint64_t request_epoch) const {
+                                                    const edit::Time time,
+                                                    const PreviewProfile& profile,
+                                                    const std::uint64_t request_epoch) const {
   if (request_epoch != current_epoch()) {
     return RenderResult<VideoFrame>::failure(
-        {.code = RenderErrorCode::StaleRequest, .message = "render request belongs to a stale epoch"});
+        {.code = RenderErrorCode::StaleRequest,
+         .message = "render request belongs to a stale epoch"});
   }
 
   const edit::Sequence* sequence = nullptr;
@@ -153,7 +216,7 @@ RenderResult<VideoFrame> CpuRenderer::request_frame(const edit::TimelineSnapshot
             {.code = RenderErrorCode::StaleRequest,
              .message = "render request was superseded during decoding"});
       }
-      composite(**source.value, *output, clip);
+      composite(**source.value, *output, clip, sequence->width, sequence->height);
     }
   }
 
@@ -176,4 +239,3 @@ RenderResult<VideoFrame> CpuRenderer::request_frame(const edit::TimelineSnapshot
 }
 
 } // namespace video_editor::render
-

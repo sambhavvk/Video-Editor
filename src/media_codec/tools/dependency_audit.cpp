@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "video_editor/media_codec/runtime.h"
 
+#include "video_editor/media_codec/dependency_versions.h"
+
 #include <iostream>
 #include <string_view>
 
@@ -18,7 +20,11 @@ int main(const int argument_count, char** arguments) {
             << "}\n";
 
   if (!info.expected_abi) {
-    std::cerr << "FFmpeg ABI does not match the pinned 8.1.2 contract.\n";
+    using namespace video_editor::media::dependency_versions;
+    std::cerr << "FFmpeg ABI does not match the pinned " << kFfmpegRelease
+              << " contract (libavformat " << kAvformatMajor << '.' << kAvformatMinor << '.'
+              << kAvformatPatch << ", libavcodec " << kAvcodecMajor << '.' << kAvcodecMinor << '.'
+              << kAvcodecPatch << ").\n";
     return 2;
   }
   if (official && !info.lgpl_compatible_configuration) {
@@ -27,4 +33,3 @@ int main(const int argument_count, char** arguments) {
   }
   return 0;
 }
-
