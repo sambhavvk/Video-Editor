@@ -61,6 +61,7 @@ public:
 
 public slots:
   void setSelectionName(const QString& name);
+  void setClipCapabilities(bool visual, bool audio);
   void setParameter(const QString& parameterId, const QVariant& value);
   void clearSelection();
 
@@ -72,6 +73,9 @@ private:
   QLabel* selection_name_{nullptr};
   QStackedWidget* content_{nullptr};
   QFormLayout* transform_form_{nullptr};
+  QWidget* visual_controls_{nullptr};
+  QWidget* audio_controls_{nullptr};
+  QWidget* advanced_controls_{nullptr};
 };
 
 class EffectsPanelWidget final : public QWidget {
@@ -103,6 +107,7 @@ class AudioMixerWidget final : public QWidget {
 
 public:
   explicit AudioMixerWidget(QWidget* parent = nullptr);
+  void setTracks(const QVector<AudioTrackView>& tracks);
   void setTrackNames(const QStringList& names);
 
 signals:
@@ -126,6 +131,9 @@ signals:
   void transcribeRequested();
   void importCaptionsRequested();
   void exportCaptionsRequested();
+  void addCaptionRequested();
+  void removeCaptionRequested(int row);
+  void captionTextEdited(int row, const QString& text);
   void captionActivated(int row);
   void findInTranscriptRequested(const QString& query);
 

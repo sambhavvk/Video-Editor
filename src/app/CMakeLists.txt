@@ -23,6 +23,7 @@ target_link_libraries(
     video_editor::project_store
     video_editor::project_codec
     video_editor::playback
+    video_editor::audio_render
     video_editor::proxy_service
     video_editor::render_engine
     VideoEditor::ExportService

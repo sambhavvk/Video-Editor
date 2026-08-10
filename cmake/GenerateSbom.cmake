@@ -4,6 +4,10 @@ if(NOT DEFINED VIDEO_EDITOR_SBOM_OUTPUT)
   message(FATAL_ERROR "VIDEO_EDITOR_SBOM_OUTPUT is required")
 endif()
 
+# Keep this generated development SBOM tied to the same dependency contract as
+# CMake configuration and the runtime audit. Do not duplicate version pins.
+include("${CMAKE_CURRENT_LIST_DIR}/DependencyVersions.cmake")
+
 get_filename_component(_sbom_directory "${VIDEO_EDITOR_SBOM_OUTPUT}" DIRECTORY)
 file(MAKE_DIRECTORY "${_sbom_directory}")
 string(TIMESTAMP _created "%Y-%m-%dT%H:%M:%SZ" UTC)
@@ -21,9 +25,10 @@ file(WRITE "${VIDEO_EDITOR_SBOM_OUTPUT}" [=[
   },
   "packages": [
     {"SPDXID":"SPDXRef-VideoEditor","name":"VideoEditor","versionInfo":"0.1.0","licenseConcluded":"MPL-2.0"},
-    {"SPDXID":"SPDXRef-Qt","name":"Qt","versionInfo":"6.11.1","licenseConcluded":"LGPL-3.0-only"},
-    {"SPDXID":"SPDXRef-FFmpeg","name":"FFmpeg","versionInfo":"8.1.2","licenseConcluded":"NOASSERTION"},
-    {"SPDXID":"SPDXRef-libplacebo","name":"libplacebo","versionInfo":"7.360.1","licenseConcluded":"LGPL-2.1-or-later"},
+    {"SPDXID":"SPDXRef-Qt","name":"Qt","versionInfo":"]=] "${VIDEO_EDITOR_QT_VERSION}" [=[","licenseConcluded":"LGPL-3.0-only"},
+    {"SPDXID":"SPDXRef-FFmpeg","name":"FFmpeg","versionInfo":"]=] "${VIDEO_EDITOR_FFMPEG_VERSION}" [=[","licenseConcluded":"NOASSERTION"},
+    {"SPDXID":"SPDXRef-libplacebo","name":"libplacebo","versionInfo":"]=] "${VIDEO_EDITOR_LIBPLACEBO_VERSION}" [=[","licenseConcluded":"LGPL-2.1-or-later"},
+    {"SPDXID":"SPDXRef-miniaudio","name":"miniaudio","versionInfo":"]=] "${VIDEO_EDITOR_MINIAUDIO_VERSION}" [=[","licenseConcluded":"MIT-0"},
     {"SPDXID":"SPDXRef-SQLite","name":"SQLite","versionInfo":"3.53.4","licenseConcluded":"blessing"},
     {"SPDXID":"SPDXRef-Abseil","name":"Abseil","versionInfo":"20250512.1","licenseConcluded":"Apache-2.0"},
     {"SPDXID":"SPDXRef-Protobuf","name":"Protocol Buffers","versionInfo":"35.1","licenseConcluded":"BSD-3-Clause"},

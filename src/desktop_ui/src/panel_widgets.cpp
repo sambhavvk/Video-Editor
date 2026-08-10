@@ -252,6 +252,7 @@ InspectorWidget::InspectorWidget(QWidget* parent) : QWidget(parent) {
 
   auto* essential = new QGroupBox(tr("Essential"), editor);
   essential->setObjectName(QStringLiteral("inspectorEssentialGroup"));
+  visual_controls_ = essential;
   transform_form_ = new QFormLayout(essential);
   transform_form_->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
 
@@ -270,28 +271,81 @@ InspectorWidget::InspectorWidget(QWidget* parent) : QWidget(parent) {
            0, 1);
   addField(tr("Position Y"), QStringLiteral("positionY"), QStringLiteral(" px"), -100'000, 100'000,
            0, 1);
-  addField(tr("Scale"), QStringLiteral("scale"), QStringLiteral(" %"), 0, 2'000, 100, 1);
+  addField(tr("Scale"), QStringLiteral("scale"), QStringLiteral(" %"), 0.01, 2'000, 100, 1);
   addField(tr("Rotation"), QStringLiteral("rotation"), QStringLiteral("°"), -36000, 36000, 0, 0.1);
   addField(tr("Opacity"), QStringLiteral("opacity"), QStringLiteral(" %"), 0, 100, 100, 1);
   editorLayout->addWidget(essential);
 
+  auto* audio = new QGroupBox(tr("Clip audio"), editor);
+  audio->setObjectName(QStringLiteral("inspectorAudioGroup"));
+  audio_controls_ = audio;
+  auto* audioForm = new QFormLayout(audio);
+  const auto addAudioField = [this, audio, audioForm](const QString& label, const QString& id,
+                                                      const QString& suffix, double minimum,
+                                                      double maximum, double value, double step) {
+    auto* field =
+        makeInspectorField(id, suffix, minimum, maximum, value, step, audio,
+                           [this, id](double updated) { emit parameterEdited(id, updated); });
+    audioForm->addRow(label, field);
+  };
+  addAudioField(tr("Gain"), QStringLiteral("audioGain"), QStringLiteral(" dB"), -96, 24, 0, 0.1);
+  addAudioField(tr("Pan"), QStringLiteral("audioPan"), QStringLiteral(" %"), -100, 100, 0, 1);
+  addAudioField(tr("Fade in"), QStringLiteral("fadeIn"), QStringLiteral(" s"), 0, 86'400, 0, 0.01);
+  addAudioField(tr("Fade out"), QStringLiteral("fadeOut"), QStringLiteral(" s"), 0, 86'400, 0,
+                0.01);
+  editorLayout->addWidget(audio);
+
   auto* advanced = new QGroupBox(tr("Advanced controls"), editor);
   advanced->setObjectName(QStringLiteral("inspectorAdvancedGroup"));
+  advanced_controls_ = advanced;
   advanced->setCheckable(true);
   advanced->setChecked(false);
   auto* advancedForm = new QFormLayout(advanced);
+  const auto addAdvancedField =
+      [this, advanced, advancedForm](const QString& label, const QString& id, const QString& suffix,
+                                     const double minimum, const double maximum, const double value,
+                                     const double step) {
+        auto* field =
+            makeInspectorField(id, suffix, minimum, maximum, value, step, advanced,
+                               [this, id](double updated) { emit parameterEdited(id, updated); });
+        auto* keyframe = field->findChild<QToolButton*>(QStringLiteral("keyframe.%1").arg(id));
+        connect(keyframe, &QToolButton::clicked, this,
+                [this, id] { emit keyframeToggleRequested(id); });
+        advancedForm->addRow(label, field);
+      };
+  addAdvancedField(tr("Scale X"), QStringLiteral("scaleX"), QStringLiteral(" %"), 0.01, 100'000,
+                   100, 0.1);
+  addAdvancedField(tr("Scale Y"), QStringLiteral("scaleY"), QStringLiteral(" %"), 0.01, 100'000,
+                   100, 0.1);
+  addAdvancedField(tr("Anchor X"), QStringLiteral("anchorX"), QStringLiteral(" %"), 0, 100, 50,
+                   0.1);
+  addAdvancedField(tr("Anchor Y"), QStringLiteral("anchorY"), QStringLiteral(" %"), 0, 100, 50,
+                   0.1);
+  addAdvancedField(tr("Crop left"), QStringLiteral("cropLeft"), QStringLiteral(" %"), 0, 99.99, 0,
+                   0.1);
+  addAdvancedField(tr("Crop top"), QStringLiteral("cropTop"), QStringLiteral(" %"), 0, 99.99, 0,
+                   0.1);
+  addAdvancedField(tr("Crop right"), QStringLiteral("cropRight"), QStringLiteral(" %"), 0, 99.99, 0,
+                   0.1);
+  addAdvancedField(tr("Crop bottom"), QStringLiteral("cropBottom"), QStringLiteral(" %"), 0, 99.99,
+                   0, 0.1);
   auto* blend = new QComboBox(advanced);
   blend->setObjectName(QStringLiteral("inspector.blendMode"));
   blend->setAccessibleName(tr("Blend mode"));
-  blend->addItems({tr("Normal"), tr("Multiply"), tr("Screen"), tr("Overlay"), tr("Soft Light")});
+  blend->addItem(tr("Normal"), QStringLiteral("normal"));
+  blend->addItem(tr("Add"), QStringLiteral("add"));
+  blend->addItem(tr("Multiply"), QStringLiteral("multiply"));
+  blend->addItem(tr("Screen"), QStringLiteral("screen"));
+  blend->addItem(tr("Overlay"), QStringLiteral("overlay"));
   advancedForm->addRow(tr("Blend mode"), blend);
   auto* interpolation = new QComboBox(advanced);
   interpolation->setObjectName(QStringLiteral("inspector.interpolation"));
   interpolation->setAccessibleName(tr("Keyframe interpolation"));
   interpolation->addItems({tr("Smooth"), tr("Linear"), tr("Hold")});
   advancedForm->addRow(tr("Interpolation"), interpolation);
-  connect(blend, &QComboBox::currentTextChanged, this,
-          [this](const QString& text) { emit parameterEdited(QStringLiteral("blendMode"), text); });
+  connect(blend, &QComboBox::currentIndexChanged, this, [this, blend](const int index) {
+    emit parameterEdited(QStringLiteral("blendMode"), blend->itemData(index));
+  });
   connect(interpolation, &QComboBox::currentTextChanged, this, [this](const QString& text) {
     emit parameterEdited(QStringLiteral("interpolation"), text);
   });
@@ -307,6 +361,12 @@ void InspectorWidget::setSelectionName(const QString& name) {
   content_->setCurrentIndex(name.isEmpty() ? 0 : 1);
 }
 
+void InspectorWidget::setClipCapabilities(const bool visual, const bool audio) {
+  visual_controls_->setVisible(visual);
+  advanced_controls_->setVisible(visual);
+  audio_controls_->setVisible(audio);
+}
+
 void InspectorWidget::setParameter(const QString& parameterId, const QVariant& value) {
   if (auto* spin = findChild<QDoubleSpinBox*>(QStringLiteral("inspector.%1").arg(parameterId))) {
     const QSignalBlocker blocker(spin);
@@ -315,7 +375,12 @@ void InspectorWidget::setParameter(const QString& parameterId, const QVariant& v
   }
   if (auto* combo = findChild<QComboBox*>(QStringLiteral("inspector.%1").arg(parameterId))) {
     const QSignalBlocker blocker(combo);
-    combo->setCurrentText(value.toString());
+    const int data_index = combo->findData(value);
+    if (data_index >= 0) {
+      combo->setCurrentIndex(data_index);
+    } else {
+      combo->setCurrentText(value.toString());
+    }
   }
 }
 
@@ -422,10 +487,19 @@ AudioMixerWidget::AudioMixerWidget(QWidget* parent) : QWidget(parent) {
   scroll->setWidget(strips_);
   layout->addWidget(scroll, 1);
 
-  setTrackNames({tr("A1 Dialogue"), tr("A2 Music"), tr("A3 Effects"), tr("Master")});
+  setTracks({});
 }
 
 void AudioMixerWidget::setTrackNames(const QStringList& names) {
+  QVector<AudioTrackView> tracks;
+  tracks.reserve(names.size());
+  for (const QString& name : names) {
+    tracks.push_back({.displayName = name});
+  }
+  setTracks(tracks);
+}
+
+void AudioMixerWidget::setTracks(const QVector<AudioTrackView>& tracks) {
   delete strips_->layout();
   const auto children = strips_->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly);
   qDeleteAll(children);
@@ -433,16 +507,22 @@ void AudioMixerWidget::setTrackNames(const QStringList& names) {
   auto* layout = new QHBoxLayout(strips_);
   layout->setContentsMargins(0, 0, 0, 0);
   layout->setSpacing(8);
-  for (int index = 0; index < names.size(); ++index) {
-    auto* strip = new QGroupBox(names.at(index), strips_);
+  if (tracks.isEmpty()) {
+    auto* empty = makeMutedLabel(tr("No audio tracks in this sequence."), strips_);
+    empty->setObjectName(QStringLiteral("mixerEmptyState"));
+    layout->addWidget(empty);
+  }
+  for (int index = 0; index < tracks.size(); ++index) {
+    const AudioTrackView& track = tracks.at(index);
+    auto* strip = new QGroupBox(track.displayName, strips_);
     strip->setObjectName(QStringLiteral("mixerStrip.%1").arg(index));
-    strip->setAccessibleName(tr("Mixer strip %1").arg(names.at(index)));
+    strip->setAccessibleName(tr("Mixer strip %1").arg(track.displayName));
     strip->setMinimumWidth(112);
     auto* stripLayout = new QVBoxLayout(strip);
 
     auto* meter = new QProgressBar(strip);
     meter->setObjectName(QStringLiteral("audioMeter.%1").arg(index));
-    meter->setAccessibleName(tr("Level meter for %1").arg(names.at(index)));
+    meter->setAccessibleName(tr("Level meter for %1").arg(track.displayName));
     meter->setOrientation(Qt::Vertical);
     meter->setRange(0, 60);
     meter->setValue(0);
@@ -451,11 +531,13 @@ void AudioMixerWidget::setTrackNames(const QStringList& names) {
 
     auto* fader = new QSlider(Qt::Vertical, strip);
     fader->setObjectName(QStringLiteral("audioFader.%1").arg(index));
-    fader->setAccessibleName(tr("Gain for %1").arg(names.at(index)));
+    fader->setAccessibleName(tr("Gain for %1").arg(track.displayName));
     fader->setRange(-60, 12);
     fader->setValue(0);
     fader->setTickPosition(QSlider::TicksBothSides);
     fader->setTickInterval(12);
+    fader->setEnabled(false);
+    fader->setToolTip(tr("Use the selected audio clip's Inspector for clip gain."));
     stripLayout->addWidget(fader, 2, Qt::AlignHCenter);
 
     auto* value = new QLabel(QStringLiteral("0.0 dB"), strip);
@@ -466,11 +548,15 @@ void AudioMixerWidget::setTrackNames(const QStringList& names) {
     auto* mute = new QToolButton(strip);
     mute->setText(tr("M"));
     mute->setCheckable(true);
-    mute->setAccessibleName(tr("Mute %1").arg(names.at(index)));
+    mute->setObjectName(QStringLiteral("mixerMute.%1").arg(index));
+    mute->setAccessibleName(tr("Mute %1").arg(track.displayName));
+    mute->setChecked(track.muted);
     auto* solo = new QToolButton(strip);
     solo->setText(tr("S"));
     solo->setCheckable(true);
-    solo->setAccessibleName(tr("Solo %1").arg(names.at(index)));
+    solo->setObjectName(QStringLiteral("mixerSolo.%1").arg(index));
+    solo->setAccessibleName(tr("Solo %1").arg(track.displayName));
+    solo->setChecked(track.soloed);
     buttons->addWidget(mute);
     buttons->addWidget(solo);
     stripLayout->addLayout(buttons);
@@ -520,8 +606,12 @@ CaptionsPanelWidget::CaptionsPanelWidget(QWidget* parent) : QWidget(parent) {
   auto* import = new QPushButton(tr("Import captions…"), empty);
   import->setObjectName(QStringLiteral("importCaptionsButton"));
   import->setAccessibleName(tr("Import SRT or WebVTT captions"));
+  auto* emptyAdd = new QPushButton(tr("Add caption at playhead"), empty);
+  emptyAdd->setObjectName(QStringLiteral("emptyAddCaptionButton"));
+  emptyAdd->setAccessibleName(tr("Add a caption at the playhead"));
   emptyLayout->addWidget(transcribe, 0, Qt::AlignHCenter);
   emptyLayout->addWidget(import, 0, Qt::AlignHCenter);
+  emptyLayout->addWidget(emptyAdd, 0, Qt::AlignHCenter);
   emptyLayout->addStretch();
   content_->addWidget(empty);
 
@@ -537,29 +627,57 @@ CaptionsPanelWidget::CaptionsPanelWidget(QWidget* parent) : QWidget(parent) {
   table_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
   table_->verticalHeader()->hide();
   table_->setSelectionBehavior(QAbstractItemView::SelectRows);
+  table_->setSelectionMode(QAbstractItemView::SingleSelection);
   table_->setShowGrid(false);
   tableLayout->addWidget(table_, 1);
+
+  auto* captionActions = new QHBoxLayout;
+  auto* addCaption = new QPushButton(tr("Add at playhead"), tablePage);
+  addCaption->setObjectName(QStringLiteral("addCaptionButton"));
+  addCaption->setAccessibleName(tr("Add a caption at the playhead"));
+  auto* removeCaption = new QPushButton(tr("Delete caption"), tablePage);
+  removeCaption->setObjectName(QStringLiteral("removeCaptionButton"));
+  removeCaption->setAccessibleName(tr("Delete the selected caption"));
   auto* exportCaptions = new QPushButton(tr("Export SRT or WebVTT…"), tablePage);
   exportCaptions->setObjectName(QStringLiteral("exportCaptionsButton"));
   exportCaptions->setAccessibleName(tr("Export sequence captions"));
-  tableLayout->addWidget(exportCaptions, 0, Qt::AlignRight);
+  captionActions->addWidget(addCaption);
+  captionActions->addWidget(removeCaption);
+  captionActions->addStretch();
+  captionActions->addWidget(exportCaptions);
+  tableLayout->addLayout(captionActions);
   content_->addWidget(tablePage);
   layout->addWidget(content_, 1);
 
   connect(transcribe, &QPushButton::clicked, this, &CaptionsPanelWidget::transcribeRequested);
   connect(import, &QPushButton::clicked, this, &CaptionsPanelWidget::importCaptionsRequested);
+  connect(emptyAdd, &QPushButton::clicked, this, &CaptionsPanelWidget::addCaptionRequested);
   connect(exportCaptions, &QPushButton::clicked, this,
           &CaptionsPanelWidget::exportCaptionsRequested);
+  connect(addCaption, &QPushButton::clicked, this, &CaptionsPanelWidget::addCaptionRequested);
+  connect(removeCaption, &QPushButton::clicked, this, [this] {
+    if (table_->currentRow() >= 0) {
+      emit removeCaptionRequested(table_->currentRow());
+    }
+  });
   connect(search_, &QLineEdit::textChanged, this, &CaptionsPanelWidget::findInTranscriptRequested);
   connect(table_, &QTableWidget::cellDoubleClicked, this,
           [this](int row, int) { emit captionActivated(row); });
+  connect(table_, &QTableWidget::cellChanged, this, [this](const int row, const int column) {
+    if (column == 1 && table_->item(row, column) != nullptr) {
+      emit captionTextEdited(row, table_->item(row, column)->text());
+    }
+  });
 }
 
 void CaptionsPanelWidget::setCaptionRows(const QStringList& timecodes, const QStringList& text) {
+  const QSignalBlocker blocker(table_);
   const auto count = std::min(timecodes.size(), text.size());
   table_->setRowCount(count);
   for (int row = 0; row < count; ++row) {
-    table_->setItem(row, 0, new QTableWidgetItem(timecodes.at(row)));
+    auto* time = new QTableWidgetItem(timecodes.at(row));
+    time->setFlags(time->flags() & ~Qt::ItemIsEditable);
+    table_->setItem(row, 0, time);
     table_->setItem(row, 1, new QTableWidgetItem(text.at(row)));
   }
   content_->setCurrentIndex(count == 0 ? 0 : 1);
@@ -599,7 +717,7 @@ DeliverPanelWidget::DeliverPanelWidget(QWidget* parent) : QWidget(parent) {
   auto* summary = new QGroupBox(tr("Summary"), this);
   auto* summaryLayout = new QFormLayout(summary);
   summaryLayout->addRow(tr("Video"), new QLabel(tr("Sequence resolution · Rec.709 SDR"), summary));
-  summaryLayout->addRow(tr("Audio"), new QLabel(tr("Not included in this beta exporter"), summary));
+  summaryLayout->addRow(tr("Audio"), new QLabel(tr("48 kHz stereo PCM · original media"), summary));
   summaryLayout->addRow(tr("Source"), new QLabel(tr("Original media"), summary));
   layout->addWidget(summary);
 

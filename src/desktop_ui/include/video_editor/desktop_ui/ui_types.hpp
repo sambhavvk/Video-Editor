@@ -45,6 +45,12 @@ struct TimelineTrackView {
   bool locked{false};
 };
 
+struct AudioTrackView {
+  QString displayName;
+  bool muted{false};
+  bool soloed{false};
+};
+
 // Times are expressed in the TimelineWidget time scale supplied by the caller.
 // The presentation model intentionally carries no edit-model types so the UI can
 // be integrated before that module is linked.

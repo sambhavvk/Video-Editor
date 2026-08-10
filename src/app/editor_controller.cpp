@@ -2,6 +2,10 @@
 #include "editor_controller.hpp"
 #include "path_utils.hpp"
 
+#include "video_editor/audio_engine/async_realtime_playback.h"
+#include "video_editor/audio_engine/miniaudio_output_device.h"
+#include "video_editor/audio_render/original_audio_registry.h"
+#include "video_editor/audio_render/timeline_audio_renderer.h"
 #include "video_editor/caption_service/caption_service.h"
 #include "video_editor/desktop_ui/editor_window.hpp"
 #include "video_editor/desktop_ui/panel_widgets.hpp"
@@ -15,6 +19,8 @@
 #include "video_editor/proxy_service/proxy_service.h"
 #include "video_editor/render_engine/cpu_renderer.h"
 #include "video_editor/render_engine/frame.h"
+#include "video_editor/render_engine/gpu_backend.h"
+#include "video_editor/render_engine/gpu_timeline_renderer.h"
 
 #include <QtConcurrent/QtConcurrentRun>
 
@@ -113,6 +119,18 @@ std::optional<edit::EntityId> parseId(const QString& text) {
   return edit::EntityId::parse(text.toStdString());
 }
 
+QString gpuBackendName(const render::GpuBackendKind backend) {
+  switch (backend) {
+  case render::GpuBackendKind::D3D11:
+    return QStringLiteral("D3D11");
+  case render::GpuBackendKind::Vulkan:
+    return QStringLiteral("Vulkan");
+  case render::GpuBackendKind::Auto:
+  default:
+    return QStringLiteral("GPU");
+  }
+}
+
 std::vector<std::byte> binaryPayload(const store::JournalEntry& entry) {
   if (const auto* bytes = std::get_if<store::BinaryPayload>(&entry.payload)) {
     return *bytes;
@@ -150,13 +168,70 @@ private:
   std::shared_ptr<playback::FfmpegFrameProvider> provider_;
 };
 
+class TimelinePlaybackAudioProvider final : public audio::PlaybackAudioProvider {
+public:
+  TimelinePlaybackAudioProvider(std::shared_ptr<audio_render::TimelineAudioRenderer> renderer,
+                                edit::TimelineSnapshot snapshot, const std::int64_t endSample)
+      : renderer_(std::move(renderer)), snapshot_(std::move(snapshot)), end_sample_(endSample) {}
+
+  audio::PlaybackRenderResult render(const audio::PlaybackRenderRequest& request) override {
+    if (request.cancellation.stop_requested()) {
+      return audio::PlaybackRenderResult::cancelled("audio pre-render request was cancelled");
+    }
+    if (request.start_sample >= end_sample_) {
+      return audio::PlaybackRenderResult::end_of_stream();
+    }
+    auto rendered = renderer_->render(snapshot_, {.start_sample = request.start_sample,
+                                                  .sample_count = request.sample_count,
+                                                  .cancellation = request.cancellation});
+    if (!rendered) {
+      const auto& error = rendered.error();
+      if (error.code == audio_render::AudioRenderErrorCode::Cancelled) {
+        return audio::PlaybackRenderResult::cancelled(error.message);
+      }
+      return audio::PlaybackRenderResult::failure(error.message);
+    }
+    audio::AudioBlock block = std::move(rendered).value();
+    if (block.start_sample() != request.start_sample ||
+        block.frame_count() != request.sample_count ||
+        block.format().sample_rate != audio::kPlaybackAudioFormat.sample_rate ||
+        block.format().channels != audio::kPlaybackAudioFormat.channels) {
+      return audio::PlaybackRenderResult::failure(
+          "timeline audio renderer returned a block outside the requested 48 kHz stereo range");
+    }
+    return audio::PlaybackRenderResult::ready(std::move(block));
+  }
+
+private:
+  std::shared_ptr<audio_render::TimelineAudioRenderer> renderer_;
+  edit::TimelineSnapshot snapshot_;
+  std::int64_t end_sample_{0};
+};
+
 } // namespace
 
 EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* parent)
     : QObject(parent), window_(window),
       playback_registry_(std::make_shared<playback::AssetRegistry>()),
+      audio_registry_(std::make_shared<audio_render::OriginalAudioRegistry>()),
       frame_provider_(std::make_shared<playback::FfmpegFrameProvider>(playback_registry_)),
       renderer_(std::make_shared<render::CpuRenderer>(frame_provider_)) {
+  if (auto gpu = render::GpuRenderer::create(); gpu != nullptr) {
+    const render::GpuCapabilities capabilities = gpu->capabilities();
+    if (capabilities.available() && capabilities.offscreen_rendering) {
+      gpu_renderer_ = std::shared_ptr<render::GpuRenderer>(std::move(gpu));
+      gpu_timeline_renderer_ =
+          std::make_shared<render::GpuTimelineRenderer>(frame_provider_, gpu_renderer_);
+      window_.programViewer()->setTitle(
+          tr("Program · %1 GPU ready").arg(gpuBackendName(capabilities.backend)));
+    } else {
+      gpu_fallback_latched_ = true;
+      window_.programViewer()->setTitle(tr("Program · CPU"));
+    }
+  } else {
+    gpu_fallback_latched_ = true;
+    window_.programViewer()->setTitle(tr("Program · CPU"));
+  }
   window_.installEventFilter(this);
   connect(&window_, &desktop_ui::EditorWindow::newProjectRequested, this,
           &EditorController::newProject);
@@ -189,6 +264,12 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::chooseCaptionExport);
   connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::captionActivated, this,
           &EditorController::seekCaption);
+  connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::addCaptionRequested, this,
+          &EditorController::addCaptionAtPlayhead);
+  connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::removeCaptionRequested, this,
+          &EditorController::removeCaption);
+  connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::captionTextEdited, this,
+          &EditorController::updateCaptionText);
   connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::findInTranscriptRequested,
           this, &EditorController::searchTranscript);
   connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::transcribeRequested, this,
@@ -198,10 +279,17 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           });
   connect(&window_, &desktop_ui::EditorWindow::exportRequested, this,
           &EditorController::chooseVideoExport);
+  connect(&window_, &desktop_ui::EditorWindow::parameterEdited, this,
+          &EditorController::updateSelectedClipProperty);
+  connect(window_.audioMixer(), &desktop_ui::AudioMixerWidget::muteToggled, this,
+          &EditorController::setAudioTrackMuted);
+  connect(window_.audioMixer(), &desktop_ui::AudioMixerWidget::soloToggled, this,
+          &EditorController::setAudioTrackSolo);
   connect(window_.timeline(), &desktop_ui::TimelineWidget::clipActivated, this,
           [this](const QString& clipId) {
             selected_clip_ = parseId(clipId);
             refreshTimelineView();
+            refreshInspectorView();
           });
   connect(window_.timeline(), &desktop_ui::TimelineWidget::clipEditCommitted, this,
           [this](const QString& clipId, const int destinationTrackIndex, const qint64 startDelta,
@@ -221,6 +309,7 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
 }
 
 EditorController::~EditorController() {
+  stopAudioPlayback();
   export_stop_source_.request_stop();
   for (const auto& [asset_id, cancellation] : proxy_jobs_) {
     Q_UNUSED(asset_id)
@@ -242,6 +331,19 @@ EditorController::~EditorController() {
       // Recovery state remains intentionally unclean when final metadata cannot be written.
     }
   }
+}
+
+std::int64_t EditorController::audioMasterSampleCounter() const noexcept {
+  return audio_playback_ != nullptr ? audio_playback_->sample_counter() : playhead_;
+}
+
+std::uint64_t EditorController::audioXrunCount() const {
+  return audio_playback_ != nullptr ? audio_playback_->diagnostics().playback.xrun_count : 0;
+}
+
+bool EditorController::audioControlPending() const {
+  return audio_playback_ != nullptr &&
+         audio_playback_->diagnostics().latest_status == audio::PlaybackCommandStatus::Pending;
 }
 
 edit::Project EditorController::makeDefaultProject() {
@@ -473,6 +575,7 @@ bool EditorController::loadCheckpoint(const std::filesystem::path& checkpoint) {
 void EditorController::installProject(edit::Project project, std::filesystem::path workingPath,
                                       std::unique_ptr<store::ProjectStore> projectStore,
                                       std::optional<std::filesystem::path> checkpoint) {
+  stopAudioPlayback();
   playback_timer_.stop();
   playback_rate_ = 0.0;
   if (store_) {
@@ -703,6 +806,8 @@ bool EditorController::startVideoExport(const std::filesystem::path& destination
   auto export_provider = std::make_shared<playback::FfmpegFrameProvider>(playback_registry_);
   auto synchronized_provider = std::make_shared<EpochSyncFrameProvider>(export_provider);
   auto export_renderer = std::make_shared<render::CpuRenderer>(synchronized_provider);
+  auto export_audio_renderer =
+      std::make_shared<audio_render::TimelineAudioRenderer>(audio_registry_);
   auto snapshot = std::move(snapshot_result).value();
   const auto output_path = destination;
   const QString output_display = qStringFromPath(destination);
@@ -710,7 +815,8 @@ bool EditorController::startVideoExport(const std::filesystem::path& destination
   const std::stop_token stop_token = export_stop_source_.get_token();
   export_in_flight_ = true;
   window_.deliverPanel()->setExportRunning(true, 0);
-  window_.showTransientMessage(tr("Exporting full-quality frames from original media…"), 0);
+  window_.showTransientMessage(
+      tr("Exporting full-quality video and 48 kHz audio from original media…"), 0);
 
   QPointer<EditorController> guard(this);
   auto* watcher = new QFutureWatcher<VideoExportOutcome>(this);
@@ -721,9 +827,9 @@ bool EditorController::startVideoExport(const std::filesystem::path& destination
             export_in_flight_ = false;
             window_.deliverPanel()->setExportRunning(false, 0);
             if (outcome.succeeded) {
-              const QString message =
-                  tr("Export complete · %1 video frames · audio was not included")
-                      .arg(outcome.frame_count);
+              const QString message = tr("Export complete · %1 video frames · %2 audio samples")
+                                          .arg(outcome.frame_count)
+                                          .arg(outcome.audio_sample_count);
               window_.showTransientMessage(message);
               emit videoExportFinished(true, output_display, message);
             } else if (outcome.cancelled) {
@@ -737,15 +843,17 @@ bool EditorController::startVideoExport(const std::filesystem::path& destination
           });
   auto future = QtConcurrent::run([snapshot = std::move(snapshot),
                                    export_renderer = std::move(export_renderer), output_path,
-                                   preset, stop_token, guard, overwriteExisting]() mutable {
+                                   export_audio_renderer = std::move(export_audio_renderer), preset,
+                                   stop_token, guard, overwriteExisting]() mutable {
     int last_percent = -1;
     export_service::ExportRequest request{
         .snapshot = std::move(snapshot),
         .renderer = std::move(export_renderer),
+        .audio_renderer = std::move(export_audio_renderer),
         .destination = output_path,
         .preset = preset,
         .overwrite_existing = overwriteExisting,
-        .include_audio = false,
+        .include_audio = true,
         .cancellation = stop_token,
         .progress = [guard, &last_percent](const export_service::ExportProgress& progress) {
           const int percent =
@@ -771,11 +879,13 @@ bool EditorController::startVideoExport(const std::filesystem::path& destination
                                 .cancelled = outcome.error().code ==
                                              export_service::ExportErrorCode::Cancelled,
                                 .frame_count = 0,
+                                .audio_sample_count = 0,
                                 .error = QString::fromStdString(outcome.error().message)};
     }
     return VideoExportOutcome{.succeeded = true,
                               .cancelled = false,
                               .frame_count = outcome.value().frame_count,
+                              .audio_sample_count = outcome.value().audio_sample_count,
                               .error = {}};
   });
   export_future_ = future;
@@ -878,6 +988,13 @@ void EditorController::addImportedAsset(assets::AssetRecord asset) {
     }
     if (playback_registry_->register_asset(model_asset.id, std::move(sources))) {
       registered_playback_assets_.push_back(model_asset.id);
+    }
+    if (model_asset.has_audio) {
+      if (audio_registry_->register_original(
+              model_asset.id,
+              audio_render::OriginalAudioMedia{.path = asset.uri, .audio_stream_index = -1})) {
+        registered_audio_assets_.push_back(model_asset.id);
+      }
     }
     imported_assets_.push_back(std::move(asset));
   }
@@ -1193,6 +1310,9 @@ void EditorController::undo() {
     window_.showTransientMessage(QString::fromStdString(result.error().message));
     return;
   }
+  stopAudioPlayback();
+  playback_timer_.stop();
+  playback_rate_ = 0.0;
   try {
     persistSnapshot("history.undo");
     setDirty(true);
@@ -1209,6 +1329,9 @@ void EditorController::redo() {
     window_.showTransientMessage(QString::fromStdString(result.error().message));
     return;
   }
+  stopAudioPlayback();
+  playback_timer_.stop();
+  playback_rate_ = 0.0;
   try {
     persistSnapshot("history.redo");
     setDirty(true);
@@ -1221,6 +1344,28 @@ void EditorController::redo() {
 
 void EditorController::seek(const qint64 position) {
   playhead_ = std::max<qint64>(position, 0);
+  if (audio_playback_ != nullptr && !audio_session_stale_ &&
+      audio_playback_->requested_state() != audio::PlaybackState::Stopped) {
+    const audio::PlaybackCommandReceipt receipt = audio_playback_->request_seek(playhead_);
+    if (receipt.accepted) {
+      audio_control_intent_ = AudioControlIntent::Seek;
+      audio_command_version_ = receipt.version;
+      audio_master_active_ = false;
+      playback_timer_.start();
+    } else {
+      const QString failure = receipt.error.has_value()
+                                  ? QString::fromStdString(receipt.error->message)
+                                  : tr("the audio control queue rejected the seek");
+      stopAudioPlayback();
+      playback_clock_.restart();
+      if (!audio_fallback_announced_) {
+        audio_fallback_announced_ = true;
+        window_.showTransientMessage(
+            tr("Audio device seek failed; continuing with silent timer playback: %1").arg(failure),
+            8'000);
+      }
+    }
+  }
   window_.timeline()->setPlayhead(playhead_);
   requestPreview();
 }
@@ -1228,28 +1373,199 @@ void EditorController::seek(const qint64 position) {
 void EditorController::setPlaybackRate(const double rate) {
   playback_rate_ = rate;
   if (std::abs(playback_rate_) < std::numeric_limits<double>::epsilon()) {
+    audio_start_pending_ = false;
+    if (audio_playback_ != nullptr && !audio_session_stale_ &&
+        audio_playback_->requested_state() != audio::PlaybackState::Stopped) {
+      const audio::PlaybackCommandReceipt receipt = audio_playback_->request_pause();
+      if (receipt.accepted) {
+        audio_control_intent_ = AudioControlIntent::Pause;
+        audio_command_version_ = receipt.version;
+        audio_master_active_ = false;
+        playback_timer_.start();
+        return;
+      }
+      stopAudioPlayback();
+    }
+    audio_master_active_ = false;
     playback_timer_.stop();
     return;
+  }
+
+  if (std::abs(playback_rate_ - 1.0) < std::numeric_limits<double>::epsilon()) {
+    if (audio_playback_ != nullptr && !audio_session_stale_) {
+      const audio::AsyncPlaybackDiagnostics diagnostics = audio_playback_->diagnostics();
+      if (diagnostics.requested_state == audio::PlaybackState::Paused ||
+          diagnostics.effective_state == audio::PlaybackState::Paused) {
+        const audio::PlaybackCommandReceipt receipt = audio_playback_->request_resume();
+        if (receipt.accepted) {
+          audio_control_intent_ = AudioControlIntent::Resume;
+          audio_command_version_ = receipt.version;
+          audio_master_active_ = false;
+          playback_timer_.start();
+          return;
+        }
+        stopAudioPlayback();
+      } else if (diagnostics.effective_state == audio::PlaybackState::Playing &&
+                 diagnostics.playback.device_running) {
+        audio_master_active_ = true;
+        playback_timer_.start();
+        return;
+      }
+    }
+    if (startAudioMasterPlayback()) {
+      playback_timer_.start();
+      return;
+    }
+  } else {
+    if (audio_playback_ != nullptr) {
+      playhead_ = std::max<qint64>(audio_playback_->sample_counter(), 0);
+      window_.timeline()->setPlayhead(playhead_);
+      requestPreview();
+    }
+    stopAudioPlayback();
+    if (!shuttle_silence_announced_) {
+      shuttle_silence_announced_ = true;
+      window_.showTransientMessage(tr("Shuttle playback outside 1× is silent"));
+    }
   }
   playback_clock_.restart();
   playback_timer_.start();
 }
 
 void EditorController::advancePlayback() {
-  const qint64 elapsed_ms = playback_clock_.restart();
-  const auto delta =
-      static_cast<qint64>(std::llround(playback_rate_ * static_cast<double>(kUiTimescale) *
-                                       static_cast<double>(elapsed_ms) / 1000.0));
   const edit::Sequence* sequence = currentSequence();
   if (sequence == nullptr) {
+    stopAudioPlayback();
     playback_timer_.stop();
     return;
   }
   const qint64 end = std::max<qint64>(toUiTime(edit::sequenceDuration(*sequence)), 0);
-  playhead_ = std::clamp(playhead_ + delta, qint64{0}, end);
+  bool audio_clock_applied = false;
+
+  if (audio_start_pending_) {
+    bool ready_to_replace = audio_playback_ == nullptr;
+    if (audio_playback_ != nullptr) {
+      const audio::AsyncPlaybackDiagnostics diagnostics = audio_playback_->diagnostics();
+      ready_to_replace = diagnostics.requested_state == audio::PlaybackState::Stopped &&
+                         diagnostics.latest_status != audio::PlaybackCommandStatus::Pending &&
+                         diagnostics.playback.state == audio::PlaybackState::Stopped;
+    }
+    if (ready_to_replace) {
+      audio_playback_.reset();
+      audio_control_intent_ = AudioControlIntent::None;
+      audio_command_version_ = 0;
+      audio_start_pending_ = false;
+      if (std::abs(playback_rate_ - 1.0) < std::numeric_limits<double>::epsilon() &&
+          startAudioMasterPlayback()) {
+        return;
+      }
+      playback_clock_.restart();
+    } else {
+      return;
+    }
+  }
+
+  if (audio_playback_ != nullptr && audio_control_intent_ != AudioControlIntent::None) {
+    const audio::AsyncPlaybackDiagnostics diagnostics = audio_playback_->diagnostics();
+    const bool matching_result = diagnostics.latest_result_version == audio_command_version_;
+    const bool pending =
+        matching_result && diagnostics.latest_status == audio::PlaybackCommandStatus::Pending;
+    if (pending) {
+      if (audio_control_intent_ == AudioControlIntent::Pause) {
+        playhead_ = std::clamp<qint64>(diagnostics.playback.sample_counter, 0, end);
+        window_.timeline()->setPlayhead(playhead_);
+        requestPreview();
+      }
+      return;
+    }
+
+    if (matching_result && diagnostics.latest_status == audio::PlaybackCommandStatus::Failed) {
+      const QString failure = diagnostics.latest_error.has_value()
+                                  ? QString::fromStdString(diagnostics.latest_error->message)
+                                  : tr("the audio control operation failed");
+      audio_control_intent_ = AudioControlIntent::None;
+      audio_command_version_ = 0;
+      stopAudioPlayback();
+      playback_clock_.restart();
+      if (!audio_fallback_announced_) {
+        audio_fallback_announced_ = true;
+        window_.showTransientMessage(
+            tr("Realtime audio stopped; continuing with silent timer playback: %1").arg(failure),
+            8'000);
+      }
+      if (std::abs(playback_rate_) < std::numeric_limits<double>::epsilon()) {
+        playback_timer_.stop();
+        return;
+      }
+    } else if (matching_result) {
+      const AudioControlIntent completed_intent = audio_control_intent_;
+      audio_control_intent_ = AudioControlIntent::None;
+      audio_command_version_ = 0;
+      playhead_ = std::clamp<qint64>(diagnostics.playback.sample_counter, 0, end);
+      if (diagnostics.effective_state == audio::PlaybackState::Playing &&
+          diagnostics.playback.device_running &&
+          std::abs(playback_rate_ - 1.0) < std::numeric_limits<double>::epsilon()) {
+        audio_master_active_ = true;
+        audio_clock_applied = true;
+        if (!audio_status_announced_) {
+          audio_status_announced_ = true;
+          window_.showTransientMessage(
+              tr("Realtime 48 kHz audio is the latency-compensated playback master clock"));
+        }
+      } else {
+        audio_master_active_ = false;
+        if (completed_intent == AudioControlIntent::Pause ||
+            std::abs(playback_rate_) < std::numeric_limits<double>::epsilon()) {
+          window_.timeline()->setPlayhead(playhead_);
+          requestPreview();
+          playback_timer_.stop();
+          return;
+        }
+      }
+    }
+  }
+
+  if (audio_master_active_ && audio_playback_ != nullptr) {
+    const audio::AsyncPlaybackDiagnostics diagnostics = audio_playback_->diagnostics();
+    const audio::PlaybackDiagnostics& playback = diagnostics.playback;
+    if (playback.state == audio::PlaybackState::Failed || !playback.device_running) {
+      const QString failure = playback.last_error.empty()
+                                  ? tr("the audio device stopped")
+                                  : QString::fromStdString(playback.last_error);
+      playhead_ = std::clamp<qint64>(playback.sample_counter, 0, end);
+      stopAudioPlayback();
+      playback_clock_.restart();
+      if (!audio_fallback_announced_) {
+        audio_fallback_announced_ = true;
+        window_.showTransientMessage(
+            tr("Realtime audio stopped; continuing with silent timer playback: %1").arg(failure),
+            8'000);
+      }
+    } else {
+      playhead_ = std::clamp<qint64>(playback.sample_counter, 0, end);
+      audio_clock_applied = true;
+      if (playback.xrun_count > last_audio_xrun_count_) {
+        if (last_audio_xrun_count_ == 0) {
+          window_.showTransientMessage(
+              tr("Audio playback underrun detected; consider proxies or a larger audio buffer"),
+              8'000);
+        }
+        last_audio_xrun_count_ = playback.xrun_count;
+      }
+    }
+  }
+
+  if (!audio_clock_applied) {
+    const qint64 elapsed_ms = playback_clock_.restart();
+    const auto delta =
+        static_cast<qint64>(std::llround(playback_rate_ * static_cast<double>(kUiTimescale) *
+                                         static_cast<double>(elapsed_ms) / 1000.0));
+    playhead_ = std::clamp(playhead_ + delta, qint64{0}, end);
+  }
   window_.timeline()->setPlayhead(playhead_);
   requestPreview();
   if ((playback_rate_ > 0.0 && playhead_ >= end) || (playback_rate_ < 0.0 && playhead_ <= 0)) {
+    stopAudioPlayback();
     playback_timer_.stop();
     playback_rate_ = 0.0;
   }
@@ -1268,9 +1584,242 @@ void EditorController::seekCaption(const int visibleRow) {
   }
 }
 
+void EditorController::addCaptionAtPlayhead() {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    return;
+  }
+  edit::Caption caption;
+  caption.range = edit::TimeRange(playheadTime(), edit::Time(2, 1));
+  caption.text = "New caption";
+  if (apply(edit::EditCommand{.operation = edit::AddCaptionCommand{.sequence_id = sequence->id,
+                                                                   .caption = std::move(caption)},
+                              .coalescing_key = {}},
+            tr("Could not add caption"))) {
+    refreshCaptionView();
+  }
+}
+
+void EditorController::removeCaption(const int visibleRow) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || visibleRow < 0 ||
+      static_cast<std::size_t>(visibleRow) >= visible_caption_indices_.size()) {
+    return;
+  }
+  const std::size_t caption_index =
+      visible_caption_indices_.at(static_cast<std::size_t>(visibleRow));
+  if (caption_index >= sequence->captions.size()) {
+    return;
+  }
+  (void)apply(edit::EditCommand{.operation =
+                                    edit::RemoveCaptionCommand{
+                                        .sequence_id = sequence->id,
+                                        .caption_id = sequence->captions[caption_index].id},
+                                .coalescing_key = {}},
+              tr("Could not delete caption"));
+}
+
+void EditorController::updateCaptionText(const int visibleRow, const QString& text) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || visibleRow < 0 ||
+      static_cast<std::size_t>(visibleRow) >= visible_caption_indices_.size()) {
+    refreshCaptionView();
+    return;
+  }
+  const std::size_t caption_index =
+      visible_caption_indices_.at(static_cast<std::size_t>(visibleRow));
+  if (caption_index >= sequence->captions.size()) {
+    refreshCaptionView();
+    return;
+  }
+  const QString normalized = text.trimmed();
+  if (normalized.isEmpty()) {
+    window_.showTransientMessage(tr("Caption text cannot be empty"));
+    refreshCaptionView();
+    return;
+  }
+  edit::Caption caption = sequence->captions[caption_index];
+  if (caption.text == normalized.toStdString()) {
+    return;
+  }
+  caption.text = normalized.toStdString();
+  (void)apply(
+      edit::EditCommand{.operation = edit::UpdateCaptionCommand{.sequence_id = sequence->id,
+                                                                .caption = std::move(caption)},
+                        .coalescing_key = {}},
+      tr("Could not update caption"));
+}
+
 void EditorController::searchTranscript(const QString& query) {
   caption_search_ = query.trimmed();
   refreshCaptionView();
+}
+
+void EditorController::updateSelectedClipProperty(const QString& parameterId,
+                                                  const QVariant& value) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || !selected_clip_.has_value()) {
+    window_.showTransientMessage(tr("Select a clip before changing its properties"));
+    return;
+  }
+  const edit::Clip* selected = edit::findClip(*sequence, *selected_clip_);
+  if (selected == nullptr) {
+    selected_clip_.reset();
+    refreshInspectorView();
+    window_.showTransientMessage(tr("The selected clip is no longer available"));
+    return;
+  }
+
+  const std::string coalescing_key =
+      "inspector:" + selected->id.toString() + ":" + parameterId.toStdString();
+  if (parameterId == QStringLiteral("positionX") || parameterId == QStringLiteral("positionY") ||
+      parameterId == QStringLiteral("scale") || parameterId == QStringLiteral("scaleX") ||
+      parameterId == QStringLiteral("scaleY") || parameterId == QStringLiteral("rotation") ||
+      parameterId == QStringLiteral("opacity") || parameterId == QStringLiteral("anchorX") ||
+      parameterId == QStringLiteral("anchorY") || parameterId == QStringLiteral("cropLeft") ||
+      parameterId == QStringLiteral("cropTop") || parameterId == QStringLiteral("cropRight") ||
+      parameterId == QStringLiteral("cropBottom")) {
+    edit::Transform transform = selected->transform;
+    if (parameterId == QStringLiteral("positionX")) {
+      transform.position.x = value.toDouble();
+    } else if (parameterId == QStringLiteral("positionY")) {
+      transform.position.y = value.toDouble();
+    } else if (parameterId == QStringLiteral("scale")) {
+      const double uniform_scale = value.toDouble() / 100.0;
+      transform.scale = {uniform_scale, uniform_scale};
+    } else if (parameterId == QStringLiteral("scaleX")) {
+      transform.scale.x = value.toDouble() / 100.0;
+    } else if (parameterId == QStringLiteral("scaleY")) {
+      transform.scale.y = value.toDouble() / 100.0;
+    } else if (parameterId == QStringLiteral("rotation")) {
+      transform.rotation_degrees = value.toDouble();
+    } else if (parameterId == QStringLiteral("opacity")) {
+      transform.opacity = value.toDouble() / 100.0;
+    } else if (parameterId == QStringLiteral("anchorX")) {
+      transform.anchor_x = value.toDouble() / 100.0;
+    } else if (parameterId == QStringLiteral("anchorY")) {
+      transform.anchor_y = value.toDouble() / 100.0;
+    } else if (parameterId == QStringLiteral("cropLeft")) {
+      transform.crop_left = value.toDouble() / 100.0;
+    } else if (parameterId == QStringLiteral("cropTop")) {
+      transform.crop_top = value.toDouble() / 100.0;
+    } else if (parameterId == QStringLiteral("cropRight")) {
+      transform.crop_right = value.toDouble() / 100.0;
+    } else if (parameterId == QStringLiteral("cropBottom")) {
+      transform.crop_bottom = value.toDouble() / 100.0;
+    }
+    (void)apply(
+        edit::EditCommand{.operation = edit::SetClipTransformCommand{.sequence_id = sequence->id,
+                                                                     .clip_id = selected->id,
+                                                                     .transform = transform},
+                          .coalescing_key = coalescing_key},
+        tr("Could not update the selected clip"));
+    return;
+  }
+
+  if (parameterId == QStringLiteral("blendMode")) {
+    const QString mode_id = value.toString();
+    edit::BlendMode mode = edit::BlendMode::Normal;
+    if (mode_id == QStringLiteral("add")) {
+      mode = edit::BlendMode::Add;
+    } else if (mode_id == QStringLiteral("multiply")) {
+      mode = edit::BlendMode::Multiply;
+    } else if (mode_id == QStringLiteral("screen")) {
+      mode = edit::BlendMode::Screen;
+    } else if (mode_id == QStringLiteral("overlay")) {
+      mode = edit::BlendMode::Overlay;
+    }
+    (void)apply(
+        edit::EditCommand{.operation = edit::SetClipBlendModeCommand{.sequence_id = sequence->id,
+                                                                     .clip_id = selected->id,
+                                                                     .blend_mode = mode},
+                          .coalescing_key = coalescing_key},
+        tr("Could not update the selected clip blend mode"));
+    return;
+  }
+
+  if (parameterId == QStringLiteral("audioGain") || parameterId == QStringLiteral("audioPan") ||
+      parameterId == QStringLiteral("fadeIn") || parameterId == QStringLiteral("fadeOut")) {
+    double gain_db = selected->audio_gain_db;
+    double pan = selected->audio_pan;
+    edit::Time fade_in = selected->fade_in;
+    edit::Time fade_out = selected->fade_out;
+    if (parameterId == QStringLiteral("audioGain")) {
+      gain_db = value.toDouble();
+    } else if (parameterId == QStringLiteral("audioPan")) {
+      pan = value.toDouble() / 100.0;
+    } else {
+      const edit::Time fade_samples(
+          static_cast<std::int64_t>(std::llround(value.toDouble() * 48'000.0)), 48'000);
+      if (parameterId == QStringLiteral("fadeIn")) {
+        fade_in = fade_samples;
+      } else {
+        fade_out = fade_samples;
+      }
+    }
+    (void)apply(
+        edit::EditCommand{.operation =
+                              edit::SetClipAudioPropertiesCommand{.sequence_id = sequence->id,
+                                                                  .clip_id = selected->id,
+                                                                  .gain_db = gain_db,
+                                                                  .pan = pan,
+                                                                  .fade_in = fade_in,
+                                                                  .fade_out = fade_out},
+                          .coalescing_key = coalescing_key},
+        tr("Could not update the selected clip audio"));
+  }
+}
+
+void EditorController::setAudioTrackMuted(const int trackIndex, const bool muted) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || trackIndex < 0) {
+    refreshMixerView();
+    return;
+  }
+  int audio_index = 0;
+  for (const edit::Track& track : sequence->tracks) {
+    if (track.kind != edit::TrackKind::Audio) {
+      continue;
+    }
+    if (audio_index++ != trackIndex) {
+      continue;
+    }
+    (void)apply(
+        edit::EditCommand{.operation = edit::SetTrackAudioStateCommand{.sequence_id = sequence->id,
+                                                                       .track_id = track.id,
+                                                                       .muted = muted,
+                                                                       .solo = track.solo},
+                          .coalescing_key = "mixer:" + track.id.toString() + ":mute"},
+        tr("Could not update track mute"));
+    return;
+  }
+  refreshMixerView();
+}
+
+void EditorController::setAudioTrackSolo(const int trackIndex, const bool soloed) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || trackIndex < 0) {
+    refreshMixerView();
+    return;
+  }
+  int audio_index = 0;
+  for (const edit::Track& track : sequence->tracks) {
+    if (track.kind != edit::TrackKind::Audio) {
+      continue;
+    }
+    if (audio_index++ != trackIndex) {
+      continue;
+    }
+    (void)apply(
+        edit::EditCommand{.operation = edit::SetTrackAudioStateCommand{.sequence_id = sequence->id,
+                                                                       .track_id = track.id,
+                                                                       .muted = track.muted,
+                                                                       .solo = soloed},
+                          .coalescing_key = "mixer:" + track.id.toString() + ":solo"},
+        tr("Could not update track solo"));
+    return;
+  }
+  refreshMixerView();
 }
 
 void EditorController::persistSnapshot(const std::string_view reason) {
@@ -1290,6 +1839,9 @@ bool EditorController::apply(edit::EditCommand command, const QString& failureCo
         failureContext, QString::fromStdString(result.error().message)));
     return false;
   }
+  stopAudioPlayback();
+  playback_timer_.stop();
+  playback_rate_ = 0.0;
   try {
     persistSnapshot("edit.command");
   } catch (const std::exception& exception) {
@@ -1328,6 +1880,9 @@ bool EditorController::applyBatch(std::vector<edit::EditCommand> commands,
     }
     ++applied_count;
   }
+  stopAudioPlayback();
+  playback_timer_.stop();
+  playback_rate_ = 0.0;
   try {
     persistSnapshot("edit.batch");
   } catch (const std::exception& exception) {
@@ -1353,6 +1908,8 @@ void EditorController::refreshViews() {
       export_in_flight_ || (sequence != nullptr && !edit::sequenceDuration(*sequence).isZero()));
   refreshMediaView();
   refreshTimelineView();
+  refreshInspectorView();
+  refreshMixerView();
   refreshCaptionView();
   requestPreview();
 }
@@ -1438,6 +1995,79 @@ void EditorController::refreshTimelineView() {
   window_.programViewer()->setTimecode(timecodeText(playhead_, sequence->frame_rate));
 }
 
+void EditorController::refreshInspectorView() {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || !selected_clip_.has_value()) {
+    window_.inspector()->clearSelection();
+    return;
+  }
+  const edit::Clip* clip = edit::findClip(*sequence, *selected_clip_);
+  if (clip == nullptr) {
+    selected_clip_.reset();
+    window_.inspector()->clearSelection();
+    return;
+  }
+
+  window_.inspector()->setSelectionName(QString::fromStdString(clip->name));
+  window_.inspector()->setClipCapabilities(clip->kind == edit::ClipKind::Video ||
+                                               clip->kind == edit::ClipKind::Title,
+                                           clip->kind == edit::ClipKind::Audio);
+  window_.inspector()->setParameter(QStringLiteral("positionX"), clip->transform.position.x);
+  window_.inspector()->setParameter(QStringLiteral("positionY"), clip->transform.position.y);
+  window_.inspector()->setParameter(QStringLiteral("scale"), clip->transform.scale.x * 100.0);
+  window_.inspector()->setParameter(QStringLiteral("scaleX"), clip->transform.scale.x * 100.0);
+  window_.inspector()->setParameter(QStringLiteral("scaleY"), clip->transform.scale.y * 100.0);
+  window_.inspector()->setParameter(QStringLiteral("rotation"), clip->transform.rotation_degrees);
+  window_.inspector()->setParameter(QStringLiteral("opacity"), clip->transform.opacity * 100.0);
+  window_.inspector()->setParameter(QStringLiteral("anchorX"), clip->transform.anchor_x * 100.0);
+  window_.inspector()->setParameter(QStringLiteral("anchorY"), clip->transform.anchor_y * 100.0);
+  window_.inspector()->setParameter(QStringLiteral("cropLeft"), clip->transform.crop_left * 100.0);
+  window_.inspector()->setParameter(QStringLiteral("cropTop"), clip->transform.crop_top * 100.0);
+  window_.inspector()->setParameter(QStringLiteral("cropRight"),
+                                    clip->transform.crop_right * 100.0);
+  window_.inspector()->setParameter(QStringLiteral("cropBottom"),
+                                    clip->transform.crop_bottom * 100.0);
+  const QString blend_mode = [clip] {
+    switch (clip->blend_mode) {
+    case edit::BlendMode::Add:
+      return QStringLiteral("add");
+    case edit::BlendMode::Multiply:
+      return QStringLiteral("multiply");
+    case edit::BlendMode::Screen:
+      return QStringLiteral("screen");
+    case edit::BlendMode::Overlay:
+      return QStringLiteral("overlay");
+    case edit::BlendMode::Normal:
+    default:
+      return QStringLiteral("normal");
+    }
+  }();
+  window_.inspector()->setParameter(QStringLiteral("blendMode"), blend_mode);
+  window_.inspector()->setParameter(QStringLiteral("audioGain"), clip->audio_gain_db);
+  window_.inspector()->setParameter(QStringLiteral("audioPan"), clip->audio_pan * 100.0);
+  window_.inspector()->setParameter(QStringLiteral("fadeIn"),
+                                    static_cast<double>(clip->fade_in.value()) /
+                                        static_cast<double>(clip->fade_in.timescale()));
+  window_.inspector()->setParameter(QStringLiteral("fadeOut"),
+                                    static_cast<double>(clip->fade_out.value()) /
+                                        static_cast<double>(clip->fade_out.timescale()));
+}
+
+void EditorController::refreshMixerView() {
+  QVector<desktop_ui::AudioTrackView> tracks;
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence != nullptr) {
+    for (const edit::Track& track : sequence->tracks) {
+      if (track.kind == edit::TrackKind::Audio) {
+        tracks.push_back({.displayName = QString::fromStdString(track.name),
+                          .muted = track.muted,
+                          .soloed = track.solo});
+      }
+    }
+  }
+  window_.audioMixer()->setTracks(tracks);
+}
+
 void EditorController::refreshCaptionView() {
   const edit::Sequence* sequence = currentSequence();
   visible_caption_indices_.clear();
@@ -1487,6 +2117,10 @@ void EditorController::rebuildPlaybackRegistry() {
     frame_provider_->invalidate(id);
   }
   registered_playback_assets_.clear();
+  for (const edit::EntityId& id : registered_audio_assets_) {
+    (void)audio_registry_->unregister_asset(id);
+  }
+  registered_audio_assets_.clear();
   if (!editor_) {
     return;
   }
@@ -1498,6 +2132,114 @@ void EditorController::rebuildPlaybackRegistry() {
     if (playback_registry_->register_asset(asset.id, std::move(sources))) {
       registered_playback_assets_.push_back(asset.id);
     }
+    if (asset.has_audio) {
+      if (audio_registry_->register_original(
+              asset.id,
+              audio_render::OriginalAudioMedia{.path = pathFromUtf8String(asset.source_uri),
+                                               .audio_stream_index = -1})) {
+        registered_audio_assets_.push_back(asset.id);
+      }
+    }
+  }
+}
+
+bool EditorController::startAudioMasterPlayback() {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || !audio::MiniaudioOutputDevice::available()) {
+    if (!audio_fallback_announced_) {
+      audio_fallback_announced_ = true;
+      window_.showTransientMessage(
+          tr("The realtime audio-device adapter is unavailable; playback will be silent"), 8'000);
+    }
+    return false;
+  }
+
+  if (audio_playback_ != nullptr) {
+    const audio::AsyncPlaybackDiagnostics diagnostics = audio_playback_->diagnostics();
+    const bool stopped = diagnostics.requested_state == audio::PlaybackState::Stopped &&
+                         diagnostics.latest_status != audio::PlaybackCommandStatus::Pending &&
+                         diagnostics.playback.state == audio::PlaybackState::Stopped;
+    if (!stopped) {
+      static_cast<void>(audio_playback_->request_stop());
+      audio_master_active_ = false;
+      audio_session_stale_ = true;
+      audio_control_intent_ = AudioControlIntent::None;
+      audio_command_version_ = 0;
+      audio_start_pending_ = true;
+      return true;
+    }
+    audio_playback_.reset();
+  }
+
+  auto snapshot_result = editor_->snapshot(sequence->id, editor_->revision());
+  if (!snapshot_result) {
+    return false;
+  }
+
+  try {
+    edit::TimelineSnapshot snapshot = std::move(snapshot_result).value();
+    const std::int64_t end_sample =
+        snapshot.duration()
+            .rescaledTo(audio::kPlaybackAudioFormat.sample_rate, edit::RoundingMode::Ceil)
+            .value();
+    if (playhead_ < 0 || playhead_ >= end_sample) {
+      return false;
+    }
+
+    auto timeline_renderer = std::make_shared<audio_render::TimelineAudioRenderer>(audio_registry_);
+    auto provider = std::make_shared<TimelinePlaybackAudioProvider>(
+        std::move(timeline_renderer), std::move(snapshot), end_sample);
+    audio::RealtimePlaybackConfiguration configuration{
+        .ring_capacity_frames = 192'000,
+        .render_block_frames = 24'000,
+        .prefill_frames = 48'000,
+        .prefill_timeout = std::chrono::milliseconds(2'000),
+    };
+    auto candidate = std::make_unique<audio::AsyncRealtimeAudioPlayback>(
+        std::move(provider), configuration, std::make_unique<audio::MiniaudioOutputDevice>());
+    const audio::PlaybackCommandReceipt receipt = candidate->request_start(playhead_);
+    if (!receipt.accepted) {
+      const QString failure = receipt.error.has_value()
+                                  ? QString::fromStdString(receipt.error->message)
+                                  : tr("the audio control queue rejected the start request");
+      if (!audio_fallback_announced_) {
+        audio_fallback_announced_ = true;
+        window_.showTransientMessage(
+            tr("Could not start realtime audio; using silent timer playback: %1").arg(failure),
+            8'000);
+      }
+      return false;
+    }
+
+    audio_playback_ = std::move(candidate);
+    audio_master_active_ = false;
+    audio_start_pending_ = false;
+    audio_session_stale_ = false;
+    audio_control_intent_ = AudioControlIntent::Start;
+    audio_command_version_ = receipt.version;
+    last_audio_xrun_count_ = 0;
+    return true;
+  } catch (const std::exception& exception) {
+    if (!audio_fallback_announced_) {
+      audio_fallback_announced_ = true;
+      window_.showTransientMessage(
+          tr("Could not prepare realtime audio; using silent timer playback: %1")
+              .arg(QString::fromUtf8(exception.what())),
+          8'000);
+    }
+    return false;
+  }
+}
+
+void EditorController::stopAudioPlayback() noexcept {
+  audio_master_active_ = false;
+  audio_start_pending_ = false;
+  audio_session_stale_ = true;
+  audio_control_intent_ = AudioControlIntent::None;
+  audio_command_version_ = 0;
+  last_audio_xrun_count_ = 0;
+  if (audio_playback_ != nullptr) {
+    static_cast<void>(audio_playback_->request_stop());
   }
 }
 
@@ -1512,13 +2254,20 @@ void EditorController::requestPreview() {
       })) {
     ++preview_epoch_;
     renderer_->begin_epoch(preview_epoch_);
+    if (gpu_timeline_renderer_ != nullptr) {
+      gpu_timeline_renderer_->begin_epoch(preview_epoch_);
+    }
     frame_provider_->begin_epoch(preview_epoch_);
+    gpu_preview_active_ = false;
     window_.programViewer()->clearFrame();
     return;
   }
   requested_preview_position_ = playhead_;
   ++preview_epoch_;
   renderer_->begin_epoch(preview_epoch_);
+  if (gpu_timeline_renderer_ != nullptr) {
+    gpu_timeline_renderer_->begin_epoch(preview_epoch_);
+  }
   frame_provider_->begin_epoch(preview_epoch_);
   if (!preview_in_flight_) {
     launchPreviewRequest();
@@ -1541,6 +2290,8 @@ void EditorController::launchPreviewRequest() {
                                   static_cast<std::uint32_t>(kUiTimescale));
   auto snapshot = std::move(snapshot_result).value();
   const auto renderer = renderer_;
+  const auto gpu_renderer = gpu_fallback_latched_ ? nullptr : gpu_renderer_;
+  const auto gpu_timeline_renderer = gpu_fallback_latched_ ? nullptr : gpu_timeline_renderer_;
   preview_in_flight_ = true;
 
   auto* watcher = new QFutureWatcher<PreviewOutcome>(this);
@@ -1549,6 +2300,31 @@ void EditorController::launchPreviewRequest() {
     watcher->deleteLater();
     preview_in_flight_ = false;
     if (outcome.epoch == preview_epoch_) {
+      gpu_preview_active_ = outcome.gpu_used;
+      if (outcome.gpu_failed && !gpu_fallback_latched_) {
+        gpu_fallback_latched_ = true;
+        gpu_timeline_renderer_.reset();
+        gpu_renderer_.reset();
+        window_.programViewer()->setTitle(tr("Program · CPU fallback"));
+        window_.showTransientMessage(
+            tr("GPU preview failed; using the CPU renderer for this session: %1")
+                .arg(outcome.gpu_diagnostic),
+            8'000);
+      } else if (outcome.gpu_used) {
+        window_.programViewer()->setTitle(tr("Program · %1 GPU").arg(outcome.gpu_backend));
+        if (!gpu_status_announced_) {
+          gpu_status_announced_ = true;
+          window_.showTransientMessage(
+              tr("GPU preview active through libplacebo (%1)").arg(outcome.gpu_backend));
+        }
+      } else if (!outcome.gpu_used && !outcome.gpu_failed && !outcome.gpu_diagnostic.isEmpty() &&
+                 outcome.gpu_backend != QStringLiteral("CPU")) {
+        // Unsupported timeline features fall back for this frame only. Keep
+        // the ready backend visible without claiming that the displayed image
+        // was GPU-rendered.
+        window_.programViewer()->setTitle(
+            tr("Program · CPU frame · %1 GPU ready").arg(outcome.gpu_backend));
+      }
       if (!outcome.image.isNull()) {
         window_.programViewer()->setFrame(outcome.image);
       } else if (!outcome.error.isEmpty()) {
@@ -1560,23 +2336,91 @@ void EditorController::launchPreviewRequest() {
       launchPreviewRequest();
     }
   });
-  watcher->setFuture(QtConcurrent::run([renderer, snapshot = std::move(snapshot), requested_time,
+  watcher->setFuture(QtConcurrent::run([renderer, gpu_renderer, gpu_timeline_renderer,
+                                        snapshot = std::move(snapshot), requested_time,
                                         epoch]() mutable {
     const render::PreviewProfile profile{
         .scale = render::PreviewScale::Half, .bypass_expensive_effects = true, .use_proxies = true};
-    auto result = renderer->request_frame(snapshot, requested_time, profile, epoch);
-    if (!result) {
-      return PreviewOutcome{
-          .epoch = epoch, .image = {}, .error = QString::fromStdString(result.error->message)};
-    }
-    const auto* cpu = std::get_if<std::shared_ptr<const render::CpuFrame>>(&result.value->storage);
-    if (cpu == nullptr || !*cpu) {
+    const auto cpu_fallback = [&](QString backend, QString diagnostic,
+                                  const bool gpu_failed) -> PreviewOutcome {
+      auto result = renderer->request_frame(snapshot, requested_time, profile, epoch);
+      if (!result) {
+        return PreviewOutcome{.epoch = epoch,
+                              .image = {},
+                              .error = QString::fromStdString(result.error->message),
+                              .gpu_backend = std::move(backend),
+                              .gpu_diagnostic = std::move(diagnostic),
+                              .gpu_used = false,
+                              .gpu_failed = gpu_failed};
+      }
+      const auto* cpu =
+          std::get_if<std::shared_ptr<const render::CpuFrame>>(&result.value->storage);
+      if (cpu == nullptr || !*cpu) {
+        return PreviewOutcome{.epoch = epoch,
+                              .image = {},
+                              .error = QObject::tr("CPU preview returned unsupported storage"),
+                              .gpu_backend = std::move(backend),
+                              .gpu_diagnostic = std::move(diagnostic),
+                              .gpu_used = false,
+                              .gpu_failed = gpu_failed};
+      }
       return PreviewOutcome{.epoch = epoch,
-                            .image = {},
-                            .error = QObject::tr("Preview returned an unsupported GPU frame")};
+                            .image = EditorController::displayImage(**cpu),
+                            .error = {},
+                            .gpu_backend = std::move(backend),
+                            .gpu_diagnostic = std::move(diagnostic),
+                            .gpu_used = false,
+                            .gpu_failed = gpu_failed};
+    };
+
+    if (gpu_renderer != nullptr && gpu_timeline_renderer != nullptr) {
+      const render::GpuCapabilities capabilities = gpu_renderer->capabilities();
+      const QString backend = gpuBackendName(capabilities.backend);
+      if (!capabilities.available() || !capabilities.offscreen_rendering) {
+        return cpu_fallback(backend, QString::fromStdString(capabilities.diagnostic), true);
+      }
+
+      auto gpu_frame =
+          gpu_timeline_renderer->request_frame(snapshot, requested_time, profile, epoch);
+      if (gpu_frame) {
+        auto downloaded = gpu_renderer->download(*gpu_frame.value);
+        if (downloaded) {
+          const auto* gpu_cpu =
+              std::get_if<std::shared_ptr<const render::CpuFrame>>(&downloaded.value->storage);
+          if (gpu_cpu != nullptr && *gpu_cpu) {
+            return PreviewOutcome{.epoch = epoch,
+                                  .image = EditorController::displayImage(**gpu_cpu),
+                                  .error = {},
+                                  .gpu_backend = backend,
+                                  .gpu_diagnostic = {},
+                                  .gpu_used = true,
+                                  .gpu_failed = false};
+          }
+        }
+        const QString failure = downloaded.error.has_value()
+                                    ? QString::fromStdString(downloaded.error->message)
+                                    : QObject::tr("GPU readback returned no CPU frame");
+        return cpu_fallback(backend, failure, true);
+      }
+
+      const render::RenderError& failure = *gpu_frame.error;
+      if (failure.code == render::RenderErrorCode::StaleRequest) {
+        return PreviewOutcome{.epoch = epoch,
+                              .image = {},
+                              .error = QString::fromStdString(failure.message),
+                              .gpu_backend = backend,
+                              .gpu_diagnostic = {},
+                              .gpu_used = false,
+                              .gpu_failed = false};
+      }
+      const bool should_latch = failure.code == render::RenderErrorCode::GpuUnavailable ||
+                                failure.code == render::RenderErrorCode::GpuUploadFailed ||
+                                failure.code == render::RenderErrorCode::GpuRenderFailed ||
+                                failure.code == render::RenderErrorCode::GpuDownloadFailed ||
+                                failure.code == render::RenderErrorCode::GpuDeviceLost;
+      return cpu_fallback(backend, QString::fromStdString(failure.message), should_latch);
     }
-    return PreviewOutcome{
-        .epoch = epoch, .image = EditorController::displayImage(**cpu), .error = {}};
+    return cpu_fallback(QStringLiteral("CPU"), {}, false);
   }));
 }
 
