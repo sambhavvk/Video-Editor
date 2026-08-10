@@ -23,6 +23,7 @@ target_include_directories(
 target_link_libraries(
   video_editor_export_service
   PUBLIC
+    video_editor::audio_render
     video_editor_render_engine
     video_editor_edit_model
     video_editor::project_options

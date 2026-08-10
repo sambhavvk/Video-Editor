@@ -2,6 +2,7 @@
 #include "video_editor/edit_model/timeline_editor.h"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <mutex>
 #include <stdexcept>
@@ -84,6 +85,88 @@ void sortClips(Track& track) {
   });
 }
 
+constexpr double kMaximumPositionMagnitude = 1'000'000.0;
+constexpr double kMinimumScaleMagnitude = 0.0001;
+constexpr double kMaximumScaleMagnitude = 1'000.0;
+constexpr double kMaximumRotationMagnitude = 36'000.0;
+constexpr double kMinimumAudioGainDb = -96.0;
+constexpr double kMaximumAudioGainDb = 24.0;
+
+[[nodiscard]] bool inClosedRange(const double value, const double minimum,
+                                 const double maximum) noexcept {
+  return std::isfinite(value) && value >= minimum && value <= maximum;
+}
+
+[[nodiscard]] bool validScale(const double value) noexcept {
+  return std::isfinite(value) && std::abs(value) >= kMinimumScaleMagnitude &&
+         std::abs(value) <= kMaximumScaleMagnitude;
+}
+
+[[nodiscard]] std::optional<EditError> validateTransform(const Transform& transform) {
+  if (!inClosedRange(transform.position.x, -kMaximumPositionMagnitude, kMaximumPositionMagnitude) ||
+      !inClosedRange(transform.position.y, -kMaximumPositionMagnitude, kMaximumPositionMagnitude)) {
+    return error(EditErrorCode::InvalidArgument,
+                 "clip position must be finite and within +/-1000000 pixels");
+  }
+  if (!validScale(transform.scale.x) || !validScale(transform.scale.y)) {
+    return error(EditErrorCode::InvalidArgument,
+                 "clip scale magnitude must be finite and within [0.0001, 1000]");
+  }
+  if (!inClosedRange(transform.rotation_degrees, -kMaximumRotationMagnitude,
+                     kMaximumRotationMagnitude)) {
+    return error(EditErrorCode::InvalidArgument,
+                 "clip rotation must be finite and within +/-36000 degrees");
+  }
+  if (!inClosedRange(transform.anchor_x, 0.0, 1.0) ||
+      !inClosedRange(transform.anchor_y, 0.0, 1.0)) {
+    return error(EditErrorCode::InvalidArgument,
+                 "clip anchor coordinates must be finite and within [0, 1]");
+  }
+  if (!inClosedRange(transform.crop_left, 0.0, 1.0) ||
+      !inClosedRange(transform.crop_top, 0.0, 1.0) ||
+      !inClosedRange(transform.crop_right, 0.0, 1.0) ||
+      !inClosedRange(transform.crop_bottom, 0.0, 1.0) ||
+      transform.crop_left + transform.crop_right >= 1.0 ||
+      transform.crop_top + transform.crop_bottom >= 1.0) {
+    return error(EditErrorCode::InvalidArgument,
+                 "clip crop values must be finite in [0, 1] and retain positive width and height");
+  }
+  if (!inClosedRange(transform.opacity, 0.0, 1.0)) {
+    return error(EditErrorCode::InvalidArgument, "clip opacity must be finite and within [0, 1]");
+  }
+  return std::nullopt;
+}
+
+[[nodiscard]] bool validBlendMode(const BlendMode blend_mode) noexcept {
+  switch (blend_mode) {
+  case BlendMode::Normal:
+  case BlendMode::Add:
+  case BlendMode::Multiply:
+  case BlendMode::Screen:
+  case BlendMode::Overlay:
+    return true;
+  }
+  return false;
+}
+
+[[nodiscard]] std::optional<EditError> validateAudioProperties(const Clip& clip) {
+  if (!inClosedRange(clip.audio_gain_db, kMinimumAudioGainDb, kMaximumAudioGainDb)) {
+    return error(EditErrorCode::InvalidArgument,
+                 "clip audio gain must be finite and within [-96, 24] dB");
+  }
+  if (!inClosedRange(clip.audio_pan, -1.0, 1.0)) {
+    return error(EditErrorCode::InvalidArgument,
+                 "clip audio pan must be finite and within [-1, 1]");
+  }
+  if (clip.fade_in.isNegative() || clip.fade_out.isNegative() ||
+      clip.fade_in > clip.timeline_range.duration || clip.fade_out > clip.timeline_range.duration ||
+      clip.fade_in > clip.timeline_range.duration - clip.fade_out) {
+    return error(EditErrorCode::InvalidArgument,
+                 "clip audio fades must be non-negative and fit within the clip duration");
+  }
+  return std::nullopt;
+}
+
 [[nodiscard]] std::optional<EditError> validateClip(const Project& project, const Track& track,
                                                     const Clip& clip) {
   if (clip.id.isNil()) {
@@ -117,10 +200,14 @@ void sortClips(Track& track) {
                    "clip source range extends beyond the asset duration");
     }
   }
-  if (clip.transform.opacity < 0.0 || clip.transform.opacity > 1.0 || clip.audio_pan < -1.0 ||
-      clip.audio_pan > 1.0) {
-    return error(EditErrorCode::InvalidArgument,
-                 "clip opacity or audio pan is outside its valid range");
+  if (const auto issue = validateTransform(clip.transform)) {
+    return issue;
+  }
+  if (!validBlendMode(clip.blend_mode)) {
+    return error(EditErrorCode::InvalidArgument, "clip blend mode is not supported");
+  }
+  if (const auto issue = validateAudioProperties(clip)) {
+    return issue;
   }
   return std::nullopt;
 }
@@ -1028,6 +1115,98 @@ struct PlannedClip final {
             }
             found->parameters.insert_or_assign(command.parameter.id, command.parameter);
             return std::nullopt;
+          },
+          [&](const SetClipTransformCommand& command) -> std::optional<EditError> {
+            auto* sequence = mutableSequence(project, command.sequence_id);
+            if (sequence == nullptr) {
+              return error(EditErrorCode::EntityNotFound, "sequence was not found");
+            }
+            auto location = mutableClip(*sequence, command.clip_id);
+            if (!location) {
+              return error(EditErrorCode::EntityNotFound, "clip was not found");
+            }
+            if (location->track->locked) {
+              return error(EditErrorCode::TrackLocked, "cannot transform a clip on a locked track");
+            }
+            if (location->clip->kind != ClipKind::Video &&
+                location->clip->kind != ClipKind::Title) {
+              return error(EditErrorCode::InvalidTrackKind,
+                           "only video and title clips have visual transforms");
+            }
+            if (const auto issue = validateTransform(command.transform)) {
+              return issue;
+            }
+            location->clip->transform = command.transform;
+            return std::nullopt;
+          },
+          [&](const SetClipBlendModeCommand& command) -> std::optional<EditError> {
+            auto* sequence = mutableSequence(project, command.sequence_id);
+            if (sequence == nullptr) {
+              return error(EditErrorCode::EntityNotFound, "sequence was not found");
+            }
+            auto location = mutableClip(*sequence, command.clip_id);
+            if (!location) {
+              return error(EditErrorCode::EntityNotFound, "clip was not found");
+            }
+            if (location->track->locked) {
+              return error(EditErrorCode::TrackLocked, "cannot change blending on a locked track");
+            }
+            if (location->clip->kind != ClipKind::Video &&
+                location->clip->kind != ClipKind::Title) {
+              return error(EditErrorCode::InvalidTrackKind,
+                           "only video and title clips have blend modes");
+            }
+            if (!validBlendMode(command.blend_mode)) {
+              return error(EditErrorCode::InvalidArgument, "clip blend mode is not supported");
+            }
+            location->clip->blend_mode = command.blend_mode;
+            return std::nullopt;
+          },
+          [&](const SetClipAudioPropertiesCommand& command) -> std::optional<EditError> {
+            auto* sequence = mutableSequence(project, command.sequence_id);
+            if (sequence == nullptr) {
+              return error(EditErrorCode::EntityNotFound, "sequence was not found");
+            }
+            auto location = mutableClip(*sequence, command.clip_id);
+            if (!location) {
+              return error(EditErrorCode::EntityNotFound, "clip was not found");
+            }
+            if (location->track->locked) {
+              return error(EditErrorCode::TrackLocked,
+                           "cannot change audio properties on a locked track");
+            }
+            if (location->clip->kind != ClipKind::Audio) {
+              return error(EditErrorCode::InvalidTrackKind,
+                           "only audio clips have audio properties");
+            }
+            auto changed = *location->clip;
+            changed.audio_gain_db = command.gain_db;
+            changed.audio_pan = command.pan;
+            changed.fade_in = command.fade_in;
+            changed.fade_out = command.fade_out;
+            if (const auto issue = validateAudioProperties(changed)) {
+              return issue;
+            }
+            *location->clip = std::move(changed);
+            return std::nullopt;
+          },
+          [&](const SetTrackAudioStateCommand& command) -> std::optional<EditError> {
+            auto* sequence = mutableSequence(project, command.sequence_id);
+            if (sequence == nullptr) {
+              return error(EditErrorCode::EntityNotFound, "sequence was not found");
+            }
+            auto* track = mutableTrack(*sequence, command.track_id);
+            if (track == nullptr) {
+              return error(EditErrorCode::EntityNotFound, "track was not found");
+            }
+            if (track->kind != TrackKind::Audio) {
+              return error(EditErrorCode::InvalidTrackKind,
+                           "only audio tracks have mixer mute and solo state");
+            }
+            // Track locking protects editorial mutations, not live mixer state.
+            track->muted = command.muted;
+            track->solo = command.solo;
+            return std::nullopt;
           }},
       op);
 }
@@ -1087,6 +1266,14 @@ std::string commandName(const EditCommand& command) {
         if constexpr (std::is_same_v<T, SetClipEffectParameterCommand>) {
           return "Set clip effect parameter";
         }
+        if constexpr (std::is_same_v<T, SetClipTransformCommand>)
+          return "Set clip transform";
+        if constexpr (std::is_same_v<T, SetClipBlendModeCommand>)
+          return "Set clip blend mode";
+        if constexpr (std::is_same_v<T, SetClipAudioPropertiesCommand>)
+          return "Set clip audio properties";
+        if constexpr (std::is_same_v<T, SetTrackAudioStateCommand>)
+          return "Set track audio state";
         return "Edit";
       },
       command.operation);

@@ -2,10 +2,14 @@
 
 find_package(PkgConfig REQUIRED)
 
-pkg_check_modules(PLAYBACK_AVFORMAT REQUIRED IMPORTED_TARGET libavformat=62.12.102)
-pkg_check_modules(PLAYBACK_AVCODEC REQUIRED IMPORTED_TARGET libavcodec=62.28.102)
-pkg_check_modules(PLAYBACK_AVUTIL REQUIRED IMPORTED_TARGET libavutil=60.26.102)
-pkg_check_modules(PLAYBACK_SWSCALE REQUIRED IMPORTED_TARGET libswscale=9.5.102)
+pkg_check_modules(PLAYBACK_AVFORMAT REQUIRED IMPORTED_TARGET
+                  libavformat=${VIDEO_EDITOR_AVFORMAT_VERSION})
+pkg_check_modules(PLAYBACK_AVCODEC REQUIRED IMPORTED_TARGET
+                  libavcodec=${VIDEO_EDITOR_AVCODEC_VERSION})
+pkg_check_modules(PLAYBACK_AVUTIL REQUIRED IMPORTED_TARGET
+                  libavutil=${VIDEO_EDITOR_AVUTIL_VERSION})
+pkg_check_modules(PLAYBACK_SWSCALE REQUIRED IMPORTED_TARGET
+                  libswscale=${VIDEO_EDITOR_SWSCALE_VERSION})
 
 add_library(video_editor_playback
   src/asset_registry.cpp

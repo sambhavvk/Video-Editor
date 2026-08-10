@@ -134,6 +134,30 @@ struct SetClipEffectParameterCommand final {
   EntityId effect_id;
   EffectParameter parameter;
 };
+struct SetClipTransformCommand final {
+  EntityId sequence_id;
+  EntityId clip_id;
+  Transform transform;
+};
+struct SetClipBlendModeCommand final {
+  EntityId sequence_id;
+  EntityId clip_id;
+  BlendMode blend_mode{BlendMode::Normal};
+};
+struct SetClipAudioPropertiesCommand final {
+  EntityId sequence_id;
+  EntityId clip_id;
+  double gain_db{0.0};
+  double pan{0.0};
+  Time fade_in{};
+  Time fade_out{};
+};
+struct SetTrackAudioStateCommand final {
+  EntityId sequence_id;
+  EntityId track_id;
+  bool muted{false};
+  bool solo{false};
+};
 
 using EditOperation =
     std::variant<AddAssetCommand, RemoveAssetCommand, AddSequenceCommand, RemoveSequenceCommand,
@@ -142,7 +166,8 @@ using EditOperation =
                  SlipClipCommand, SlideClipCommand, AddMarkerCommand, UpdateMarkerCommand,
                  RemoveMarkerCommand, AddCaptionCommand, UpdateCaptionCommand, RemoveCaptionCommand,
                  AddClipEffectCommand, RemoveClipEffectCommand, SetClipEffectParameterCommand,
-                 SetSequenceFormatCommand>;
+                 SetSequenceFormatCommand, SetClipTransformCommand, SetClipBlendModeCommand,
+                 SetClipAudioPropertiesCommand, SetTrackAudioStateCommand>;
 
 struct EditCommand final {
   EditOperation operation;

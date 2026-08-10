@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 #pragma once
 
+#include "video_editor/audio_render/timeline_audio_renderer.h"
 #include "video_editor/edit_model/result.h"
 #include "video_editor/edit_model/timeline_editor.h"
 #include "video_editor/render_engine/cpu_renderer.h"
@@ -9,14 +10,12 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <stop_token>
 #include <string>
 
 namespace video_editor::export_service {
 
-// The beta export service is intentionally video-only. Audio is represented in
-// both the request and result so callers cannot accidentally imply that a muxed
-// audio program was produced.
 enum class VideoPreset : std::uint8_t {
   Ffv1Matroska,
   ProRes422HqMov,
@@ -45,6 +44,9 @@ using ProgressCallback = std::function<void(const ExportProgress&)>;
 struct ExportRequest final {
   edit::TimelineSnapshot snapshot;
   std::shared_ptr<render::CpuRenderer> renderer;
+  // Required only when include_audio is true. The audio renderer resolves
+  // authoritative originals through its OriginalAudioProvider contract.
+  std::shared_ptr<audio_render::TimelineAudioRenderer> audio_renderer{};
   std::filesystem::path destination;
   VideoPreset preset{VideoPreset::Ffv1Matroska};
   bool overwrite_existing{false};
@@ -55,7 +57,8 @@ struct ExportRequest final {
 
 enum class ExportErrorCode : std::uint8_t {
   InvalidRequest,
-  AudioNotSupported,
+  AudioRendererRequired,
+  AudioRenderFailed,
   DestinationExists,
   EncoderUnavailable,
   Cancelled,
@@ -69,6 +72,9 @@ enum class ExportErrorCode : std::uint8_t {
 struct ExportError final {
   ExportErrorCode code{ExportErrorCode::InvalidRequest};
   std::string message;
+  // Present when an audio-render failure or cancellation preserves its typed
+  // renderer cause.
+  std::optional<audio_render::AudioRenderError> audio_render_error{};
 };
 
 struct ExportResult final {
@@ -76,9 +82,12 @@ struct ExportResult final {
   VideoPreset preset{VideoPreset::Ffv1Matroska};
   std::string container;
   std::string video_codec;
+  std::string audio_codec;
   std::uint64_t frame_count{0};
+  std::uint64_t audio_sample_count{0};
   edit::Time source_timeline_duration{};
   edit::Time encoded_video_duration{};
+  edit::Time encoded_audio_duration{};
   bool video_exported{true};
   bool audio_exported{false};
 };
