@@ -44,8 +44,16 @@ if(TARGET video_editor_audio_engine AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/audi
   add_subdirectory(audio_engine)
 endif()
 
+if(TARGET video_editor_audio_render AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/audio_render/CMakeLists.txt")
+  add_subdirectory(audio_render)
+endif()
+
 if(TARGET video_editor_job_service AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/job_service/CMakeLists.txt")
   add_subdirectory(job_service)
+endif()
+
+if(TARGET video_editor_worker_dispatch AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/workers/CMakeLists.txt")
+  add_subdirectory(workers)
 endif()
 
 if(TARGET video_editor_desktop_ui AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/desktop_ui/CMakeLists.txt")

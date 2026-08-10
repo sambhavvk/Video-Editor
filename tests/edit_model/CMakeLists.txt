@@ -2,9 +2,11 @@
 find_package(GTest CONFIG REQUIRED)
 
 add_executable(video_editor_edit_model_tests
+  clip_properties_test.cpp
   entity_id_test.cpp
   precision_edit_test.cpp
   time_test.cpp
+  track_audio_state_test.cpp
   timeline_editor_test.cpp
 )
 target_link_libraries(video_editor_edit_model_tests

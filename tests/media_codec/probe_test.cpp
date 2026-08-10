@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MPL-2.0
+#include "video_editor/media_codec/dependency_versions.h"
 #include "video_editor/media_codec/probe.h"
 #include "video_editor/media_codec/runtime.h"
 
@@ -20,10 +21,9 @@ void write_u16(std::ostream& output, const std::uint16_t value) {
 }
 
 void write_u32(std::ostream& output, const std::uint32_t value) {
-  const std::array<char, 4> bytes{static_cast<char>(value & 0xFFU),
-                                  static_cast<char>((value >> 8U) & 0xFFU),
-                                  static_cast<char>((value >> 16U) & 0xFFU),
-                                  static_cast<char>((value >> 24U) & 0xFFU)};
+  const std::array<char, 4> bytes{
+      static_cast<char>(value & 0xFFU), static_cast<char>((value >> 8U) & 0xFFU),
+      static_cast<char>((value >> 16U) & 0xFFU), static_cast<char>((value >> 24U) & 0xFFU)};
   output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
 }
 
@@ -56,8 +56,21 @@ std::filesystem::path write_test_wave() {
 TEST(MediaRuntime, ReportsPinnedAbi) {
   const RuntimeInfo info = runtime_info();
   EXPECT_TRUE(info.expected_abi);
-  EXPECT_EQ(info.avformat.major, 62U);
-  EXPECT_EQ(info.avcodec.major, 62U);
+  EXPECT_EQ(info.avformat.major, dependency_versions::kAvformatMajor);
+  EXPECT_EQ(info.avformat.minor, dependency_versions::kAvformatMinor);
+  EXPECT_EQ(info.avformat.patch, dependency_versions::kAvformatPatch);
+  EXPECT_EQ(info.avcodec.major, dependency_versions::kAvcodecMajor);
+  EXPECT_EQ(info.avcodec.minor, dependency_versions::kAvcodecMinor);
+  EXPECT_EQ(info.avcodec.patch, dependency_versions::kAvcodecPatch);
+  EXPECT_EQ(info.avutil.major, dependency_versions::kAvutilMajor);
+  EXPECT_EQ(info.avutil.minor, dependency_versions::kAvutilMinor);
+  EXPECT_EQ(info.avutil.patch, dependency_versions::kAvutilPatch);
+  EXPECT_EQ(info.swresample.major, dependency_versions::kSwresampleMajor);
+  EXPECT_EQ(info.swresample.minor, dependency_versions::kSwresampleMinor);
+  EXPECT_EQ(info.swresample.patch, dependency_versions::kSwresamplePatch);
+  EXPECT_EQ(info.swscale.major, dependency_versions::kSwscaleMajor);
+  EXPECT_EQ(info.swscale.minor, dependency_versions::kSwscaleMinor);
+  EXPECT_EQ(info.swscale.patch, dependency_versions::kSwscalePatch);
   EXPECT_FALSE(info.configuration.empty());
   EXPECT_FALSE(info.license.empty());
 }
@@ -87,4 +100,3 @@ TEST(MediaProbe, DescribesEveryWaveStream) {
 
 } // namespace
 } // namespace video_editor::media
-

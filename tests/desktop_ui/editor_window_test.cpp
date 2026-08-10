@@ -15,9 +15,11 @@
 #include <QLineEdit>
 #include <QMouseEvent>
 #include <QProgressBar>
+#include <QPushButton>
 #include <QScrollBar>
 #include <QSettings>
 #include <QSignalSpy>
+#include <QSlider>
 #include <QTableWidget>
 #include <QTemporaryDir>
 #include <QTest>
@@ -41,6 +43,8 @@ private slots:
   void persistsWorkspaceAndProgressiveControls();
   void exposesTransportControllerSignals();
   void mediaBinShowsProxyLifecycle();
+  void audioMixerReflectsTrackState();
+  void captionsPanelEmitsEditableCueActions();
   void timelineVirtualizesAndSeeks();
   void timelineEmitsTypedMovePreviewAndCommit();
   void timelineDistinguishesTrimRegions();
@@ -250,6 +254,62 @@ void EditorWindowTest::mediaBinShowsProxyLifecycle() {
   item.proxyAvailable = true;
   media_bin.setItems({item});
   QCOMPARE(table->item(0, 3)->text(), QStringLiteral("Proxy ready"));
+}
+
+void EditorWindowTest::audioMixerReflectsTrackState() {
+  video_editor::desktop_ui::AudioMixerWidget mixer;
+  QSignalSpy muted(&mixer, &video_editor::desktop_ui::AudioMixerWidget::muteToggled);
+  QSignalSpy soloed(&mixer, &video_editor::desktop_ui::AudioMixerWidget::soloToggled);
+  mixer.setTracks({{.displayName = QStringLiteral("Dialogue"), .muted = true, .soloed = false},
+                   {.displayName = QStringLiteral("Music"), .muted = false, .soloed = true}});
+  QCOMPARE(muted.count(), 0);
+  QCOMPARE(soloed.count(), 0);
+
+  auto* first_mute = mixer.findChild<QToolButton*>(QStringLiteral("mixerMute.0"));
+  auto* second_solo = mixer.findChild<QToolButton*>(QStringLiteral("mixerSolo.1"));
+  auto* first_fader = mixer.findChild<QSlider*>(QStringLiteral("audioFader.0"));
+  QVERIFY(first_mute != nullptr);
+  QVERIFY(second_solo != nullptr);
+  QVERIFY(first_fader != nullptr);
+  QVERIFY(first_mute->isChecked());
+  QVERIFY(second_solo->isChecked());
+  QVERIFY(!first_fader->isEnabled());
+
+  first_mute->click();
+  QCOMPARE(muted.count(), 1);
+  QCOMPARE(muted.at(0).at(0).toInt(), 0);
+  QVERIFY(!muted.at(0).at(1).toBool());
+}
+
+void EditorWindowTest::captionsPanelEmitsEditableCueActions() {
+  video_editor::desktop_ui::CaptionsPanelWidget captions;
+  auto* table = captions.findChild<QTableWidget*>(QStringLiteral("captionsTable"));
+  auto* add = captions.findChild<QPushButton*>(QStringLiteral("addCaptionButton"));
+  auto* remove = captions.findChild<QPushButton*>(QStringLiteral("removeCaptionButton"));
+  QVERIFY(table != nullptr);
+  QVERIFY(add != nullptr);
+  QVERIFY(remove != nullptr);
+  QSignalSpy edited(&captions, &video_editor::desktop_ui::CaptionsPanelWidget::captionTextEdited);
+  QSignalSpy added(&captions, &video_editor::desktop_ui::CaptionsPanelWidget::addCaptionRequested);
+  QSignalSpy removed(&captions,
+                     &video_editor::desktop_ui::CaptionsPanelWidget::removeCaptionRequested);
+
+  captions.setCaptionRows({QStringLiteral("00:00:00:00 → 00:00:01:00")},
+                          {QStringLiteral("Original")});
+  QCOMPARE(edited.count(), 0);
+  QVERIFY(!(table->item(0, 0)->flags() & Qt::ItemIsEditable));
+  QVERIFY(table->item(0, 1)->flags() & Qt::ItemIsEditable);
+  table->item(0, 1)->setText(QStringLiteral("Updated caption"));
+  QCOMPARE(edited.count(), 1);
+  QCOMPARE(edited.at(0).at(0).toInt(), 0);
+  QCOMPARE(edited.at(0).at(1).toString(), QStringLiteral("Updated caption"));
+
+  add->click();
+  QCOMPARE(added.count(), 1);
+  table->selectRow(0);
+  remove->click();
+  QCOMPARE(removed.count(), 1);
+  QCOMPARE(removed.at(0).at(0).toInt(), 0);
 }
 
 void EditorWindowTest::timelineVirtualizesAndSeeks() {

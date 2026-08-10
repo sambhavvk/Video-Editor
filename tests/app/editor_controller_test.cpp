@@ -5,9 +5,11 @@
 
 #include "video_editor/desktop_ui/editor_window.hpp"
 #include "video_editor/desktop_ui/panel_widgets.hpp"
+#include "video_editor/desktop_ui/program_viewer.hpp"
 #include "video_editor/desktop_ui/timeline_widget.hpp"
 
 #include <QDataStream>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QSettings>
@@ -22,14 +24,13 @@
 
 namespace {
 
-void writeSilentWave(const QString& path) {
+void writeSilentWave(const QString& path, const quint32 sample_count = 4'800) {
   constexpr quint16 channels = 2;
   constexpr quint32 sample_rate = 48'000;
   constexpr quint16 bits_per_sample = 16;
-  constexpr quint32 sample_count = 4'800;
   constexpr quint16 block_align = channels * (bits_per_sample / 8);
   constexpr quint32 byte_rate = sample_rate * block_align;
-  constexpr quint32 data_size = sample_count * block_align;
+  const quint32 data_size = sample_count * block_align;
 
   QFile file(path);
   QVERIFY(file.open(QIODevice::WriteOnly));
@@ -86,6 +87,7 @@ private slots:
   void importsInsertsAndRoundTripsUndo();
   void derivesSequenceFormatFromFirstVideoClip();
   void importsSearchesAndExportsCaptions();
+  void realAudioDeviceUsesTheSampleCounterAsMasterClock();
 
 private:
   std::unique_ptr<QTemporaryDir> application_data_;
@@ -118,6 +120,25 @@ void EditorControllerTest::importsInsertsAndRoundTripsUndo() {
   QCOMPARE(audioClipCount(*controller.editor().projectAt(controller.editor().revision())), 1U);
   QVERIFY(controller.dirty());
 
+  window.parameterEdited(QStringLiteral("audioGain"), -6.0);
+  const auto gained = controller.editor().projectAt(controller.editor().revision());
+  const auto gained_track = std::find_if(
+      gained->sequences.front().tracks.begin(), gained->sequences.front().tracks.end(),
+      [](const auto& track) { return track.kind == video_editor::edit::TrackKind::Audio; });
+  QVERIFY(gained_track != gained->sequences.front().tracks.end());
+  QCOMPARE(gained_track->clips.size(), 1U);
+  QCOMPARE(gained_track->clips.front().audio_gain_db, -6.0);
+  window.undoRequested();
+
+  window.audioMixer()->muteToggled(0, true);
+  const auto muted = controller.editor().projectAt(controller.editor().revision());
+  const auto muted_track = std::find_if(
+      muted->sequences.front().tracks.begin(), muted->sequences.front().tracks.end(),
+      [](const auto& track) { return track.kind == video_editor::edit::TrackKind::Audio; });
+  QVERIFY(muted_track != muted->sequences.front().tracks.end());
+  QVERIFY(muted_track->muted);
+  window.undoRequested();
+
   window.undoRequested();
   QCOMPARE(audioClipCount(*controller.editor().projectAt(controller.editor().revision())), 0U);
   window.redoRequested();
@@ -135,6 +156,7 @@ void EditorControllerTest::importsInsertsAndRoundTripsUndo() {
   QVERIFY(controller.startVideoExport(master, QStringLiteral("master.ffv1")));
   QTRY_COMPARE_WITH_TIMEOUT(export_finished.count(), 1, 30'000);
   QVERIFY(export_finished.at(0).at(0).toBool());
+  QVERIFY(export_finished.at(0).at(2).toString().contains(QStringLiteral("audio samples")));
   QVERIFY(QFileInfo(video_editor::app::qStringFromPath(master)).size() > 0);
 
   QSettings reopened_settings(directory.filePath(QStringLiteral("reopened-ui.ini")),
@@ -171,9 +193,38 @@ void EditorControllerTest::derivesSequenceFormatFromFirstVideoClip() {
   QCOMPARE(inserted->sequences.front().width, 16U);
   QCOMPARE(inserted->sequences.front().height, 10U);
   QCOMPARE(inserted->sequences.front().tracks.front().clips.size(), 1U);
+  QTRY_VERIFY_WITH_TIMEOUT(window.programViewer()->hasFrame(), 10'000);
+  if (qEnvironmentVariableIsSet("VIDEO_EDITOR_TEST_GPU")) {
+    QTRY_VERIFY_WITH_TIMEOUT(controller.gpuPreviewActive(), 10'000);
+    QVERIFY2(window.programViewer()->title().contains(QStringLiteral("GPU")),
+             qPrintable(window.programViewer()->title()));
+
+    window.parameterEdited(QStringLiteral("blendMode"), QStringLiteral("add"));
+    QTRY_VERIFY_WITH_TIMEOUT(!controller.gpuPreviewActive(), 10'000);
+    QVERIFY2(window.programViewer()->title().contains(QStringLiteral("CPU frame")),
+             qPrintable(window.programViewer()->title()));
+    QVERIFY2(window.programViewer()->title().contains(QStringLiteral("GPU ready")),
+             qPrintable(window.programViewer()->title()));
+    window.undoRequested();
+    QTRY_VERIFY_WITH_TIMEOUT(controller.gpuPreviewActive(), 10'000);
+    const auto restored = controller.editor().projectAt(controller.editor().revision());
+    window.timeline()->clipActivated(QString::fromStdString(
+        restored->sequences.front().tracks.front().clips.front().id.toString()));
+  }
+
+  window.parameterEdited(QStringLiteral("positionX"), 32.0);
+  const auto transformed = controller.editor().projectAt(controller.editor().revision());
+  QCOMPARE(transformed->sequences.front().tracks.front().clips.front().transform.position.x, 32.0);
+  window.undoRequested();
+  const auto transform_undone = controller.editor().projectAt(controller.editor().revision());
+  QCOMPARE(transform_undone->sequences.front().tracks.front().clips.front().transform.position.x,
+           0.0);
+
+  window.timeline()->clipActivated(QString::fromStdString(
+      transform_undone->sequences.front().tracks.front().clips.front().id.toString()));
 
   const QString clip_id = QString::fromStdString(
-      inserted->sequences.front().tracks.front().clips.front().id.toString());
+      transform_undone->sequences.front().tracks.front().clips.front().id.toString());
   window.timeline()->clipEditCommitted(
       clip_id, 0, 48'000, 0, video_editor::desktop_ui::TimelineWidget::EditMode::Move,
       video_editor::desktop_ui::TimelineWidget::EditIntent::Normal, false);
@@ -218,6 +269,20 @@ void EditorControllerTest::importsSearchesAndExportsCaptions() {
   QVERIFY(table != nullptr);
   QCOMPARE(table->rowCount(), 1);
   QCOMPARE(table->item(0, 1)->text(), QStringLiteral("Make every frame count"));
+  table->item(0, 1)->setText(QStringLiteral("Make every cut count"));
+  QTRY_COMPARE(controller.editor()
+                   .projectAt(controller.editor().revision())
+                   ->sequences.front()
+                   .captions.at(1)
+                   .text,
+               std::string("Make every cut count"));
+  window.undoRequested();
+  QCOMPARE(controller.editor()
+               .projectAt(controller.editor().revision())
+               ->sequences.front()
+               .captions.at(1)
+               .text,
+           std::string("Make every frame count"));
 
   const auto vtt_path =
       video_editor::app::pathFromQString(directory.filePath(QStringLiteral("captions.vtt")));
@@ -234,6 +299,73 @@ void EditorControllerTest::importsSearchesAndExportsCaptions() {
                ->sequences.front()
                .captions.size(),
            0U);
+
+  window.captionsPanel()->addCaptionRequested();
+  QCOMPARE(controller.editor()
+               .projectAt(controller.editor().revision())
+               ->sequences.front()
+               .captions.size(),
+           1U);
+  QCOMPARE(controller.editor()
+               .projectAt(controller.editor().revision())
+               ->sequences.front()
+               .captions.front()
+               .text,
+           std::string("New caption"));
+  window.undoRequested();
+  QCOMPARE(controller.editor()
+               .projectAt(controller.editor().revision())
+               ->sequences.front()
+               .captions.size(),
+           0U);
+}
+
+void EditorControllerTest::realAudioDeviceUsesTheSampleCounterAsMasterClock() {
+  if (!qEnvironmentVariableIsSet("VIDEO_EDITOR_TEST_AUDIO_DEVICE")) {
+    QSKIP("Set VIDEO_EDITOR_TEST_AUDIO_DEVICE=1 on a machine with a configured output device");
+  }
+
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString wave_path = directory.filePath(QStringLiteral("device-clock.wav"));
+  writeSilentWave(wave_path, 144'000);
+
+  QSettings settings(directory.filePath(QStringLiteral("device-ui.ini")), QSettings::IniFormat);
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+  controller.importPaths({wave_path});
+  QTRY_COMPARE_WITH_TIMEOUT(
+      controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
+  window.mediaActivated(window.mediaBin()->items().front().id);
+
+  QElapsedTimer control_latency;
+  control_latency.start();
+  window.playbackRateRequested(1.0);
+  QVERIFY2(control_latency.elapsed() < 250,
+           "audio start request blocked the Qt thread instead of enqueueing control");
+  QTRY_VERIFY_WITH_TIMEOUT(controller.audioMasterActive(), 5'000);
+  const std::int64_t started_at = controller.audioMasterSampleCounter();
+  QTRY_VERIFY_WITH_TIMEOUT(controller.audioMasterSampleCounter() > started_at, 2'000);
+  QTRY_VERIFY_WITH_TIMEOUT(window.timeline()->playhead() > started_at, 2'000);
+
+  control_latency.restart();
+  window.seekRequested(4'800);
+  QVERIFY2(control_latency.elapsed() < 250,
+           "audio seek request blocked the Qt thread instead of enqueueing control");
+  QTRY_VERIFY_WITH_TIMEOUT(!controller.audioControlPending(), 5'000);
+  QTRY_VERIFY_WITH_TIMEOUT(controller.audioMasterActive(), 5'000);
+  QTest::qWait(500);
+  QCOMPARE(controller.audioXrunCount(), 0U);
+
+  control_latency.restart();
+  window.playbackRateRequested(0.0);
+  QVERIFY2(control_latency.elapsed() < 250,
+           "audio pause request blocked the Qt thread instead of enqueueing control");
+  QTRY_VERIFY_WITH_TIMEOUT(!controller.audioMasterActive(), 2'000);
+  QTRY_VERIFY_WITH_TIMEOUT(!controller.audioControlPending(), 5'000);
+  const std::int64_t paused_at = controller.audioMasterSampleCounter();
+  QTest::qWait(50);
+  QCOMPARE(controller.audioMasterSampleCounter(), paused_at);
 }
 
 QTEST_MAIN(EditorControllerTest)
