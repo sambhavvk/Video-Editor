@@ -363,6 +363,45 @@ TEST(SnappingTest, UsesExactNtscFrameGridAndInclusiveThreshold) {
       std::invalid_argument);
 }
 
+TEST(SnappingTest, ExcludesMovingClipEdgesWithoutChangingNtscGrid) {
+  Sequence sequence;
+  sequence.frame_rate = Rate(30'000, 1'001);
+  Track track;
+  track.kind = TrackKind::Video;
+  track.name = "V1";
+  Clip clip;
+  clip.timeline_range = TimeRange(Time(1, 1), Time(1, 1));
+  track.clips.push_back(clip);
+  sequence.tracks.push_back(track);
+  SnapRequest request{Time(1, 1), Time(1, 1), std::nullopt, true, false, true};
+  request.excluded_clip_ids.insert(clip.id);
+  const auto candidates = findSnapCandidates(sequence, request);
+  EXPECT_TRUE(
+      std::none_of(candidates.begin(), candidates.end(),
+                   [&](const SnapCandidate& candidate) { return candidate.entity_id == clip.id; }));
+  ASSERT_TRUE(nearestSnapCandidate(sequence, request));
+  EXPECT_EQ(nearestSnapCandidate(sequence, request)->kind, SnapTargetKind::FrameGrid);
+}
+
+TEST(SnappingTest, ExcludesBothEdgesOfTheMarkerBeingDragged) {
+  Sequence sequence;
+  sequence.frame_rate = Rate(1, 1);
+  Marker dragged;
+  dragged.range = TimeRange(Time(10, 1), Time(2, 1));
+  Marker other;
+  other.range = TimeRange(Time(11, 1), Time{});
+  sequence.markers = {dragged, other};
+
+  SnapRequest request{Time(10, 1), Time(2, 1), std::nullopt, false, true, false};
+  request.excluded_marker_ids.insert(dragged.id);
+  const auto candidates = findSnapCandidates(sequence, request);
+
+  ASSERT_EQ(candidates.size(), 1U);
+  EXPECT_EQ(candidates.front().kind, SnapTargetKind::Marker);
+  EXPECT_EQ(candidates.front().entity_id, other.id);
+  EXPECT_EQ(candidates.front().time, Time(11, 1));
+}
+
 void expectTrackInvariants(const Project& project, const Track& track) {
   const Clip* previous = nullptr;
   for (const auto& clip : track.clips) {

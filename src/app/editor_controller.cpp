@@ -42,8 +42,12 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <limits>
+#include <numeric>
 #include <span>
+#include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace video_editor::app {
@@ -93,6 +97,15 @@ qint64 toUiTime(const edit::Time time) {
           .value());
 }
 
+QString gapKey(const edit::EntityId& trackId, const edit::TimeRange& range) {
+  return QStringLiteral("%1:%2/%3:%4/%5")
+      .arg(QString::fromStdString(trackId.toString()))
+      .arg(range.start.value())
+      .arg(range.start.timescale())
+      .arg(range.duration.value())
+      .arg(range.duration.timescale());
+}
+
 QColor colorForTrack(const edit::TrackKind kind, const std::size_t index) {
   if (kind == edit::TrackKind::Audio) {
     return QColor::fromHsv(static_cast<int>((120U + (index * 23U)) % 360U), 110, 170);
@@ -140,6 +153,34 @@ std::vector<std::byte> binaryPayload(const store::JournalEntry& entry) {
   std::transform(text.begin(), text.end(), bytes.begin(),
                  [](const char value) { return static_cast<std::byte>(value); });
   return bytes;
+}
+
+std::optional<std::uint32_t> projectSnapshotSchema(const store::JournalEntry& entry) {
+  if (entry.command_type == "project.snapshot.v1") {
+    return 1U;
+  }
+  if (entry.command_type == "project.snapshot.v2") {
+    return 2U;
+  }
+  return std::nullopt;
+}
+
+const store::JournalEntry* latestProjectSnapshot(const std::vector<store::JournalEntry>& entries) {
+  const store::JournalEntry* result = nullptr;
+  for (const auto& entry : entries) {
+    const auto schema = projectSnapshotSchema(entry);
+    if (!schema.has_value()) {
+      if (entry.command_type.starts_with("project.snapshot.v")) {
+        throw std::runtime_error("Project journal contains an unsupported snapshot version");
+      }
+      continue;
+    }
+    if (entry.payload_schema_version != *schema) {
+      throw std::runtime_error("Project snapshot journal type does not match its payload schema");
+    }
+    result = &entry;
+  }
+  return result;
 }
 
 QString captionDiagnostics(const std::vector<caption_service::Diagnostic>& diagnostics) {
@@ -281,24 +322,76 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::chooseVideoExport);
   connect(&window_, &desktop_ui::EditorWindow::parameterEdited, this,
           &EditorController::updateSelectedClipProperty);
+  connect(&window_, &desktop_ui::EditorWindow::keyframeToggleRequested, this,
+          &EditorController::toggleSelectedClipKeyframe);
+  connect(&window_, &desktop_ui::EditorWindow::addTitleRequested, this,
+          &EditorController::addTitleClip);
+  connect(&window_, &desktop_ui::EditorWindow::transitionActivated, this,
+          [this](const QString& transitionId) { setTransitionSelection(transitionId); });
+  connect(&window_, &desktop_ui::EditorWindow::transitionDurationEdited, this,
+          &EditorController::updateTransitionDuration);
+  connect(&window_, &desktop_ui::EditorWindow::transitionRemoved, this,
+          &EditorController::removeTransition);
+  connect(&window_, &desktop_ui::EditorWindow::transitionPresetChanged, this,
+          &EditorController::changeTransitionPreset);
   connect(window_.audioMixer(), &desktop_ui::AudioMixerWidget::muteToggled, this,
           &EditorController::setAudioTrackMuted);
   connect(window_.audioMixer(), &desktop_ui::AudioMixerWidget::soloToggled, this,
           &EditorController::setAudioTrackSolo);
+  connect(window_.audioMixer(), &desktop_ui::AudioMixerWidget::gainEdited, this,
+          &EditorController::setAudioTrackGain);
+  connect(window_.audioMixer(), &desktop_ui::AudioMixerWidget::panEdited, this,
+          &EditorController::setAudioTrackPan);
   connect(window_.timeline(), &desktop_ui::TimelineWidget::clipActivated, this,
-          [this](const QString& clipId) {
-            selected_clip_ = parseId(clipId);
-            refreshTimelineView();
-            refreshInspectorView();
+          [this](const QString& clipId) { setClipSelection({clipId}, clipId); });
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::clipSelectionChanged, this,
+          &EditorController::setClipSelection);
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::clipBatchEditCommitted, this,
+          [this](const QStringList& clipIds, const int destinationTrackIndex,
+                 const qint64 startDelta, const qint64 durationDelta,
+                 const desktop_ui::TimelineWidget::EditMode mode,
+                 const desktop_ui::TimelineWidget::EditIntent intent,
+                 const desktop_ui::TimelineSnapResult& snap) {
+            Q_UNUSED(snap)
+            commitTimelineBatchEdit(clipIds, destinationTrackIndex, startDelta, durationDelta,
+                                    static_cast<int>(mode), static_cast<int>(intent));
           });
-  connect(window_.timeline(), &desktop_ui::TimelineWidget::clipEditCommitted, this,
-          [this](const QString& clipId, const int destinationTrackIndex, const qint64 startDelta,
-                 const qint64 durationDelta, const desktop_ui::TimelineWidget::EditMode mode,
-                 const desktop_ui::TimelineWidget::EditIntent intent, const bool snapped) {
-            Q_UNUSED(snapped)
-            commitTimelineEdit(clipId, destinationTrackIndex, startDelta, durationDelta,
-                               static_cast<int>(mode), static_cast<int>(intent));
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::frameNudgeRequested, this,
+          [this](const QStringList& clipIds, const int frameCount,
+                 const desktop_ui::TimelineWidget::EditIntent intent) {
+            nudgeTimelineSelection(clipIds, frameCount, static_cast<int>(intent));
           });
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::markerSelectionChanged, this,
+          &EditorController::selectMarker);
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::markerAddRequested, this,
+          &EditorController::addMarker);
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::markerMoveCommitted, this,
+          [this](const QString& markerId, const qint64 start,
+                 const desktop_ui::TimelineSnapResult& snap) {
+            moveMarker(markerId, snap.snapped() ? snap.time : start);
+          });
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::markerRenameRequested, this,
+          &EditorController::renameMarker);
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::markerRemoveRequested, this,
+          &EditorController::removeMarker);
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::gapSelectionChanged, this,
+          &EditorController::selectGap);
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::closeGapRequested, this,
+          &EditorController::closeGap);
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::trackAddRequested, this,
+          [this](const desktop_ui::TrackKind kind) { addTrack(static_cast<int>(kind)); });
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::trackRenameRequested, this,
+          &EditorController::renameTrack);
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::trackReorderRequested, this,
+          &EditorController::reorderTrack);
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::trackLockToggled, this,
+          &EditorController::setTrackLocked);
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::trackVisibilityToggled, this,
+          &EditorController::setTrackVisible);
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::trackTargetToggled, this,
+          &EditorController::setTrackTargeted);
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::trackRemoveRequested, this,
+          &EditorController::removeTrack);
   connect(window_.mediaBin(), &desktop_ui::MediaBinWidget::proxyRequested, this,
           &EditorController::generateProxy);
 
@@ -510,12 +603,7 @@ bool EditorController::loadWorkingRecovery(const std::filesystem::path& workingD
                                             .busy_timeout_ms = 5'000,
                                             .project_uuid = std::nullopt});
     const auto commands = recovered_store->read_commands();
-    const store::JournalEntry* snapshot_entry = nullptr;
-    for (const auto& command : commands) {
-      if (command.command_type == "project.snapshot.v1") {
-        snapshot_entry = &command;
-      }
-    }
+    const store::JournalEntry* snapshot_entry = latestProjectSnapshot(commands);
     if (snapshot_entry == nullptr) {
       throw std::runtime_error("Recovery database contains no readable project snapshot");
     }
@@ -548,12 +636,7 @@ bool EditorController::loadCheckpoint(const std::filesystem::path& checkpoint) {
                                std::filesystem::copy_options::overwrite_existing);
     auto opened_store = std::make_unique<store::ProjectStore>(working);
     const auto commands = opened_store->read_commands();
-    const store::JournalEntry* snapshot_entry = nullptr;
-    for (const auto& command : commands) {
-      if (command.command_type == "project.snapshot.v1") {
-        snapshot_entry = &command;
-      }
-    }
+    const store::JournalEntry* snapshot_entry = latestProjectSnapshot(commands);
     if (snapshot_entry == nullptr) {
       throw std::runtime_error("Project contains no readable model snapshot");
     }
@@ -592,7 +675,11 @@ void EditorController::installProject(edit::Project project, std::filesystem::pa
   imported_assets_.clear();
   visible_caption_indices_.clear();
   caption_search_.clear();
-  selected_clip_.reset();
+  selected_clip_ids_.clear();
+  active_clip_id_.reset();
+  selected_marker_id_.reset();
+  selected_gap_key_.clear();
+  timeline_time_scale_ = static_cast<std::uint32_t>(kUiTimescale);
   playhead_ = 0;
   rebuildPlaybackRegistry();
   refreshViews();
@@ -1122,10 +1209,12 @@ void EditorController::insertAsset(const QString& assetId) {
   std::optional<edit::EntityId> video_track_id;
   std::optional<edit::EntityId> audio_track_id;
   for (const edit::Track& track : sequence->tracks) {
-    if (!track.locked && track.kind == edit::TrackKind::Video && !video_track_id.has_value()) {
+    if (!track.locked && track.targeted && track.kind == edit::TrackKind::Video &&
+        !video_track_id.has_value()) {
       video_track_id = track.id;
     }
-    if (!track.locked && track.kind == edit::TrackKind::Audio && !audio_track_id.has_value()) {
+    if (!track.locked && track.targeted && track.kind == edit::TrackKind::Audio &&
+        !audio_track_id.has_value()) {
       audio_track_id = track.id;
     }
   }
@@ -1177,126 +1266,281 @@ void EditorController::insertAsset(const QString& assetId) {
   };
 
   if (asset_copy.has_video && !prepare_insert(video_track_id, edit::ClipKind::Video)) {
-    window_.showTransientMessage(tr("No unlocked video track is available"));
+    window_.showTransientMessage(tr("No unlocked targeted video track is available"));
     return;
   }
   if (asset_copy.has_audio && !prepare_insert(audio_track_id, edit::ClipKind::Audio)) {
-    window_.showTransientMessage(tr("No unlocked audio track is available"));
+    window_.showTransientMessage(tr("No unlocked targeted audio track is available"));
     return;
   }
   if (applyBatch(std::move(commands), tr("Could not insert media at the playhead"))) {
-    selected_clip_ = first_inserted;
+    selected_clip_ids_.clear();
+    if (first_inserted.has_value()) {
+      selected_clip_ids_.insert(*first_inserted);
+    }
+    active_clip_id_ = first_inserted;
+    selected_marker_id_.reset();
+    selected_gap_key_.clear();
     refreshViews();
   }
 }
 
 void EditorController::splitSelectedClip() {
   const edit::Sequence* sequence = currentSequence();
-  if (sequence == nullptr || !selected_clip_.has_value()) {
+  const auto selected = selectedClipIds();
+  if (sequence == nullptr || selected.empty()) {
     window_.showTransientMessage(tr("Select a clip before splitting"));
     return;
   }
-  (void)apply(edit::EditCommand{.operation = edit::SplitClipCommand{.sequence_id = sequence->id,
-                                                                    .clip_id = *selected_clip_,
-                                                                    .split_time = playheadTime()},
-                                .coalescing_key = {}},
-              tr("Could not split the selected clip"));
+  std::unordered_set<edit::EntityId> consumed;
+  std::vector<edit::EditCommand> commands;
+  for (const auto& selected_id : selected) {
+    if (consumed.contains(selected_id)) {
+      continue;
+    }
+    const auto participants = expandLinkedSelection(*sequence, {selected_id});
+    consumed.insert(participants.begin(), participants.end());
+    edit::SplitClipCommand split{.sequence_id = sequence->id,
+                                 .clip_id = selected_id,
+                                 .split_time = playheadTime(),
+                                 .right_clip_id = edit::EntityId::generate(),
+                                 .include_linked = participants.size() > 1,
+                                 .linked_right_clip_ids = {}};
+    for (const auto& participant : participants) {
+      if (participant != selected_id) {
+        split.linked_right_clip_ids.push_back(
+            {.clip_id = participant, .right_clip_id = edit::EntityId::generate()});
+      }
+    }
+    commands.push_back({.operation = std::move(split), .coalescing_key = {}});
+  }
+  (void)applyBatch(std::move(commands),
+                   tr("Could not split the selected clips and their linked media"));
 }
 
 void EditorController::deleteSelectedClip(const bool ripple) {
   const edit::Sequence* sequence = currentSequence();
-  if (sequence == nullptr || !selected_clip_.has_value()) {
+  const auto selected = selectedClipIds();
+  if (sequence == nullptr || selected.empty()) {
     return;
   }
-  if (apply(edit::EditCommand{.operation = edit::RemoveClipCommand{.sequence_id = sequence->id,
-                                                                   .clip_id = *selected_clip_,
-                                                                   .ripple = ripple},
-                              .coalescing_key = {}},
-            tr("Could not remove the selected clip"))) {
-    selected_clip_.reset();
+  std::vector<edit::EditCommand> commands;
+  std::unordered_set<edit::EntityId> consumed;
+  for (const auto& clipId : selected) {
+    if (consumed.contains(clipId)) {
+      continue;
+    }
+    const auto participants = expandLinkedSelection(*sequence, {clipId});
+    consumed.insert(participants.begin(), participants.end());
+    commands.push_back(
+        {.operation = edit::RemoveClipCommand{.sequence_id = sequence->id,
+                                              .clip_id = clipId,
+                                              .ripple = ripple,
+                                              .include_linked = participants.size() > 1},
+         .coalescing_key = {}});
+  }
+  if (applyBatch(std::move(commands), ripple ? tr("Could not ripple-delete the selection")
+                                             : tr("Could not delete the selection"))) {
+    selected_clip_ids_.clear();
+    active_clip_id_.reset();
   }
 }
 
 void EditorController::commitTimelineEdit(const QString& clipId, const int destinationTrackIndex,
                                           const qint64 startDelta, const qint64 durationDelta,
                                           const int editMode, const int editIntent) {
+  commitTimelineBatchEdit({clipId}, destinationTrackIndex, startDelta, durationDelta, editMode,
+                          editIntent);
+}
+
+void EditorController::commitTimelineBatchEdit(const QStringList& clipIds,
+                                               const int destinationTrackIndex,
+                                               const qint64 startDelta, const qint64 durationDelta,
+                                               const int editMode, const int editIntent) {
   const edit::Sequence* sequence = currentSequence();
-  const auto parsed_clip_id = parseId(clipId);
-  if (sequence == nullptr || !parsed_clip_id.has_value() || destinationTrackIndex < 0 ||
+  if (sequence == nullptr || destinationTrackIndex < 0 ||
       destinationTrackIndex >= static_cast<int>(sequence->tracks.size())) {
     window_.showTransientMessage(tr("The timeline edit target is no longer available"));
     refreshTimelineView();
     return;
   }
-
-  const edit::Clip* selected_clip = edit::findClip(*sequence, *parsed_clip_id);
-  if (selected_clip == nullptr) {
-    window_.showTransientMessage(tr("The selected clip no longer exists"));
+  if (!clipIds.isEmpty()) {
+    const QString prior_active = active_clip_id_.has_value()
+                                     ? QString::fromStdString(active_clip_id_->toString())
+                                     : QString{};
+    const QString active =
+        !prior_active.isEmpty() && clipIds.contains(prior_active) ? prior_active : clipIds.front();
+    setClipSelection(clipIds, active);
+  }
+  const auto selection = selectedClipIds();
+  if (selection.empty() || !active_clip_id_.has_value()) {
+    window_.showTransientMessage(tr("Select one or more clips before editing"));
     refreshTimelineView();
     return;
   }
-  const edit::Clip clip = *selected_clip;
-  const edit::Time start_delta(startDelta, static_cast<std::uint32_t>(kUiTimescale));
-  const edit::Time duration_delta(durationDelta, static_cast<std::uint32_t>(kUiTimescale));
-  selected_clip_ = clip.id;
 
   try {
     const auto mode = static_cast<desktop_ui::TimelineWidget::EditMode>(editMode);
     const auto intent = static_cast<desktop_ui::TimelineWidget::EditIntent>(editIntent);
-    if (mode == desktop_ui::TimelineWidget::EditMode::Move) {
-      edit::InsertMode insert_mode = edit::InsertMode::RejectOverlap;
-      if (intent == desktop_ui::TimelineWidget::EditIntent::Ripple) {
-        insert_mode = edit::InsertMode::Ripple;
-      } else if (intent == desktop_ui::TimelineWidget::EditIntent::Overwrite) {
-        insert_mode = edit::InsertMode::Overwrite;
+    const edit::InsertMode insert_mode =
+        intent == desktop_ui::TimelineWidget::EditIntent::Ripple ? edit::InsertMode::Ripple
+        : intent == desktop_ui::TimelineWidget::EditIntent::Overwrite
+            ? edit::InsertMode::Overwrite
+            : edit::InsertMode::RejectOverlap;
+    const edit::Time start_delta = timelineTime(startDelta);
+    const edit::Time duration_delta = timelineTime(durationDelta);
+    const auto trackForClip = [sequence](const edit::EntityId& id) -> const edit::Track* {
+      for (const auto& track : sequence->tracks) {
+        if (std::any_of(track.clips.begin(), track.clips.end(),
+                        [&id](const auto& clip) { return clip.id == id; })) {
+          return &track;
+        }
       }
-      (void)apply(
-          edit::EditCommand{
-              .operation =
-                  edit::MoveClipCommand{
-                      .sequence_id = sequence->id,
-                      .clip_id = clip.id,
-                      .destination_track_id =
-                          sequence->tracks[static_cast<std::size_t>(destinationTrackIndex)].id,
-                      .new_start = clip.timeline_range.start + start_delta,
-                      .mode = insert_mode,
-                      .include_linked = true},
-              .coalescing_key = {}},
-          tr("Could not move the selected clip"));
-      return;
+      return nullptr;
+    };
+    const auto sourceRangeForTimelineRange = [](const edit::Clip& clip,
+                                                const edit::TimeRange& timelineRange) {
+      const edit::Time head_delta = timelineRange.start - clip.timeline_range.start;
+      const edit::Time tail_delta = timelineRange.end() - clip.timeline_range.end();
+      const auto source_delta = [&clip](const edit::Time delta) {
+        return delta
+            .scaled(clip.playback_rate.numerator(), clip.playback_rate.denominator(),
+                    edit::RoundingMode::NearestTiesEven)
+            .rescaledTo(clip.source_range.duration.timescale(),
+                        edit::RoundingMode::NearestTiesEven);
+      };
+      edit::Time source_start = clip.source_range.start;
+      edit::Time source_end = clip.source_range.end();
+      if (!clip.reversed) {
+        source_start = source_start + source_delta(head_delta);
+        source_end = source_end + source_delta(tail_delta);
+      } else {
+        source_start = source_start - source_delta(tail_delta);
+        source_end = source_end - source_delta(head_delta);
+      }
+      return edit::TimeRange(source_start, source_end - source_start);
+    };
+
+    std::vector<edit::EditCommand> commands;
+    std::unordered_set<edit::EntityId> consumed;
+    for (const auto& id : selection) {
+      if (consumed.contains(id)) {
+        continue;
+      }
+      const edit::Clip* clip = edit::findClip(*sequence, id);
+      const edit::Track* source_track = trackForClip(id);
+      if (clip == nullptr || source_track == nullptr) {
+        window_.showTransientMessage(tr("A selected clip no longer exists"));
+        refreshTimelineView();
+        return;
+      }
+      const auto linked = expandLinkedSelection(*sequence, {id});
+      consumed.insert(linked.begin(), linked.end());
+      const bool include_linked = linked.size() > 1;
+      if (mode == desktop_ui::TimelineWidget::EditMode::Move) {
+        const edit::Track& destination =
+            id == *active_clip_id_
+                ? sequence->tracks[static_cast<std::size_t>(destinationTrackIndex)]
+                : *source_track;
+        commands.push_back(
+            {.operation =
+                 edit::MoveClipCommand{.sequence_id = sequence->id,
+                                       .clip_id = clip->id,
+                                       .destination_track_id = destination.id,
+                                       .new_start = clip->timeline_range.start + start_delta,
+                                       .mode = insert_mode,
+                                       .include_linked = include_linked},
+             .coalescing_key = {}});
+      } else if (mode == desktop_ui::TimelineWidget::EditMode::TrimIn ||
+                 mode == desktop_ui::TimelineWidget::EditMode::TrimOut) {
+        const edit::TimeRange timeline_range(clip->timeline_range.start + start_delta,
+                                             clip->timeline_range.duration + duration_delta);
+        commands.push_back(
+            {.operation = edit::TrimClipCommand{.sequence_id = sequence->id,
+                                                .clip_id = clip->id,
+                                                .timeline_range = timeline_range,
+                                                .source_range = sourceRangeForTimelineRange(
+                                                    *clip, timeline_range),
+                                                .include_linked = include_linked,
+                                                .mode = insert_mode},
+             .coalescing_key = {}});
+      }
     }
 
-    const edit::TimeRange timeline_range(clip.timeline_range.start + start_delta,
-                                         clip.timeline_range.duration + duration_delta);
-    const edit::Time head_delta = timeline_range.start - clip.timeline_range.start;
-    const edit::Time tail_delta = timeline_range.end() - clip.timeline_range.end();
-    const auto source_delta = [&clip](const edit::Time delta) {
-      return delta
-          .scaled(clip.playback_rate.numerator(), clip.playback_rate.denominator(),
-                  edit::RoundingMode::NearestTiesEven)
-          .rescaledTo(clip.source_range.duration.timescale(), edit::RoundingMode::NearestTiesEven);
-    };
-    const edit::Time head_source_delta = source_delta(head_delta);
-    const edit::Time tail_source_delta = source_delta(tail_delta);
-    edit::Time source_start = clip.source_range.start;
-    edit::Time source_end = clip.source_range.end();
-    if (!clip.reversed) {
-      source_start = source_start + head_source_delta;
-      source_end = source_end + tail_source_delta;
-    } else {
-      source_start = source_start - tail_source_delta;
-      source_end = source_end - head_source_delta;
+    const edit::Clip* active = edit::findClip(*sequence, *active_clip_id_);
+    const edit::Track* active_track = trackForClip(*active_clip_id_);
+    if (active == nullptr || active_track == nullptr) {
+      throw std::invalid_argument("the active clip is no longer available");
     }
-    (void)apply(
-        edit::EditCommand{.operation =
-                              edit::TrimClipCommand{.sequence_id = sequence->id,
-                                                    .clip_id = clip.id,
-                                                    .timeline_range = timeline_range,
-                                                    .source_range = edit::TimeRange(
-                                                        source_start, source_end - source_start),
-                                                    .include_linked = true},
-                          .coalescing_key = {}},
-        tr("Could not trim the selected clip"));
+    if (mode == desktop_ui::TimelineWidget::EditMode::Roll) {
+      const auto active_index = static_cast<std::size_t>(std::distance(
+          active_track->clips.begin(),
+          std::find_if(active_track->clips.begin(), active_track->clips.end(),
+                       [active](const auto& clip) { return clip.id == active->id; })));
+      const edit::Clip* left = nullptr;
+      const edit::Clip* right = nullptr;
+      edit::Time cut{};
+      const bool incoming_edge = start_delta != edit::Time{} && duration_delta == -start_delta;
+      const bool has_preceding =
+          active_index > 0 && active_track->clips[active_index - 1].timeline_range.end() ==
+                                  active->timeline_range.start;
+      const bool has_following = active_index + 1 < active_track->clips.size() &&
+                                 active->timeline_range.end() ==
+                                     active_track->clips[active_index + 1].timeline_range.start;
+      // The widget represents an incoming roll as an inverse start/duration
+      // pair. Outgoing rolls use the shared-cut delta directly. Prefer the
+      // matching edge, then retain the only available adjacent cut.
+      if (incoming_edge && has_preceding) {
+        left = &active_track->clips[active_index - 1];
+        right = active;
+        cut = active->timeline_range.start;
+      } else if (!incoming_edge && has_following) {
+        left = active;
+        right = &active_track->clips[active_index + 1];
+        cut = active->timeline_range.end();
+      } else if (has_preceding) {
+        left = &active_track->clips[active_index - 1];
+        right = active;
+        cut = active->timeline_range.start;
+      } else if (has_following) {
+        left = active;
+        right = &active_track->clips[active_index + 1];
+        cut = active->timeline_range.end();
+      } else {
+        throw std::invalid_argument("roll edit requires adjacent clips");
+      }
+      commands.clear();
+      commands.push_back({.operation = edit::RollEditCommand{.sequence_id = sequence->id,
+                                                             .left_clip_id = left->id,
+                                                             .right_clip_id = right->id,
+                                                             .new_cut_time = cut + start_delta},
+                          .coalescing_key = {}});
+    } else if (mode == desktop_ui::TimelineWidget::EditMode::Slip) {
+      commands.clear();
+      const edit::Time source_delta =
+          start_delta
+              .scaled(active->playback_rate.numerator(), active->playback_rate.denominator(),
+                      edit::RoundingMode::NearestTiesEven)
+              .rescaledTo(active->source_range.start.timescale(),
+                          edit::RoundingMode::NearestTiesEven);
+      commands.push_back(
+          {.operation =
+               edit::SlipClipCommand{.sequence_id = sequence->id,
+                                     .clip_id = active->id,
+                                     .new_source_start = active->source_range.start + source_delta,
+                                     .include_linked =
+                                         expandLinkedSelection(*sequence, {active->id}).size() > 1},
+           .coalescing_key = {}});
+    } else if (mode == desktop_ui::TimelineWidget::EditMode::Slide) {
+      commands.clear();
+      commands.push_back(
+          {.operation =
+               edit::SlideClipCommand{.sequence_id = sequence->id,
+                                      .clip_id = active->id,
+                                      .new_start = active->timeline_range.start + start_delta},
+           .coalescing_key = {}});
+    }
+    (void)applyBatch(std::move(commands), tr("Could not apply the timeline edit"));
   } catch (const std::exception& exception) {
     window_.showTransientMessage(
         tr("Could not apply the timeline edit: %1").arg(QString::fromUtf8(exception.what())));
@@ -1316,7 +1560,10 @@ void EditorController::undo() {
   try {
     persistSnapshot("history.undo");
     setDirty(true);
-    selected_clip_.reset();
+    selected_clip_ids_.clear();
+    active_clip_id_.reset();
+    selected_marker_id_.reset();
+    selected_gap_key_.clear();
     refreshViews();
   } catch (const std::exception& exception) {
     showError(tr("Could not persist undo"), QString::fromUtf8(exception.what()));
@@ -1335,7 +1582,10 @@ void EditorController::redo() {
   try {
     persistSnapshot("history.redo");
     setDirty(true);
-    selected_clip_.reset();
+    selected_clip_ids_.clear();
+    active_clip_id_.reset();
+    selected_marker_id_.reset();
+    selected_gap_key_.clear();
     refreshViews();
   } catch (const std::exception& exception) {
     showError(tr("Could not persist redo"), QString::fromUtf8(exception.what()));
@@ -1343,7 +1593,7 @@ void EditorController::redo() {
 }
 
 void EditorController::seek(const qint64 position) {
-  playhead_ = std::max<qint64>(position, 0);
+  playhead_ = toUiTime(timelineTime(std::max<qint64>(position, 0)));
   if (audio_playback_ != nullptr && !audio_session_stale_ &&
       audio_playback_->requested_state() != audio::PlaybackState::Stopped) {
     const audio::PlaybackCommandReceipt receipt = audio_playback_->request_seek(playhead_);
@@ -1366,7 +1616,7 @@ void EditorController::seek(const qint64 position) {
       }
     }
   }
-  window_.timeline()->setPlayhead(playhead_);
+  window_.timeline()->setPlayhead(timelineValue(playheadTime()));
   requestPreview();
 }
 
@@ -1419,7 +1669,7 @@ void EditorController::setPlaybackRate(const double rate) {
   } else {
     if (audio_playback_ != nullptr) {
       playhead_ = std::max<qint64>(audio_playback_->sample_counter(), 0);
-      window_.timeline()->setPlayhead(playhead_);
+      window_.timeline()->setPlayhead(timelineValue(playheadTime()));
       requestPreview();
     }
     stopAudioPlayback();
@@ -1473,7 +1723,7 @@ void EditorController::advancePlayback() {
     if (pending) {
       if (audio_control_intent_ == AudioControlIntent::Pause) {
         playhead_ = std::clamp<qint64>(diagnostics.playback.sample_counter, 0, end);
-        window_.timeline()->setPlayhead(playhead_);
+        window_.timeline()->setPlayhead(timelineValue(playheadTime()));
         requestPreview();
       }
       return;
@@ -1516,7 +1766,7 @@ void EditorController::advancePlayback() {
         audio_master_active_ = false;
         if (completed_intent == AudioControlIntent::Pause ||
             std::abs(playback_rate_) < std::numeric_limits<double>::epsilon()) {
-          window_.timeline()->setPlayhead(playhead_);
+          window_.timeline()->setPlayhead(timelineValue(playheadTime()));
           requestPreview();
           playback_timer_.stop();
           return;
@@ -1552,6 +1802,19 @@ void EditorController::advancePlayback() {
         }
         last_audio_xrun_count_ = playback.xrun_count;
       }
+      // Poll the playback meter and push per-channel peak levels to the
+      // mixer. The meter is callback-safe and resets on read.
+      if (audio_playback_ != nullptr) {
+        const audio::PlaybackMeter::Reading meter = audio_playback_->read_meter();
+        QVector<float> peak_dbfs;
+        peak_dbfs.reserve(2);
+        for (std::size_t c = 0; c < 2U; ++c) {
+          const float linear = std::max(c == 0 ? meter.peak[c] : meter.peak[c], 1.0e-12F);
+          peak_dbfs.push_back(20.0F * std::log10(linear));
+        }
+        // Push to the first audio strip (master bus meter for now).
+        window_.audioMixer()->setMeterLevels(0, peak_dbfs);
+      }
     }
   }
 
@@ -1562,8 +1825,8 @@ void EditorController::advancePlayback() {
                                          static_cast<double>(elapsed_ms) / 1000.0));
     playhead_ = std::clamp(playhead_ + delta, qint64{0}, end);
   }
-  window_.timeline()->setPlayhead(playhead_);
-  requestPreview();
+  window_.timeline()->setPlayhead(timelineValue(playheadTime()));
+  requestPreview(PreviewRequestPolicy::Coalesce);
   if ((playback_rate_ > 0.0 && playhead_ >= end) || (playback_rate_ < 0.0 && playhead_ <= 0)) {
     stopAudioPlayback();
     playback_timer_.stop();
@@ -1580,7 +1843,7 @@ void EditorController::seekCaption(const int visibleRow) {
   const std::size_t caption_index =
       visible_caption_indices_.at(static_cast<std::size_t>(visibleRow));
   if (caption_index < sequence->captions.size()) {
-    seek(toUiTime(sequence->captions[caption_index].range.start));
+    seek(timelineValue(sequence->captions[caption_index].range.start));
   }
 }
 
@@ -1658,13 +1921,14 @@ void EditorController::searchTranscript(const QString& query) {
 void EditorController::updateSelectedClipProperty(const QString& parameterId,
                                                   const QVariant& value) {
   const edit::Sequence* sequence = currentSequence();
-  if (sequence == nullptr || !selected_clip_.has_value()) {
+  if (sequence == nullptr || !active_clip_id_.has_value()) {
     window_.showTransientMessage(tr("Select a clip before changing its properties"));
     return;
   }
-  const edit::Clip* selected = edit::findClip(*sequence, *selected_clip_);
+  const edit::Clip* selected = edit::findClip(*sequence, *active_clip_id_);
   if (selected == nullptr) {
-    selected_clip_.reset();
+    selected_clip_ids_.clear();
+    active_clip_id_.reset();
     refreshInspectorView();
     window_.showTransientMessage(tr("The selected clip is no longer available"));
     return;
@@ -1767,7 +2031,219 @@ void EditorController::updateSelectedClipProperty(const QString& parameterId,
                                                                   .fade_out = fade_out},
                           .coalescing_key = coalescing_key},
         tr("Could not update the selected clip audio"));
+    return;
   }
+
+  if (parameterId == QStringLiteral("speed") || parameterId == QStringLiteral("reverse")) {
+    // Speed is expressed as a percentage of normal in the UI (100 = 1x).
+    const double speed_percent = (parameterId == QStringLiteral("speed"))
+                                     ? value.toDouble()
+                                     : selected_speed_percent_;
+    const bool reversed = (parameterId == QStringLiteral("reverse"))
+                               ? value.toBool()
+                               : selected->reversed;
+    selected_speed_percent_ = speed_percent;
+    // Convert percentage to an exact rational rate. 100% = 1/1, 200% = 2/1,
+    // 50% = 1/2. Use a reduced fraction of (percent, 100).
+    const auto percent = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
+        std::llround(speed_percent), 1, 100'000));
+    std::uint32_t num = percent;
+    std::uint32_t den = 100U;
+    const auto g = static_cast<std::uint32_t>(std::gcd(num, den));
+    if (g > 1U) {
+      num /= g;
+      den /= g;
+    }
+    const edit::Rate rate{num, den};
+    (void)apply(
+        edit::EditCommand{.operation = edit::SetClipSpeedCommand{.sequence_id = sequence->id,
+                                                                   .clip_id = selected->id,
+                                                                   .playback_rate = rate,
+                                                                   .reversed = reversed},
+                          .coalescing_key = coalescing_key},
+        tr("Could not update the selected clip speed"));
+    return;
+  }
+
+  if (parameterId == QStringLiteral("titleText") || parameterId == QStringLiteral("titleFont") ||
+      parameterId == QStringLiteral("titleSize") || parameterId == QStringLiteral("titleAlign") ||
+      parameterId == QStringLiteral("titleBold") ||
+      parameterId == QStringLiteral("titleItalic")) {
+    if (selected->kind != edit::ClipKind::Title || !selected->title.has_value()) {
+      return;
+    }
+    edit::Title title = *selected->title;
+    if (parameterId == QStringLiteral("titleText")) {
+      title.text = value.toString().toStdString();
+    } else if (parameterId == QStringLiteral("titleFont")) {
+      title.font_family = value.toString().toStdString();
+    } else if (parameterId == QStringLiteral("titleSize")) {
+      title.font_size = value.toDouble();
+    } else if (parameterId == QStringLiteral("titleAlign")) {
+      const QString align = value.toString();
+      title.horizontal_alignment =
+          align == QStringLiteral("left")    ? edit::TitleHorizontalAlignment::Left
+          : align == QStringLiteral("right") ? edit::TitleHorizontalAlignment::Right
+                                              : edit::TitleHorizontalAlignment::Center;
+    } else if (parameterId == QStringLiteral("titleBold")) {
+      title.bold = value.toBool();
+    } else if (parameterId == QStringLiteral("titleItalic")) {
+      title.italic = value.toBool();
+    }
+    (void)apply(
+        edit::EditCommand{.operation = edit::SetClipTitleCommand{.sequence_id = sequence->id,
+                                                                    .clip_id = selected->id,
+                                                                    .title = title},
+                          .coalescing_key = coalescing_key},
+        tr("Could not update the title"));
+  }
+}
+
+void EditorController::toggleSelectedClipKeyframe(const QString& parameterId) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || active_clip_id_.has_value() == false) {
+    return;
+  }
+  const edit::Clip* clip = edit::findClip(*sequence, *active_clip_id_);
+  if (clip == nullptr) {
+    return;
+  }
+  // Find the effect parameter matching this Inspector field. The Inspector
+  // parameter IDs (positionX, scale, etc.) map to transform/effect fields;
+  // for now keyframing is wired only for effect parameters that carry the
+  // same id. A full keyframe-curve editor is a follow-up; this toggles a
+  // keyframe at the current playhead for the named parameter.
+  const edit::Time key_time = playheadTime();
+  for (const auto& effect : clip->effects) {
+    auto it = effect.parameters.find(parameterId.toStdString());
+    if (it == effect.parameters.end()) {
+      continue;
+    }
+    edit::EffectParameter parameter = it->second;
+    const auto existing =
+        std::find_if(parameter.keyframes.begin(), parameter.keyframes.end(),
+                      [&](const edit::Keyframe& key) { return key.time == key_time; });
+    if (existing != parameter.keyframes.end()) {
+      parameter.keyframes.erase(existing);
+    } else {
+      edit::Keyframe key;
+      key.time = key_time;
+      key.value = parameter.value;
+      key.interpolation = edit::KeyframeInterpolation::Linear;
+      parameter.keyframes.push_back(key);
+      std::sort(parameter.keyframes.begin(), parameter.keyframes.end(),
+                [](const edit::Keyframe& a, const edit::Keyframe& b) {
+                  return a.time < b.time;
+                });
+    }
+    (void)apply(
+        edit::EditCommand{.operation = edit::SetClipEffectParameterCommand{
+                              .sequence_id = sequence->id, .clip_id = clip->id,
+                              .effect_id = effect.id, .parameter = parameter}},
+        tr("Could not toggle the keyframe"));
+    return;
+  }
+}
+
+void EditorController::addTitleClip() {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    return;
+  }
+  // Insert a 5-second title clip on the first video track at the playhead.
+  const edit::Time start = playheadTime();
+  const edit::Time duration(5, 1);
+  edit::Clip clip;
+  clip.kind = edit::ClipKind::Title;
+  clip.name = "Title";
+  clip.timeline_range = edit::TimeRange(start, duration);
+  clip.source_range = edit::TimeRange(edit::Time{}, duration);
+  clip.playback_rate = edit::Rate{1, 1};
+  clip.title = edit::Title{};
+  // Place on the first video track that is not locked.
+  edit::EntityId track_id;
+  for (const auto& track : sequence->tracks) {
+    if (track.kind == edit::TrackKind::Video && !track.locked) {
+      track_id = track.id;
+      break;
+    }
+  }
+  if (track_id.isNil()) {
+    window_.showTransientMessage(tr("No unlocked video track for a title"));
+    return;
+  }
+  edit::InsertClipCommand insert{.sequence_id = sequence->id,
+                                  .track_id = track_id,
+                                  .clip = std::move(clip)};
+  (void)apply(edit::EditCommand{.operation = std::move(insert)},
+              tr("Could not add a title"));
+}
+
+void EditorController::setTransitionSelection(const QString& transitionId) {
+  selected_transition_id_ = parseId(transitionId);
+}
+
+void EditorController::updateTransitionDuration(const QString& transitionId,
+                                                const qint64 duration) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    return;
+  }
+  const auto parsed_id = parseId(transitionId);
+  if (!parsed_id.has_value()) {
+    return;
+  }
+  const edit::Transition* transition = edit::findTransition(*sequence, *parsed_id);
+  if (transition == nullptr) {
+    return;
+  }
+  edit::Transition updated = *transition;
+  const edit::Time new_duration = timelineTime(std::max<qint64>(1, duration));
+  // Preserve the end of the transition range; adjust the start.
+  const edit::Time end = updated.range.start + updated.range.duration;
+  updated.range = edit::TimeRange(end - new_duration, new_duration);
+  (void)apply(
+      edit::EditCommand{.operation = edit::UpdateTransitionCommand{.sequence_id = sequence->id,
+                                                                     .transition = updated}},
+      tr("Could not update the transition duration"));
+}
+
+void EditorController::removeTransition(const QString& transitionId) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    return;
+  }
+  const auto parsed_id = parseId(transitionId);
+  if (!parsed_id.has_value()) {
+    return;
+  }
+  (void)apply(
+      edit::EditCommand{.operation = edit::RemoveTransitionCommand{
+          .sequence_id = sequence->id, .transition_id = *parsed_id}},
+      tr("Could not remove the transition"));
+  selected_transition_id_.reset();
+}
+
+void EditorController::changeTransitionPreset(const QString& transitionId, const QString& kind) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    return;
+  }
+  const auto parsed_id = parseId(transitionId);
+  if (!parsed_id.has_value()) {
+    return;
+  }
+  const edit::Transition* transition = edit::findTransition(*sequence, *parsed_id);
+  if (transition == nullptr) {
+    return;
+  }
+  edit::Transition updated = *transition;
+  updated.kind = (kind == QStringLiteral("dip_to_black")) ? edit::TransitionKind::DipToBlack
+                                                          : edit::TransitionKind::CrossDissolve;
+  (void)apply(
+      edit::EditCommand{.operation = edit::UpdateTransitionCommand{.sequence_id = sequence->id,
+                                                                     .transition = updated}},
+      tr("Could not change the transition preset"));
 }
 
 void EditorController::setAudioTrackMuted(const int trackIndex, const bool muted) {
@@ -1822,12 +2298,66 @@ void EditorController::setAudioTrackSolo(const int trackIndex, const bool soloed
   refreshMixerView();
 }
 
+void EditorController::setAudioTrackGain(const int trackIndex, const double gainDb) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || trackIndex < 0) {
+    refreshMixerView();
+    return;
+  }
+  int audio_index = 0;
+  for (const edit::Track& track : sequence->tracks) {
+    if (track.kind != edit::TrackKind::Audio) {
+      continue;
+    }
+    if (audio_index++ != trackIndex) {
+      continue;
+    }
+    (void)apply(
+        edit::EditCommand{.operation = edit::SetTrackAudioMixCommand{
+                              .sequence_id = sequence->id,
+                              .track_id = track.id,
+                              .gain_db = gainDb,
+                              .pan = track.audio_pan},
+                          .coalescing_key = "mixer:" + track.id.toString() + ":gain"},
+        tr("Could not update track gain"));
+    return;
+  }
+  refreshMixerView();
+}
+
+void EditorController::setAudioTrackPan(const int trackIndex, const double pan) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || trackIndex < 0) {
+    refreshMixerView();
+    return;
+  }
+  int audio_index = 0;
+  for (const edit::Track& track : sequence->tracks) {
+    if (track.kind != edit::TrackKind::Audio) {
+      continue;
+    }
+    if (audio_index++ != trackIndex) {
+      continue;
+    }
+    (void)apply(
+        edit::EditCommand{.operation = edit::SetTrackAudioMixCommand{
+                              .sequence_id = sequence->id,
+                              .track_id = track.id,
+                              .gain_db = track.audio_gain_db,
+                              .pan = pan},
+                          .coalescing_key = "mixer:" + track.id.toString() + ":pan"},
+        tr("Could not update track pan"));
+    return;
+  }
+  refreshMixerView();
+}
+
 void EditorController::persistSnapshot(const std::string_view reason) {
   const auto project = editor_->projectAt(editor_->revision());
   const project_codec::ProjectBytes bytes = project_codec::serialize_project(*project);
   const auto metadata = store_->metadata();
-  store_->append_command("project.snapshot.v1", std::span<const std::byte>(bytes),
-                         metadata.head_revision);
+  store_->append_command("project.snapshot.v2", std::span<const std::byte>(bytes),
+                         metadata.head_revision, project_codec::kCurrentSchemaVersion);
   store_->update_heartbeat();
   (void)reason;
 }
@@ -1865,20 +2395,13 @@ bool EditorController::applyBatch(std::vector<edit::EditCommand> commands,
   for (edit::EditCommand& command : commands) {
     command.coalescing_key = batch_key;
   }
-  std::size_t applied_count = 0;
-  for (edit::EditCommand& command : commands) {
-    const auto result = editor_->apply(std::move(command), editor_->revision());
-    if (!result) {
-      if (applied_count > 0) {
-        const auto rollback = editor_->undo(editor_->revision());
-        (void)rollback;
-      }
-      window_.showTransientMessage(QStringLiteral("%1: %2").arg(
-          failureContext, QString::fromStdString(result.error().message)));
-      refreshViews();
-      return false;
-    }
-    ++applied_count;
+  const auto result =
+      editor_->applyBatch(std::move(commands), editor_->revision(), "Timeline batch", batch_key);
+  if (!result) {
+    window_.showTransientMessage(QStringLiteral("%1: %2").arg(
+        failureContext, QString::fromStdString(result.error().message)));
+    refreshViews();
+    return false;
   }
   stopAudioPlayback();
   playback_timer_.stop();
@@ -1895,6 +2418,405 @@ bool EditorController::applyBatch(std::vector<edit::EditCommand> commands,
   setDirty(true);
   refreshViews();
   return true;
+}
+
+std::uint32_t EditorController::timelineTimeScale(const edit::Sequence& sequence) const {
+  const std::uint64_t base = static_cast<std::uint64_t>(kUiTimescale);
+  const std::uint64_t numerator = std::max<std::uint32_t>(1U, sequence.frame_rate.numerator());
+  const std::uint64_t divisor = std::gcd(base, numerator);
+  const std::uint64_t scale = (base / divisor) * numerator;
+  return scale > std::numeric_limits<std::uint32_t>::max()
+             ? static_cast<std::uint32_t>(kUiTimescale)
+             : static_cast<std::uint32_t>(scale);
+}
+
+edit::Time EditorController::timelineTime(const qint64 value) const {
+  return edit::Time(value, timeline_time_scale_);
+}
+
+qint64 EditorController::timelineValue(const edit::Time time) const {
+  return static_cast<qint64>(
+      time.rescaledTo(timeline_time_scale_, edit::RoundingMode::NearestTiesEven).value());
+}
+
+std::vector<edit::EntityId> EditorController::selectedClipIds() const {
+  std::vector<edit::EntityId> result;
+  result.reserve(selected_clip_ids_.size());
+  for (const auto& id : selected_clip_ids_) {
+    result.push_back(id);
+  }
+  std::sort(result.begin(), result.end());
+  return result;
+}
+
+std::vector<edit::EntityId>
+EditorController::expandLinkedSelection(const edit::Sequence& sequence,
+                                        const std::vector<edit::EntityId>& clipIds) const {
+  std::unordered_set<edit::EntityId> result(clipIds.begin(), clipIds.end());
+  for (const auto& id : clipIds) {
+    const edit::Clip* clip = edit::findClip(sequence, id);
+    if (clip == nullptr || !clip->linked_group.has_value()) {
+      continue;
+    }
+    for (const auto& track : sequence.tracks) {
+      for (const auto& candidate : track.clips) {
+        if (candidate.linked_group == clip->linked_group) {
+          result.insert(candidate.id);
+        }
+      }
+    }
+  }
+  std::vector<edit::EntityId> ordered(result.begin(), result.end());
+  std::sort(ordered.begin(), ordered.end());
+  return ordered;
+}
+
+void EditorController::pruneTimelineSelection(const edit::Sequence& sequence) {
+  for (auto it = selected_clip_ids_.begin(); it != selected_clip_ids_.end();) {
+    if (edit::findClip(sequence, *it) == nullptr) {
+      it = selected_clip_ids_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  if (active_clip_id_.has_value() && !selected_clip_ids_.contains(*active_clip_id_)) {
+    active_clip_id_.reset();
+  }
+  if (!active_clip_id_.has_value() && !selected_clip_ids_.empty()) {
+    active_clip_id_ = *std::min_element(selected_clip_ids_.begin(), selected_clip_ids_.end());
+  }
+  if (selected_marker_id_.has_value() &&
+      std::none_of(
+          sequence.markers.begin(), sequence.markers.end(),
+          [this](const edit::Marker& marker) { return marker.id == *selected_marker_id_; })) {
+    selected_marker_id_.reset();
+  }
+  if (!selected_gap_key_.isEmpty()) {
+    bool still_current = false;
+    const auto snapshot = editor_->snapshot(sequence.id, editor_->revision());
+    if (snapshot) {
+      const edit::Time limit = edit::sequenceDuration(sequence);
+      for (const auto& track : sequence.tracks) {
+        for (const auto& gap : snapshot.value().gaps(track.id, limit)) {
+          if (gapKey(track.id, gap.timeline_range) == selected_gap_key_) {
+            still_current = true;
+            break;
+          }
+        }
+        if (still_current) {
+          break;
+        }
+      }
+    }
+    if (!still_current) {
+      selected_gap_key_.clear();
+    }
+  }
+}
+
+void EditorController::setClipSelection(const QStringList& clipIds, const QString& activeClipId) {
+  selected_clip_ids_.clear();
+  for (const auto& text : clipIds) {
+    if (const auto id = parseId(text); id.has_value()) {
+      selected_clip_ids_.insert(*id);
+    }
+  }
+  active_clip_id_ = parseId(activeClipId);
+  if (!active_clip_id_.has_value() || !selected_clip_ids_.contains(*active_clip_id_)) {
+    active_clip_id_ = selected_clip_ids_.empty()
+                          ? std::nullopt
+                          : std::optional<edit::EntityId>(*std::min_element(
+                                selected_clip_ids_.begin(), selected_clip_ids_.end()));
+  }
+  selected_marker_id_.reset();
+  selected_gap_key_.clear();
+  refreshTimelineView();
+  refreshInspectorView();
+}
+
+void EditorController::selectMarker(const QString& markerId) {
+  selected_marker_id_ = parseId(markerId);
+  selected_clip_ids_.clear();
+  active_clip_id_.reset();
+  selected_gap_key_.clear();
+  refreshTimelineView();
+  refreshInspectorView();
+}
+
+void EditorController::selectGap(const QString& gapKey) {
+  selected_gap_key_ = gapKey;
+  selected_clip_ids_.clear();
+  active_clip_id_.reset();
+  selected_marker_id_.reset();
+  refreshTimelineView();
+  refreshInspectorView();
+}
+
+void EditorController::nudgeTimelineSelection(const QStringList& clipIds, const int frameCount,
+                                              const int editIntent) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || frameCount == 0) {
+    return;
+  }
+  const QString prior_active =
+      active_clip_id_.has_value() ? QString::fromStdString(active_clip_id_->toString()) : QString{};
+  const QString active = !prior_active.isEmpty() && clipIds.contains(prior_active)
+                             ? prior_active
+                             : (clipIds.isEmpty() ? QString{} : clipIds.front());
+  setClipSelection(clipIds, active);
+  const auto selection = selectedClipIds();
+  if (selection.empty()) {
+    return;
+  }
+  const auto intent = static_cast<desktop_ui::TimelineWidget::EditIntent>(editIntent);
+  const edit::InsertMode mode = intent == desktop_ui::TimelineWidget::EditIntent::Ripple
+                                    ? edit::InsertMode::Ripple
+                                : intent == desktop_ui::TimelineWidget::EditIntent::Overwrite
+                                    ? edit::InsertMode::Overwrite
+                                    : edit::InsertMode::RejectOverlap;
+  std::unordered_set<edit::EntityId> consumed;
+  std::vector<edit::EditCommand> commands;
+  for (const auto& id : selection) {
+    if (consumed.contains(id)) {
+      continue;
+    }
+    const edit::Clip* clip = edit::findClip(*sequence, id);
+    if (clip == nullptr) {
+      continue;
+    }
+    const auto linked = expandLinkedSelection(*sequence, {id});
+    consumed.insert(linked.begin(), linked.end());
+    const auto track =
+        std::find_if(sequence->tracks.begin(), sequence->tracks.end(), [&id](const auto& item) {
+          return std::any_of(item.clips.begin(), item.clips.end(),
+                             [&id](const auto& candidate) { return candidate.id == id; });
+        });
+    if (track == sequence->tracks.end()) {
+      continue;
+    }
+    // Nudge is a translation, not a re-quantization. In particular, a clip
+    // deliberately placed between frames must retain that offset and every
+    // linked group receives the same rational frame delta.
+    const edit::Time target_start =
+        clip->timeline_range.start + sequence->frame_rate.frameTime(frameCount);
+    if (target_start.isNegative()) {
+      window_.showTransientMessage(tr("Cannot nudge the selected clips before the timeline start"));
+      return;
+    }
+    commands.push_back({.operation = edit::MoveClipCommand{.sequence_id = sequence->id,
+                                                           .clip_id = id,
+                                                           .destination_track_id = track->id,
+                                                           .new_start = target_start,
+                                                           .mode = mode,
+                                                           .include_linked = linked.size() > 1},
+                        .coalescing_key = {}});
+  }
+  (void)applyBatch(std::move(commands), tr("Could not nudge the timeline selection"));
+}
+
+bool EditorController::applyTrackCommand(edit::EditCommand command, const QString& failureContext) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    return false;
+  }
+  return apply(std::move(command), failureContext);
+}
+
+void EditorController::addTrack(const int trackKind) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    return;
+  }
+  const auto kind = static_cast<desktop_ui::TrackKind>(trackKind);
+  edit::Track track;
+  track.kind = kind == desktop_ui::TrackKind::Audio     ? edit::TrackKind::Audio
+               : kind == desktop_ui::TrackKind::Caption ? edit::TrackKind::Caption
+                                                        : edit::TrackKind::Video;
+  const char* prefix = track.kind == edit::TrackKind::Audio     ? "Audio"
+                       : track.kind == edit::TrackKind::Caption ? "Captions"
+                                                                : "Video";
+  const auto ordinal =
+      1 + std::count_if(sequence->tracks.begin(), sequence->tracks.end(),
+                        [&track](const auto& item) { return item.kind == track.kind; });
+  track.name = std::string(prefix) + " " + std::to_string(ordinal);
+  (void)applyTrackCommand({.operation = edit::AddTrackCommand{.sequence_id = sequence->id,
+                                                              .track = std::move(track),
+                                                              .index = std::nullopt},
+                           .coalescing_key = {}},
+                          tr("Could not add a track"));
+}
+
+void EditorController::renameTrack(const QString& trackId, const QString& name) {
+  const edit::Sequence* sequence = currentSequence();
+  const auto id = parseId(trackId);
+  if (sequence == nullptr || !id.has_value()) {
+    return;
+  }
+  (void)applyTrackCommand(
+      {.operation = edit::RenameTrackCommand{.sequence_id = sequence->id,
+                                             .track_id = *id,
+                                             .name = name.trimmed().toStdString()},
+       .coalescing_key = {}},
+      tr("Could not rename the track"));
+}
+
+void EditorController::reorderTrack(const QString& trackId, const int destinationIndex) {
+  const edit::Sequence* sequence = currentSequence();
+  const auto id = parseId(trackId);
+  if (sequence == nullptr || !id.has_value() || destinationIndex < 0) {
+    return;
+  }
+  (void)applyTrackCommand(
+      {.operation = edit::ReorderTrackCommand{.sequence_id = sequence->id,
+                                              .track_id = *id,
+                                              .index = static_cast<std::size_t>(destinationIndex)},
+       .coalescing_key = {}},
+      tr("Could not reorder the track"));
+}
+
+void EditorController::setTrackLocked(const QString& trackId, const bool locked) {
+  const edit::Sequence* sequence = currentSequence();
+  const auto id = parseId(trackId);
+  if (sequence == nullptr || !id.has_value())
+    return;
+  (void)applyTrackCommand({.operation = edit::SetTrackLockedCommand{.sequence_id = sequence->id,
+                                                                    .track_id = *id,
+                                                                    .locked = locked},
+                           .coalescing_key = {}},
+                          tr("Could not change the track lock"));
+}
+
+void EditorController::setTrackVisible(const QString& trackId, const bool visible) {
+  const edit::Sequence* sequence = currentSequence();
+  const auto id = parseId(trackId);
+  if (sequence == nullptr || !id.has_value())
+    return;
+  (void)applyTrackCommand({.operation = edit::SetTrackVisibilityCommand{.sequence_id = sequence->id,
+                                                                        .track_id = *id,
+                                                                        .visible = visible},
+                           .coalescing_key = {}},
+                          tr("Could not change track visibility"));
+}
+
+void EditorController::setTrackTargeted(const QString& trackId, const bool targeted) {
+  const edit::Sequence* sequence = currentSequence();
+  const auto id = parseId(trackId);
+  if (sequence == nullptr || !id.has_value())
+    return;
+  (void)applyTrackCommand({.operation = edit::SetTrackTargetedCommand{.sequence_id = sequence->id,
+                                                                      .track_id = *id,
+                                                                      .targeted = targeted},
+                           .coalescing_key = {}},
+                          tr("Could not change track targeting"));
+}
+
+void EditorController::removeTrack(const QString& trackId) {
+  const edit::Sequence* sequence = currentSequence();
+  const auto id = parseId(trackId);
+  if (sequence == nullptr || !id.has_value())
+    return;
+  (void)applyTrackCommand(
+      {.operation = edit::RemoveTrackCommand{.sequence_id = sequence->id, .track_id = *id},
+       .coalescing_key = {}},
+      tr("Could not remove the track"));
+}
+
+void EditorController::addMarker(const qint64 start) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr)
+    return;
+  edit::Marker marker;
+  marker.range = edit::TimeRange(timelineTime(std::max<qint64>(0, start)), edit::Time{});
+  marker.label = tr("Marker").toStdString();
+  if (apply({.operation = edit::AddMarkerCommand{.sequence_id = sequence->id, .marker = marker},
+             .coalescing_key = {}},
+            tr("Could not add a marker"))) {
+    selected_marker_id_ = marker.id;
+    selected_clip_ids_.clear();
+    active_clip_id_.reset();
+  }
+}
+
+void EditorController::moveMarker(const QString& markerId, const qint64 start) {
+  const edit::Sequence* sequence = currentSequence();
+  const auto id = parseId(markerId);
+  if (sequence == nullptr || !id.has_value())
+    return;
+  const auto found = std::find_if(sequence->markers.begin(), sequence->markers.end(),
+                                  [&id](const auto& marker) { return marker.id == *id; });
+  if (found == sequence->markers.end()) {
+    window_.showTransientMessage(tr("The marker no longer exists"));
+    refreshTimelineView();
+    return;
+  }
+  auto marker = *found;
+  marker.range.start = timelineTime(std::max<qint64>(0, start));
+  (void)apply({.operation = edit::UpdateMarkerCommand{.sequence_id = sequence->id,
+                                                      .marker = std::move(marker)},
+               .coalescing_key = {}},
+              tr("Could not move the marker"));
+}
+
+void EditorController::renameMarker(const QString& markerId, const QString& name) {
+  const edit::Sequence* sequence = currentSequence();
+  const auto id = parseId(markerId);
+  if (sequence == nullptr || !id.has_value())
+    return;
+  const auto found = std::find_if(sequence->markers.begin(), sequence->markers.end(),
+                                  [&id](const auto& marker) { return marker.id == *id; });
+  if (found == sequence->markers.end())
+    return;
+  auto marker = *found;
+  marker.label = name.trimmed().toStdString();
+  (void)apply({.operation = edit::UpdateMarkerCommand{.sequence_id = sequence->id,
+                                                      .marker = std::move(marker)},
+               .coalescing_key = {}},
+              tr("Could not rename the marker"));
+}
+
+void EditorController::removeMarker(const QString& markerId) {
+  const edit::Sequence* sequence = currentSequence();
+  const auto id = parseId(markerId);
+  if (sequence == nullptr || !id.has_value())
+    return;
+  if (apply({.operation = edit::RemoveMarkerCommand{.sequence_id = sequence->id, .marker_id = *id},
+             .coalescing_key = {}},
+            tr("Could not remove the marker"))) {
+    selected_marker_id_.reset();
+  }
+}
+
+void EditorController::closeGap(const QString& gapKeyText) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || gapKeyText.isEmpty()) {
+    return;
+  }
+  const auto snapshot_result = editor_->snapshot(sequence->id, editor_->revision());
+  if (!snapshot_result) {
+    window_.showTransientMessage(tr("Could not resolve the current timeline gaps"));
+    refreshTimelineView();
+    return;
+  }
+  const edit::TimelineSnapshot snapshot = snapshot_result.value();
+  const edit::Time limit = edit::sequenceDuration(*sequence);
+  for (const auto& track : sequence->tracks) {
+    for (const auto& gap : snapshot.gaps(track.id, limit)) {
+      if (gapKey(track.id, gap.timeline_range) != gapKeyText) {
+        continue;
+      }
+      if (apply({.operation = edit::CloseGapCommand{.sequence_id = sequence->id,
+                                                    .track_id = track.id,
+                                                    .gap = gap.timeline_range},
+                 .coalescing_key = {}},
+                tr("Could not close the gap"))) {
+        selected_gap_key_.clear();
+      }
+      return;
+    }
+  }
+  window_.showTransientMessage(tr("That gap changed before it could be closed"));
+  selected_gap_key_.clear();
+  refreshTimelineView();
 }
 
 void EditorController::refreshViews() {
@@ -1954,9 +2876,14 @@ void EditorController::refreshTimelineView() {
     window_.setTimelineView(kUiTimescale * 10, kUiTimescale, {}, {});
     return;
   }
+  timeline_time_scale_ = timelineTimeScale(*sequence);
+  pruneTimelineSelection(*sequence);
   QVector<TimelineTrackView> tracks;
   QVector<TimelineClipView> clips;
+  QVector<desktop_ui::TimelineMarkerView> markers;
+  QVector<desktop_ui::TimelineGapView> gaps;
   tracks.reserve(static_cast<qsizetype>(sequence->tracks.size()));
+  markers.reserve(static_cast<qsizetype>(sequence->markers.size()));
   std::size_t track_index = 0;
   for (const edit::Track& track : sequence->tracks) {
     tracks.push_back({
@@ -1966,6 +2893,8 @@ void EditorController::refreshTimelineView() {
         .muted = track.muted,
         .soloed = track.solo,
         .locked = track.locked,
+        .visible = track.visible,
+        .targeted = track.targeted,
     });
     for (const edit::Clip& clip : track.clips) {
       const auto proxy = std::find_if(
@@ -1975,10 +2904,10 @@ void EditorController::refreshTimelineView() {
           .id = QString::fromStdString(clip.id.toString()),
           .displayName = QString::fromStdString(clip.name),
           .trackIndex = static_cast<int>(track_index),
-          .start = toUiTime(clip.timeline_range.start),
-          .duration = std::max<qint64>(1, toUiTime(clip.timeline_range.duration)),
+          .start = timelineValue(clip.timeline_range.start),
+          .duration = std::max<qint64>(1, timelineValue(clip.timeline_range.duration)),
           .color = colorForTrack(track.kind, track_index),
-          .selected = selected_clip_.has_value() && *selected_clip_ == clip.id,
+          .selected = selected_clip_ids_.contains(clip.id),
           .offline = edit::findAsset(*project, clip.asset_id) == nullptr,
           .proxy =
               proxy != imported_assets_.end() && proxy->proxy.has_value() && proxy->proxy->complete,
@@ -1986,24 +2915,102 @@ void EditorController::refreshTimelineView() {
     }
     ++track_index;
   }
-  const qint64 duration =
-      std::max<qint64>(toUiTime(edit::sequenceDuration(*sequence)), kUiTimescale * 10);
-  window_.setTimelineView(duration, kUiTimescale, std::move(tracks), std::move(clips));
+  for (const auto& marker : sequence->markers) {
+    markers.push_back(
+        {.id = QString::fromStdString(marker.id.toString()),
+         .displayName = QString::fromStdString(marker.label),
+         .start = timelineValue(marker.range.start),
+         .duration = timelineValue(marker.range.duration),
+         .color = QColor::fromRgbF(
+             static_cast<float>(marker.color.red), static_cast<float>(marker.color.green),
+             static_cast<float>(marker.color.blue), static_cast<float>(marker.color.alpha)),
+         .selected = selected_marker_id_.has_value() && marker.id == *selected_marker_id_});
+  }
+  const auto snapshot_result = editor_->snapshot(sequence->id, editor_->revision());
+  if (snapshot_result) {
+    const edit::Time limit = edit::sequenceDuration(*sequence);
+    const auto snapshot = snapshot_result.value();
+    for (std::size_t index = 0; index < sequence->tracks.size(); ++index) {
+      const auto& track = sequence->tracks[index];
+      for (const auto& gap : snapshot.gaps(track.id, limit)) {
+        const QString key = gapKey(track.id, gap.timeline_range);
+        gaps.push_back({.key = key,
+                        .trackId = QString::fromStdString(track.id.toString()),
+                        .trackIndex = static_cast<int>(index),
+                        .start = timelineValue(gap.timeline_range.start),
+                        .duration = timelineValue(gap.timeline_range.duration),
+                        .selected = key == selected_gap_key_});
+      }
+    }
+  }
+  const qint64 duration = std::max<qint64>(timelineValue(edit::sequenceDuration(*sequence)),
+                                           static_cast<qint64>(timeline_time_scale_) * 10);
+  window_.setTimelineView(duration, timeline_time_scale_, std::move(tracks), std::move(clips),
+                          std::move(markers), std::move(gaps));
+  window_.timeline()->setSnapResolver([this](const desktop_ui::TimelineSnapRequest& request) {
+    const edit::Sequence* current = currentSequence();
+    if (current == nullptr) {
+      return desktop_ui::TimelineSnapResult{
+          .time = request.proposedTime, .kind = desktop_ui::TimelineSnapKind::None, .label = {}};
+    }
+    edit::SnapRequest snap_request;
+    snap_request.proposed_time = timelineTime(request.proposedTime);
+    const double pixels_per_second = std::max(1.0, window_.timeline()->pixelsPerSecond());
+    const auto threshold_units = static_cast<std::int64_t>(
+        std::ceil(static_cast<double>(std::max(0, request.thresholdPixels)) / pixels_per_second *
+                  static_cast<double>(timeline_time_scale_)));
+    snap_request.threshold =
+        edit::Time(std::max<std::int64_t>(0, threshold_units), timeline_time_scale_);
+    snap_request.playhead = playheadTime();
+    for (const auto& text : request.excludedClipIds) {
+      if (const auto id = parseId(text); id.has_value()) {
+        snap_request.excluded_clip_ids.insert(*id);
+      }
+    }
+    if (const auto marker_id = parseId(request.excludedMarkerId); marker_id.has_value()) {
+      snap_request.excluded_marker_ids.insert(*marker_id);
+    }
+    const auto candidate = edit::nearestSnapCandidate(*current, snap_request);
+    if (!candidate.has_value()) {
+      return desktop_ui::TimelineSnapResult{
+          .time = request.proposedTime, .kind = desktop_ui::TimelineSnapKind::None, .label = {}};
+    }
+    const auto kind = [candidate] {
+      switch (candidate->kind) {
+      case edit::SnapTargetKind::Playhead:
+        return desktop_ui::TimelineSnapKind::Playhead;
+      case edit::SnapTargetKind::Marker:
+        return desktop_ui::TimelineSnapKind::Marker;
+      case edit::SnapTargetKind::ClipEdge:
+        return desktop_ui::TimelineSnapKind::ClipEdge;
+      case edit::SnapTargetKind::FrameGrid:
+      default:
+        return desktop_ui::TimelineSnapKind::Frame;
+      }
+    }();
+    return desktop_ui::TimelineSnapResult{
+        .time = timelineValue(candidate->time),
+        .kind = kind,
+        .label = QString::fromStdString(candidate->entity_id.has_value()
+                                            ? candidate->entity_id->toString()
+                                            : candidate->time.toString())};
+  });
   window_.timeline()->setFrameRate(sequence->frame_rate.numerator(),
                                    sequence->frame_rate.denominator());
-  window_.timeline()->setPlayhead(playhead_);
+  window_.timeline()->setPlayhead(timelineValue(playheadTime()));
   window_.programViewer()->setTimecode(timecodeText(playhead_, sequence->frame_rate));
 }
 
 void EditorController::refreshInspectorView() {
   const edit::Sequence* sequence = currentSequence();
-  if (sequence == nullptr || !selected_clip_.has_value()) {
+  if (sequence == nullptr || !active_clip_id_.has_value()) {
     window_.inspector()->clearSelection();
     return;
   }
-  const edit::Clip* clip = edit::findClip(*sequence, *selected_clip_);
+  const edit::Clip* clip = edit::findClip(*sequence, *active_clip_id_);
   if (clip == nullptr) {
-    selected_clip_.reset();
+    selected_clip_ids_.clear();
+    active_clip_id_.reset();
     window_.inspector()->clearSelection();
     return;
   }
@@ -2012,6 +3019,31 @@ void EditorController::refreshInspectorView() {
   window_.inspector()->setClipCapabilities(clip->kind == edit::ClipKind::Video ||
                                                clip->kind == edit::ClipKind::Title,
                                            clip->kind == edit::ClipKind::Audio);
+  window_.inspector()->setTitleControlsVisible(clip->kind == edit::ClipKind::Title);
+  window_.inspector()->setSpeedControlsVisible(clip->kind == edit::ClipKind::Video ||
+                                               clip->kind == edit::ClipKind::Audio);
+  if (clip->kind == edit::ClipKind::Title && clip->title.has_value()) {
+    const edit::Title& title = *clip->title;
+    window_.inspector()->setParameter(QStringLiteral("titleText"),
+                                      QString::fromStdString(title.text));
+    window_.inspector()->setParameter(QStringLiteral("titleFont"),
+                                      QString::fromStdString(title.font_family));
+    window_.inspector()->setParameter(QStringLiteral("titleSize"), title.font_size);
+    const QString align =
+        title.horizontal_alignment == edit::TitleHorizontalAlignment::Left  ? QStringLiteral("left")
+        : title.horizontal_alignment == edit::TitleHorizontalAlignment::Right ? QStringLiteral("right")
+                                                                              : QStringLiteral("center");
+    window_.inspector()->setParameter(QStringLiteral("titleAlign"), align);
+    window_.inspector()->setParameter(QStringLiteral("titleBold"), title.bold);
+    window_.inspector()->setParameter(QStringLiteral("titleItalic"), title.italic);
+  }
+  // Speed is shown as a percentage of normal (100 = 1x).
+  const double speed_percent =
+      static_cast<double>(clip->playback_rate.numerator()) * 100.0 /
+      static_cast<double>(clip->playback_rate.denominator());
+  selected_speed_percent_ = speed_percent;
+  window_.inspector()->setParameter(QStringLiteral("speed"), speed_percent);
+  window_.inspector()->setParameter(QStringLiteral("reverse"), clip->reversed);
   window_.inspector()->setParameter(QStringLiteral("positionX"), clip->transform.position.x);
   window_.inspector()->setParameter(QStringLiteral("positionY"), clip->transform.position.y);
   window_.inspector()->setParameter(QStringLiteral("scale"), clip->transform.scale.x * 100.0);
@@ -2061,7 +3093,9 @@ void EditorController::refreshMixerView() {
       if (track.kind == edit::TrackKind::Audio) {
         tracks.push_back({.displayName = QString::fromStdString(track.name),
                           .muted = track.muted,
-                          .soloed = track.solo});
+                          .soloed = track.solo,
+                          .gain_db = track.audio_gain_db,
+                          .pan = track.audio_pan});
       }
     }
   }
@@ -2243,40 +3277,45 @@ void EditorController::stopAudioPlayback() noexcept {
   }
 }
 
-void EditorController::requestPreview() {
+void EditorController::requestPreview(const PreviewRequestPolicy policy) {
   if (!editor_ || !renderer_ || !frame_provider_) {
     return;
   }
-  const edit::Sequence* sequence = currentSequence();
-  if (sequence == nullptr ||
-      std::none_of(sequence->tracks.begin(), sequence->tracks.end(), [](const edit::Track& track) {
-        return track.kind == edit::TrackKind::Video && !track.clips.empty();
-      })) {
+  ++preview_request_serial_;
+  const auto invalidate_in_flight = [this] {
     ++preview_epoch_;
     renderer_->begin_epoch(preview_epoch_);
     if (gpu_timeline_renderer_ != nullptr) {
       gpu_timeline_renderer_->begin_epoch(preview_epoch_);
     }
     frame_provider_->begin_epoch(preview_epoch_);
+  };
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr ||
+      std::none_of(sequence->tracks.begin(), sequence->tracks.end(), [](const edit::Track& track) {
+        return track.kind == edit::TrackKind::Video && !track.clips.empty();
+      })) {
+    invalidate_in_flight();
     gpu_preview_active_ = false;
     window_.programViewer()->clearFrame();
     return;
   }
   requested_preview_position_ = playhead_;
-  ++preview_epoch_;
-  renderer_->begin_epoch(preview_epoch_);
-  if (gpu_timeline_renderer_ != nullptr) {
-    gpu_timeline_renderer_->begin_epoch(preview_epoch_);
+  if (preview_in_flight_) {
+    if (policy == PreviewRequestPolicy::Replace) {
+      invalidate_in_flight();
+    }
+    return;
   }
-  frame_provider_->begin_epoch(preview_epoch_);
-  if (!preview_in_flight_) {
-    launchPreviewRequest();
-  }
+  launchPreviewRequest();
 }
 
 void EditorController::launchPreviewRequest() {
   const edit::Sequence* sequence = currentSequence();
-  if (sequence == nullptr) {
+  if (sequence == nullptr ||
+      std::none_of(sequence->tracks.begin(), sequence->tracks.end(), [](const edit::Track& track) {
+        return track.kind == edit::TrackKind::Video && !track.clips.empty();
+      })) {
     window_.programViewer()->clearFrame();
     return;
   }
@@ -2285,7 +3324,13 @@ void EditorController::launchPreviewRequest() {
     window_.programViewer()->clearFrame();
     return;
   }
-  const std::uint64_t epoch = preview_epoch_;
+  const std::uint64_t request_serial = preview_request_serial_;
+  const std::uint64_t epoch = ++preview_epoch_;
+  renderer_->begin_epoch(epoch);
+  if (gpu_timeline_renderer_ != nullptr) {
+    gpu_timeline_renderer_->begin_epoch(epoch);
+  }
+  frame_provider_->begin_epoch(epoch);
   const edit::Time requested_time(requested_preview_position_,
                                   static_cast<std::uint32_t>(kUiTimescale));
   auto snapshot = std::move(snapshot_result).value();
@@ -2294,8 +3339,9 @@ void EditorController::launchPreviewRequest() {
   const auto gpu_timeline_renderer = gpu_fallback_latched_ ? nullptr : gpu_timeline_renderer_;
   preview_in_flight_ = true;
 
-  auto* watcher = new QFutureWatcher<PreviewOutcome>(this);
-  connect(watcher, &QFutureWatcher<PreviewOutcome>::finished, this, [this, watcher] {
+  using PreviewWatcher = QFutureWatcher<PreviewOutcome>;
+  auto* watcher = new PreviewWatcher(this);
+  connect(watcher, &PreviewWatcher::finished, this, [this, watcher, request_serial] {
     const PreviewOutcome outcome = watcher->result();
     watcher->deleteLater();
     preview_in_flight_ = false;
@@ -2327,12 +3373,13 @@ void EditorController::launchPreviewRequest() {
       }
       if (!outcome.image.isNull()) {
         window_.programViewer()->setFrame(outcome.image);
+        ++preview_presentation_count_;
       } else if (!outcome.error.isEmpty()) {
         window_.programViewer()->clearFrame();
         window_.showTransientMessage(outcome.error);
       }
     }
-    if (outcome.epoch != preview_epoch_) {
+    if (outcome.epoch != preview_epoch_ || request_serial != preview_request_serial_) {
       launchPreviewRequest();
     }
   });

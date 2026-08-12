@@ -34,6 +34,24 @@ message ColorRgba {
   double alpha = 4;
 }
 
+enum TitleAlignment {
+  TITLE_ALIGNMENT_UNSPECIFIED = 0;
+  TITLE_ALIGNMENT_LEFT = 1;
+  TITLE_ALIGNMENT_CENTER = 2;
+  TITLE_ALIGNMENT_RIGHT = 3;
+}
+
+message Title {
+  string text = 1;
+  string font_family = 2;
+  double font_size = 3;
+  ColorRgba text_color = 4;
+  ColorRgba background_color = 5;
+  TitleAlignment alignment = 6;
+  bool bold = 7;
+  bool italic = 8;
+}
+
 message StringEntry {
   string key = 1;
   string value = 2;
@@ -135,6 +153,21 @@ enum BlendMode {
   BLEND_MODE_OVERLAY = 5;
 }
 
+enum TransitionKind {
+  TRANSITION_KIND_UNSPECIFIED = 0;
+  TRANSITION_KIND_CROSS_DISSOLVE = 1;
+  TRANSITION_KIND_DIP_TO_BLACK = 2;
+}
+
+message Transition {
+  EntityId id = 1;
+  EntityId outgoing_clip_id = 2;
+  EntityId incoming_clip_id = 3;
+  TimeRange timeline_range = 4;
+  TransitionKind kind = 5;
+  bool enabled = 6;
+}
+
 message Clip {
   EntityId id = 1;
   EntityId asset_id = 2;
@@ -152,6 +185,7 @@ message Clip {
   Time fade_in = 14;
   Time fade_out = 15;
   repeated Effect effects = 16;
+  optional Title title = 17;
 }
 
 message Track {
@@ -163,6 +197,10 @@ message Track {
   bool solo = 6;
   repeated Clip clips = 7;
   repeated Effect effects = 8;
+  // Optional so schema-v2 payloads written before these fields retain the
+  // model defaults when decoded.
+  optional bool visible = 9;
+  optional bool targeted = 10;
 }
 
 message Marker {
@@ -199,6 +237,7 @@ message Sequence {
   repeated Track tracks = 7;
   repeated Marker markers = 8;
   repeated Caption captions = 9;
+  repeated Transition transitions = 10;
 }
 
 message Project {

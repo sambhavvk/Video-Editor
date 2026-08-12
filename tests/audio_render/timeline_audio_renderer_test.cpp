@@ -398,5 +398,59 @@ TEST(TimelineAudioRenderer, RepeatedRequestsAreBitForBitDeterministic) {
   EXPECT_TRUE(std::ranges::equal(first.value().channel(1), second.value().channel(1)));
 }
 
+TEST(TimelineAudioRenderer, TrackGainAndPanApplyAsMixerStageOverClipMix) {
+  auto timeline = make_timeline();
+  auto clip = audio_clip(timeline.constant_asset_id, 0, 0, 32);
+  const auto registry = registry_for(timeline);
+  TimelineAudioRenderer renderer(registry);
+
+  // Baseline: default track gain (0 dB) and pan (0) is unity.
+  edit::Track default_track = audio_track({clip});
+  const auto baseline =
+      renderer.render(snapshot(timeline, {default_track}), {.start_sample = 0, .sample_count = 32});
+  ASSERT_TRUE(baseline) << baseline.error().message;
+
+  // +6 dB track gain doubles amplitude; pan stays center.
+  edit::Track boosted = audio_track({clip});
+  boosted.audio_gain_db = 6.020599913279624;
+  const auto boosted_result =
+      renderer.render(snapshot(timeline, {boosted}), {.start_sample = 0, .sample_count = 32});
+  ASSERT_TRUE(boosted_result) << boosted_result.error().message;
+  for (std::size_t i = 0; i < 32; ++i) {
+    EXPECT_NEAR(boosted_result.value().channel(0)[i],
+                baseline.value().channel(0)[i] * 2.0F, 0.0001F);
+  }
+}
+
+TEST(TimelineAudioRenderer, TrackPanAtCenterIsUnityAndFullLeftRoutesToLeftOnly) {
+  auto timeline = make_timeline();
+  auto clip = audio_clip(timeline.constant_asset_id, 0, 0, 16);
+  // Use a centered clip (pan 0) so the clip stage outputs both channels.
+  clip.audio_pan = 0.0;
+  const auto registry = registry_for(timeline);
+  TimelineAudioRenderer renderer(registry);
+
+  edit::Track center = audio_track({clip});
+  center.audio_pan = 0.0;
+  const auto center_result =
+      renderer.render(snapshot(timeline, {center}), {.start_sample = 0, .sample_count = 16});
+  ASSERT_TRUE(center_result) << center_result.error().message;
+
+  edit::Track full_left = audio_track({clip});
+  full_left.audio_pan = -1.0;
+  const auto left_result =
+      renderer.render(snapshot(timeline, {full_left}), {.start_sample = 0, .sample_count = 16});
+  ASSERT_TRUE(left_result) << left_result.error().message;
+  for (std::size_t i = 0; i < 16; ++i) {
+    // Center track pan 0 must be unity (no attenuation).
+    EXPECT_NEAR(center_result.value().channel(0)[i],
+                center_result.value().channel(1)[i], 0.00001F);
+    // Full-left track pan routes all energy to the left channel.
+    EXPECT_NEAR(left_result.value().channel(0)[i],
+                center_result.value().channel(0)[i], 0.0001F);
+    EXPECT_NEAR(left_result.value().channel(1)[i], 0.0F, 0.0001F);
+  }
+}
+
 } // namespace
 } // namespace video_editor::audio_render

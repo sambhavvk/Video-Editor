@@ -51,6 +51,15 @@ private slots:
   void timelineSnapsAndShiftDisablesSnap();
   void timelineCancelsAndDoesNotCommitClicks();
   void timelineHandlesScrolledCoordinatesAndFrameNudges();
+  void timelineSupportsMultiSelectionAndToolModes();
+  void timelineUsesCanonicalSnapResolver();
+  void timelineExposesMarkerGapAndTrackCommands();
+  void timelineRequiresClipEdgesForTrimTools();
+  void timelineKeepsSlipAndSlideOnClipBodies();
+  void timelineRollUsesTheControllerBoundaryConvention();
+  void timelineMarkerSnappingExcludesTheDraggedMarker();
+  void timelineRefreshCancelsMarkerGesturesAndUsesAuthoritativeSelection();
+  void timelineCanCreateTracksWithoutAnExistingTrack();
   void deliverPanelShowsCancelableProgress();
 };
 
@@ -273,7 +282,7 @@ void EditorWindowTest::audioMixerReflectsTrackState() {
   QVERIFY(first_fader != nullptr);
   QVERIFY(first_mute->isChecked());
   QVERIFY(second_solo->isChecked());
-  QVERIFY(!first_fader->isEnabled());
+  QVERIFY(first_fader->isEnabled());
 
   first_mute->click();
   QCOMPARE(muted.count(), 1);
@@ -408,6 +417,12 @@ void EditorWindowTest::timelineSnapsAndShiftDisablesSnap() {
   configureInteractiveTimeline(timeline);
   timeline.setPlayhead(8'000);
   timeline.setSnapThresholdPixels(8);
+  timeline.setSnapResolver([](const video_editor::desktop_ui::TimelineSnapRequest& request) {
+    return video_editor::desktop_ui::TimelineSnapResult{
+        .time = 2'000,
+        .kind = video_editor::desktop_ui::TimelineSnapKind::ClipEdge,
+        .label = QStringLiteral("Clip edge")};
+  });
   QCOMPARE(timeline.snapThresholdPixels(), 8);
   QSignalSpy commits(&timeline, &TimelineWidget::clipEditCommitted);
 
@@ -498,6 +513,230 @@ void EditorWindowTest::timelineHandlesScrolledCoordinatesAndFrameNudges() {
   QCOMPARE(nudge.at(2).toLongLong(), 2'002);
   QCOMPARE(editIntent(nudge), TimelineWidget::EditIntent::Overwrite);
   QCOMPARE(nudgeTimeline.clips().at(0).start, 48'000);
+}
+
+void EditorWindowTest::timelineSupportsMultiSelectionAndToolModes() {
+  TimelineWidget timeline;
+  configureInteractiveTimeline(timeline,
+                               {{QStringLiteral("clip-a"), QStringLiteral("A"), 0, 1'000, 1'000},
+                                {QStringLiteral("clip-b"), QStringLiteral("B"), 0, 3'000, 1'000},
+                                {QStringLiteral("clip-c"), QStringLiteral("C"), 0, 5'000, 1'000}});
+  QSignalSpy selection(&timeline, &TimelineWidget::clipSelectionChanged);
+  QTest::mouseClick(timeline.viewport(), Qt::LeftButton, Qt::NoModifier, {325, 60});
+  QTest::mouseClick(timeline.viewport(), Qt::LeftButton, Qt::ControlModifier, {725, 60});
+  QCOMPARE(timeline.selectedClipIds(),
+           QStringList({QStringLiteral("clip-a"), QStringLiteral("clip-c")}));
+  QTest::mouseClick(timeline.viewport(), Qt::LeftButton, Qt::ShiftModifier, {325, 60});
+  QCOMPARE(
+      timeline.selectedClipIds(),
+      QStringList({QStringLiteral("clip-a"), QStringLiteral("clip-b"), QStringLiteral("clip-c")}));
+  QVERIFY(selection.count() >= 3);
+
+  timeline.setToolMode(TimelineWidget::ToolMode::Slip);
+  QCOMPARE(timeline.toolMode(), TimelineWidget::ToolMode::Slip);
+  QSignalSpy commits(&timeline, &TimelineWidget::clipBatchEditCommitted);
+  sendPointer(timeline, QEvent::MouseButtonPress, {325, 60}, Qt::LeftButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseMove, {365, 60}, Qt::NoButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseButtonRelease, {365, 60}, Qt::LeftButton, Qt::NoButton);
+  QCOMPARE(commits.count(), 1);
+  QCOMPARE(commits.at(0).at(4).value<TimelineWidget::EditMode>(), TimelineWidget::EditMode::Slip);
+}
+
+void EditorWindowTest::timelineUsesCanonicalSnapResolver() {
+  TimelineWidget timeline;
+  configureInteractiveTimeline(timeline);
+  int resolverCalls = 0;
+  timeline.setSnapResolver(
+      [&resolverCalls](const video_editor::desktop_ui::TimelineSnapRequest& request) {
+        ++resolverCalls;
+        Q_ASSERT(request.excludedClipIds.contains(QStringLiteral("clip-a")));
+        return video_editor::desktop_ui::TimelineSnapResult{
+            .time = 2'000,
+            .kind = video_editor::desktop_ui::TimelineSnapKind::Marker,
+            .label = QStringLiteral("Marker")};
+      });
+  QSignalSpy committed(&timeline, &TimelineWidget::clipBatchEditCommitted);
+  sendPointer(timeline, QEvent::MouseButtonPress, {350, 60}, Qt::LeftButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseMove, {448, 60}, Qt::NoButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseButtonRelease, {448, 60}, Qt::LeftButton, Qt::NoButton);
+  QVERIFY(resolverCalls > 0);
+  QCOMPARE(committed.count(), 1);
+  QVERIFY(committed.at(0).at(6).value<video_editor::desktop_ui::TimelineSnapResult>().snapped());
+  resolverCalls = 0;
+  sendPointer(timeline, QEvent::MouseButtonPress, {350, 60}, Qt::LeftButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseMove, {448, 60}, Qt::NoButton, Qt::LeftButton,
+              Qt::ShiftModifier);
+  sendPointer(timeline, QEvent::MouseButtonRelease, {448, 60}, Qt::LeftButton, Qt::NoButton,
+              Qt::ShiftModifier);
+  QCOMPARE(resolverCalls, 0);
+}
+
+void EditorWindowTest::timelineExposesMarkerGapAndTrackCommands() {
+  TimelineWidget timeline;
+  configureInteractiveTimeline(timeline);
+  timeline.setMarkers({{QStringLiteral("m1"), QStringLiteral("Intro"), 2'000}});
+  timeline.setGaps({{QStringLiteral("gap-v1-4000"), QStringLiteral("video-1"), 0, 4'000, 500}});
+  QSignalSpy markerAdded(&timeline, &TimelineWidget::markerAddRequested);
+  QSignalSpy closeGap(&timeline, &TimelineWidget::closeGapRequested);
+  QSignalSpy locked(&timeline, &TimelineWidget::trackLockToggled);
+  QTest::mouseDClick(timeline.viewport(), Qt::LeftButton, Qt::NoModifier, {600, 12});
+  QCOMPARE(markerAdded.count(), 1);
+  QTest::mouseClick(timeline.viewport(), Qt::LeftButton, Qt::NoModifier, {600, 60});
+  QTest::keyClick(&timeline, Qt::Key_Delete);
+  QCOMPARE(closeGap.count(), 1);
+  QTest::mouseClick(timeline.viewport(), Qt::LeftButton, Qt::NoModifier, {125, 48});
+  QCOMPARE(locked.count(), 1);
+  QVERIFY(!timeline.accessibleName().isEmpty());
+}
+
+void EditorWindowTest::timelineRequiresClipEdgesForTrimTools() {
+  TimelineWidget timeline;
+  configureInteractiveTimeline(timeline);
+  timeline.setToolMode(TimelineWidget::ToolMode::RippleTrim);
+  QSignalSpy committed(&timeline, &TimelineWidget::clipBatchEditCommitted);
+  sendPointer(timeline, QEvent::MouseButtonPress, {350, 60}, Qt::LeftButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseMove, {420, 60}, Qt::NoButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseButtonRelease, {420, 60}, Qt::LeftButton, Qt::NoButton);
+  QCOMPARE(committed.count(), 0);
+
+  sendPointer(timeline, QEvent::MouseButtonPress, {276, 60}, Qt::LeftButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseMove, {320, 60}, Qt::NoButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseButtonRelease, {320, 60}, Qt::LeftButton, Qt::NoButton);
+  QCOMPARE(committed.count(), 1);
+  QCOMPARE(committed.at(0).at(5).value<TimelineWidget::EditIntent>(),
+           TimelineWidget::EditIntent::Ripple);
+}
+
+void EditorWindowTest::timelineKeepsSlipAndSlideOnClipBodies() {
+  TimelineWidget timeline;
+  configureInteractiveTimeline(timeline);
+  QSignalSpy committed(&timeline, &TimelineWidget::clipBatchEditCommitted);
+
+  timeline.setToolMode(TimelineWidget::ToolMode::Slip);
+  sendPointer(timeline, QEvent::MouseButtonPress, {278, 60}, Qt::LeftButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseMove, {328, 118}, Qt::NoButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseButtonRelease, {328, 118}, Qt::LeftButton, Qt::NoButton);
+  QCOMPARE(committed.count(), 0);
+
+  sendPointer(timeline, QEvent::MouseButtonPress, {350, 60}, Qt::LeftButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseMove, {400, 118}, Qt::NoButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseButtonRelease, {400, 118}, Qt::LeftButton, Qt::NoButton);
+  QCOMPARE(committed.count(), 1);
+  auto payload = committed.takeFirst();
+  QCOMPARE(payload.at(1).toInt(), 0);
+  QCOMPARE(payload.at(4).value<TimelineWidget::EditMode>(), TimelineWidget::EditMode::Slip);
+
+  timeline.setToolMode(TimelineWidget::ToolMode::Slide);
+  sendPointer(timeline, QEvent::MouseButtonPress, {473, 60}, Qt::LeftButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseMove, {523, 118}, Qt::NoButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseButtonRelease, {523, 118}, Qt::LeftButton, Qt::NoButton);
+  QCOMPARE(committed.count(), 0);
+
+  sendPointer(timeline, QEvent::MouseButtonPress, {350, 60}, Qt::LeftButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseMove, {400, 118}, Qt::NoButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseButtonRelease, {400, 118}, Qt::LeftButton, Qt::NoButton);
+  QCOMPARE(committed.count(), 1);
+  payload = committed.takeFirst();
+  QCOMPARE(payload.at(1).toInt(), 0);
+  QCOMPARE(payload.at(4).value<TimelineWidget::EditMode>(), TimelineWidget::EditMode::Slide);
+}
+
+void EditorWindowTest::timelineRollUsesTheControllerBoundaryConvention() {
+  TimelineWidget timeline;
+  configureInteractiveTimeline(
+      timeline, {{QStringLiteral("left"), QStringLiteral("Left"), 0, 1'000, 2'000},
+                 {QStringLiteral("right"), QStringLiteral("Right"), 0, 3'000, 2'000}});
+  timeline.setToolMode(TimelineWidget::ToolMode::Roll);
+  QSignalSpy committed(&timeline, &TimelineWidget::clipBatchEditCommitted);
+
+  // Even though the pointer starts at Left's incoming edge, the controller
+  // chooses its outgoing adjacent cut. The UI delta must use that same cut.
+  sendPointer(timeline, QEvent::MouseButtonPress, {278, 60}, Qt::LeftButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseMove, {378, 60}, Qt::NoButton, Qt::LeftButton,
+              Qt::ShiftModifier);
+  sendPointer(timeline, QEvent::MouseButtonRelease, {378, 60}, Qt::LeftButton, Qt::NoButton,
+              Qt::ShiftModifier);
+
+  QCOMPARE(committed.count(), 1);
+  const auto payload = committed.takeFirst();
+  QCOMPARE(payload.at(2).toLongLong(), 1'000);
+  QCOMPARE(payload.at(4).value<TimelineWidget::EditMode>(), TimelineWidget::EditMode::Roll);
+}
+
+void EditorWindowTest::timelineMarkerSnappingExcludesTheDraggedMarker() {
+  TimelineWidget timeline;
+  configureInteractiveTimeline(timeline);
+  timeline.setMarkers({{QStringLiteral("marker-1"), QStringLiteral("Intro"), 2'000}});
+  int resolverCalls = 0;
+  bool sawDraggedMarkerExclusion = false;
+  bool sawEmptyMarkerExclusion = false;
+  timeline.setSnapResolver([&resolverCalls, &sawDraggedMarkerExclusion, &sawEmptyMarkerExclusion](
+                               const video_editor::desktop_ui::TimelineSnapRequest& request) {
+    ++resolverCalls;
+    if (!request.excludedMarkerId.isEmpty()) {
+      sawDraggedMarkerExclusion =
+          request.forMarker && request.excludedMarkerId == QStringLiteral("marker-1");
+    } else {
+      sawEmptyMarkerExclusion = request.forMarker && request.excludedMarkerId.isEmpty();
+    }
+    return video_editor::desktop_ui::TimelineSnapResult{
+        .time = 2'500,
+        .kind = video_editor::desktop_ui::TimelineSnapKind::Frame,
+        .label = QStringLiteral("Frame")};
+  });
+  QSignalSpy committed(&timeline, &TimelineWidget::markerMoveCommitted);
+
+  sendPointer(timeline, QEvent::MouseButtonPress, {376, 5}, Qt::LeftButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseMove, {456, 5}, Qt::NoButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseButtonRelease, {456, 5}, Qt::LeftButton, Qt::NoButton);
+
+  QVERIFY(resolverCalls > 0);
+  QVERIFY(sawDraggedMarkerExclusion);
+  QCOMPARE(committed.count(), 1);
+  QCOMPARE(committed.takeFirst().at(1).toLongLong(), 2'500);
+
+  QSignalSpy added(&timeline, &TimelineWidget::markerAddRequested);
+  QTest::mouseDClick(timeline.viewport(), Qt::LeftButton, Qt::NoModifier, {576, 12});
+  QCOMPARE(added.count(), 1);
+  QCOMPARE(added.takeFirst().at(0).toLongLong(), 2'500);
+  QVERIFY(sawEmptyMarkerExclusion);
+}
+
+void EditorWindowTest::timelineRefreshCancelsMarkerGesturesAndUsesAuthoritativeSelection() {
+  TimelineWidget timeline;
+  configureInteractiveTimeline(timeline);
+  timeline.setMarkers({{QStringLiteral("marker-1"), QStringLiteral("Intro"), 2'000}});
+  QSignalSpy canceled(&timeline, &TimelineWidget::markerMoveCanceled);
+  QSignalSpy committed(&timeline, &TimelineWidget::markerMoveCommitted);
+  sendPointer(timeline, QEvent::MouseButtonPress, {376, 5}, Qt::LeftButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseMove, {426, 5}, Qt::NoButton, Qt::LeftButton,
+              Qt::ShiftModifier);
+  timeline.setMarkers({{QStringLiteral("marker-2"), QStringLiteral("Outro"), 4'000}});
+  QCOMPARE(canceled.count(), 1);
+  sendPointer(timeline, QEvent::MouseButtonRelease, {426, 5}, Qt::LeftButton, Qt::NoButton);
+  QCOMPARE(committed.count(), 0);
+
+  QTest::mouseClick(timeline.viewport(), Qt::LeftButton, Qt::NoModifier, {350, 60});
+  QVERIFY(!timeline.selectedClipIds().isEmpty());
+  timeline.setClips({{QStringLiteral("clip-a"), QStringLiteral("Clip A"), 0, 1'000, 2'000}});
+  QVERIFY(timeline.selectedClipIds().isEmpty());
+  QVERIFY(timeline.activeClipId().isEmpty());
+}
+
+void EditorWindowTest::timelineCanCreateTracksWithoutAnExistingTrack() {
+  TimelineWidget timeline;
+  timeline.resize(500, 180);
+  timeline.setTimeline(10'000, 1'000, {}, {});
+  QSignalSpy added(&timeline, &TimelineWidget::trackAddRequested);
+
+  QTest::keyClick(&timeline, Qt::Key_Insert);
+  QTest::keyClick(&timeline, Qt::Key_Insert, Qt::ShiftModifier);
+  QTest::keyClick(&timeline, Qt::Key_Insert, Qt::ControlModifier);
+
+  QCOMPARE(added.count(), 3);
+  QCOMPARE(added.at(0).at(0).value<TrackKind>(), TrackKind::Video);
+  QCOMPARE(added.at(1).at(0).value<TrackKind>(), TrackKind::Audio);
+  QCOMPARE(added.at(2).at(0).value<TrackKind>(), TrackKind::Caption);
 }
 
 void EditorWindowTest::deliverPanelShowsCancelableProgress() {

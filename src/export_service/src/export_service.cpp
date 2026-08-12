@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "video_editor/export_service/export_service.h"
+#include "video_editor/export_service/caption_burn_in.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -821,8 +822,32 @@ ExportOutcome export_video(const ExportRequest& request) {
                                                           std::to_string(index) + ": " +
                                                           rendered.error->message);
       }
+      render::VideoFrame frame_for_export = *rendered.value;
+      if (request.caption_mode == CaptionExportMode::BurnIn ||
+          request.caption_mode == CaptionExportMode::BurnInAndSidecar) {
+        if (frame_for_export.layout != render::PixelLayout::RgbaFloat32 ||
+            !std::holds_alternative<std::shared_ptr<const render::CpuFrame>>(
+                frame_for_export.storage)) {
+          return failure(ExportErrorCode::RenderFailed,
+                         "renderer did not return a CPU frame for caption burn-in");
+        }
+        const auto& source_cpu =
+            std::get<std::shared_ptr<const render::CpuFrame>>(frame_for_export.storage);
+        if (!source_cpu) {
+          return failure(ExportErrorCode::RenderFailed,
+                         "renderer returned an empty frame for caption burn-in");
+        }
+        auto writable_cpu = std::make_shared<render::CpuFrame>(*source_cpu);
+        if (const auto burn_in_error =
+                burn_in_captions(*writable_cpu, request.captions, timeline_time)) {
+          return failure(ExportErrorCode::RenderFailed,
+                         "could not burn in captions (error " +
+                             std::to_string(static_cast<int>(*burn_in_error)) + ")");
+        }
+        frame_for_export.storage = std::shared_ptr<const render::CpuFrame>(std::move(writable_cpu));
+      }
       std::string conversion_error;
-      if (!convert_frame(*rendered.value, *video_frame, conversion_error)) {
+      if (!convert_frame(frame_for_export, *video_frame, conversion_error)) {
         return failure(ExportErrorCode::RenderFailed, std::move(conversion_error));
       }
       video_frame->pts = static_cast<std::int64_t>(index);
@@ -935,6 +960,22 @@ ExportOutcome export_video(const ExportRequest& request) {
                      "could not atomically commit export: " + commit_error.message());
     }
     temporary.release();
+
+    // Write caption sidecar after the media file is committed so a sidecar
+    // failure never prevents the media file from being available. The sidecar
+    // path is derived from the destination stem.
+    if (request.caption_mode == CaptionExportMode::Sidecar ||
+        request.caption_mode == CaptionExportMode::BurnInAndSidecar) {
+      const auto sidecar_outcome =
+          write_caption_sidecar(request.captions, request.destination, request.sidecar_format,
+                                 edit::Time{}, duration);
+      if (sidecar_outcome) {
+        completed_export.caption_sidecar_path = sidecar_outcome.value().path;
+      }
+      // Sidecar failures are non-fatal: the media file is already committed.
+      // A missing sidecar is reported by an empty caption_sidecar_path.
+    }
+
     return ExportOutcome::success(std::move(completed_export));
   } catch (const std::exception& exception) {
     return failure(ExportErrorCode::EncodingFailed,

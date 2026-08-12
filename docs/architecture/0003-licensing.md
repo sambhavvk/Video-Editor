@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: MPL-2.0 -->
+
 # ADR 0003: MPL application with dynamically linked media dependencies
 
 - **Status:** accepted
@@ -12,4 +14,3 @@ and an SPDX software bill of materials.
 GPL/nonfree FFmpeg options and external encoders are disabled in the default build. H.264 encoder
 distribution and codec patents are a public-beta legal release gate, independent of source-code
 license compatibility.
-

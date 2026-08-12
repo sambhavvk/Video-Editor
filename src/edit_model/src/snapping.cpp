@@ -67,6 +67,9 @@ std::vector<SnapCandidate> findSnapCandidates(const Sequence& sequence,
 
   if (request.include_markers) {
     for (const auto& marker : sequence.markers) {
+      if (request.excluded_marker_ids.contains(marker.id)) {
+        continue;
+      }
       appendIfNear(candidates, request,
                    SnapCandidate{marker.range.start, Time{}, SnapTargetKind::Marker,
                                  SnapEdge::Start, marker.id, std::nullopt, std::nullopt});
@@ -81,6 +84,9 @@ std::vector<SnapCandidate> findSnapCandidates(const Sequence& sequence,
   if (request.include_clip_edges) {
     for (const auto& track : sequence.tracks) {
       for (const auto& clip : track.clips) {
+        if (request.excluded_clip_ids.contains(clip.id)) {
+          continue;
+        }
         appendIfNear(candidates, request,
                      SnapCandidate{clip.timeline_range.start, Time{}, SnapTargetKind::ClipEdge,
                                    SnapEdge::Start, clip.id, track.id, std::nullopt});

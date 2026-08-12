@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "video_editor/audio_render/timeline_audio_renderer.h"
+#include "video_editor/audio_render/track_dsp_chain.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -523,6 +524,14 @@ AudioRenderResult TimelineAudioRenderer::render(const edit::TimelineSnapshot& sn
     if (track.kind != edit::TrackKind::Audio || track.muted || (has_solo && !track.solo)) {
       continue;
     }
+    // Render this track into a temporary block so track-level DSP (EQ,
+    // compressor, denoise, limiter) can be applied to the isolated track mix
+    // before summing into the master output. This preserves correct filter
+    // state and prevents one track's DSP from affecting another.
+    audio::AudioBlock track_output(
+        {.sample_rate = kTimelineAudioSampleRate, .channels = kTimelineAudioChannels},
+        request.start_sample, request.sample_count);
+    bool track_has_audio = false;
     for (const edit::Clip& clip : track.clips) {
       if (clip.kind != edit::ClipKind::Audio) {
         continue;
@@ -581,8 +590,20 @@ AudioRenderResult TimelineAudioRenderer::render(const edit::TimelineSnapshot& sn
       const float pan_angle = (pan + 1.0F) * (std::numbers::pi_v<float> / 4.0F);
       const float left_pan = std::cos(pan_angle);
       const float right_pan = std::sin(pan_angle);
-      auto left_output = output.channel(0);
-      auto right_output = output.channel(1);
+      // Track-level gain/pan is a separate mixer stage. At defaults (0 dB,
+      // pan 0) it must be unity so an unadjusted track is bit-identical to the
+      // clip mix. Track pan therefore uses a linear law (pan=-1 -> left only,
+      // pan 0 -> both unity, pan=+1 -> right only) rather than the equal-power
+      // law used for clip pan, because a mixer fader's center detent should
+      // not attenuate the signal.
+      const float track_gain =
+          static_cast<float>(std::pow(10.0, track.audio_gain_db / 20.0));
+      const float track_pan =
+          static_cast<float>(std::clamp(track.audio_pan, -1.0, 1.0));
+      const float track_left_pan = std::clamp(1.0F - track_pan, 0.0F, 1.0F);
+      const float track_right_pan = std::clamp(1.0F + track_pan, 0.0F, 1.0F);
+      auto left_track = track_output.channel(0);
+      auto right_track = track_output.channel(1);
       for (std::size_t index = begin; index < end; ++index) {
         if (is_cancelled(request.cancellation)) {
           return request_error(AudioRenderErrorCode::Cancelled, "audio render was cancelled");
@@ -595,9 +616,35 @@ AudioRenderResult TimelineAudioRenderer::render(const edit::TimelineSnapshot& sn
             request.start_sample + static_cast<std::int64_t>(index);
         const float envelope =
             fade_gain(clip, edit::Time(absolute_sample, kTimelineAudioSampleRate));
-        left_output[index] += found->second.left * clip_gain * left_pan * envelope;
-        right_output[index] += found->second.right * clip_gain * right_pan * envelope;
+        const float left_sample =
+            found->second.left * clip_gain * left_pan * envelope * track_gain * track_left_pan;
+        const float right_sample =
+            found->second.right * clip_gain * right_pan * envelope * track_gain * track_right_pan;
+        left_track[index] += left_sample;
+        right_track[index] += right_sample;
+        track_has_audio = true;
       }
+    }
+    if (!track_has_audio) {
+      continue;
+    }
+    // Apply track-level DSP chain (EQ, compressor, dialogue denoise, limiter)
+    // to the isolated track mix before summing into the master output.
+    if (!track.effects.empty()) {
+      TrackDspChain dsp_chain;
+      dsp_chain.configure(track.effects, static_cast<float>(kTimelineAudioSampleRate));
+      if (!dsp_chain.empty()) {
+        dsp_chain.process(track_output);
+      }
+    }
+    // Sum the processed track into the master output.
+    auto left_output = output.channel(0);
+    auto right_output = output.channel(1);
+    auto left_track = track_output.channel(0);
+    auto right_track = track_output.channel(1);
+    for (std::size_t index = 0; index < request.sample_count; ++index) {
+      left_output[index] += left_track[index];
+      right_output[index] += right_track[index];
     }
   }
 

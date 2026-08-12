@@ -60,6 +60,22 @@ ctest --test-dir build/render-engine --output-on-failure
 The CPU path remains the correctness oracle and mandatory fallback for the
 libplacebo backend described below.
 
+## Titles and transitions
+
+`CpuRenderer` is also the reference implementation for canonical title and
+transition output:
+
+- title clips rasterize directly from edit-model title payloads without asking
+  the media provider to decode anything;
+- unsupported glyphs render with one deterministic replacement glyph, so the
+  same title payload produces the same golden image on every machine;
+- enabled `CrossDissolve` and `DipToBlack` transitions evaluate in exact
+  half-open timeline ranges and use source-handle extrapolation from the
+  adjacent outgoing/incoming clips.
+
+This keeps preview and export behavior aligned with the same immutable snapshot
+contract used by the rest of the CPU compositor.
+
 ## Capability-gated GPU foundation
 
 `gpu_backend.h` provides a typed API independent of Qt:
@@ -115,6 +131,7 @@ The current GPU path accelerates timeline transform/crop/opacity and normal
 source-over composition, color-aware libplacebo rendering, readback, and
 swapchain presentation. Decode still produces CPU RGBA frames that are
 uploaded per active clip. Non-normal blend shaders, titles, effects,
-YUV/native-handle uploads, zero-copy decode, shader/texture pooling, and
-UI-owned swapchain creation remain later integration work. The CPU renderer is
-the required typed fallback for all unsupported or failed GPU frames.
+transitions, YUV/native-handle uploads, zero-copy decode, shader/texture
+pooling, and UI-owned swapchain creation remain later integration work. The CPU
+renderer is the required typed fallback for all unsupported or failed GPU
+frames.

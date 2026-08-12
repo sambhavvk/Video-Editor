@@ -78,7 +78,19 @@ TEST(ClipPropertiesTest, AppendsOperationsWithoutChangingExistingVariantOrdinals
   EXPECT_EQ(EditOperation{SetClipBlendModeCommand{}}.index(), 25U);
   EXPECT_EQ(EditOperation{SetClipAudioPropertiesCommand{}}.index(), 26U);
   EXPECT_EQ(EditOperation{SetTrackAudioStateCommand{}}.index(), 27U);
-  EXPECT_EQ(std::variant_size_v<EditOperation>, 28U);
+  EXPECT_EQ(EditOperation{SetClipTitleCommand{}}.index(), 28U);
+  EXPECT_EQ(EditOperation{SetClipSpeedCommand{}}.index(), 29U);
+  EXPECT_EQ(EditOperation{AddTransitionCommand{}}.index(), 30U);
+  EXPECT_EQ(EditOperation{UpdateTransitionCommand{}}.index(), 31U);
+  EXPECT_EQ(EditOperation{RemoveTransitionCommand{}}.index(), 32U);
+  EXPECT_EQ(EditOperation{RenameTrackCommand{}}.index(), 33U);
+  EXPECT_EQ(EditOperation{ReorderTrackCommand{}}.index(), 34U);
+  EXPECT_EQ(EditOperation{SetTrackLockedCommand{}}.index(), 35U);
+  EXPECT_EQ(EditOperation{SetTrackVisibilityCommand{}}.index(), 36U);
+  EXPECT_EQ(EditOperation{SetTrackTargetedCommand{}}.index(), 37U);
+  EXPECT_EQ(EditOperation{CloseGapCommand{}}.index(), 38U);
+  EXPECT_EQ(EditOperation{SetTrackAudioMixCommand{}}.index(), 39U);
+  EXPECT_EQ(std::variant_size_v<EditOperation>, 40U);
 }
 
 TEST(ClipPropertiesTest, AppliesAndRoundTripsTypedPropertiesAsExactRevisions) {

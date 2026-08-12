@@ -56,6 +56,7 @@ if(VIDEO_EDITOR_ENABLE_GPU_RENDERING AND (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "L
 endif()
 
 add_library(video_editor_render_engine
+  src/bitmap_glyphs.cpp
   src/cpu_renderer.cpp
   src/frame.cpp
   src/gpu_backend.cpp

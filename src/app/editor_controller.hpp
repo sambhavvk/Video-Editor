@@ -15,9 +15,11 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <stop_token>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 class QEvent;
@@ -72,6 +74,12 @@ public:
   [[nodiscard]] std::int64_t audioMasterSampleCounter() const noexcept;
   [[nodiscard]] std::uint64_t audioXrunCount() const;
   [[nodiscard]] bool audioControlPending() const;
+  [[nodiscard]] bool playbackRunning() const noexcept {
+    return playback_rate_ != 0.0;
+  }
+  [[nodiscard]] std::uint64_t previewPresentationCount() const noexcept {
+    return preview_presentation_count_;
+  }
   [[nodiscard]] bool gpuPreviewActive() const noexcept {
     return gpu_preview_active_;
   }
@@ -113,12 +121,21 @@ private slots:
   void updateCaptionText(int visibleRow, const QString& text);
   void searchTranscript(const QString& query);
   void updateSelectedClipProperty(const QString& parameterId, const QVariant& value);
+  void toggleSelectedClipKeyframe(const QString& parameterId);
+  void addTitleClip();
+  void setTransitionSelection(const QString& transitionId);
+  void updateTransitionDuration(const QString& transitionId, qint64 duration);
+  void removeTransition(const QString& transitionId);
+  void changeTransitionPreset(const QString& transitionId, const QString& kind);
   void setAudioTrackMuted(int trackIndex, bool muted);
   void setAudioTrackSolo(int trackIndex, bool soloed);
+  void setAudioTrackGain(int trackIndex, double gainDb);
+  void setAudioTrackPan(int trackIndex, double pan);
   void chooseVideoExport(const QString& presetId);
 
 private:
   enum class AudioControlIntent : std::uint8_t { None, Start, Pause, Resume, Seek };
+  enum class PreviewRequestPolicy : std::uint8_t { Replace, Coalesce };
 
   struct ImportOutcome {
     std::filesystem::path path;
@@ -179,7 +196,35 @@ private:
   void rebuildPlaybackRegistry();
   void commitTimelineEdit(const QString& clipId, int destinationTrackIndex, qint64 startDelta,
                           qint64 durationDelta, int editMode, int editIntent);
-  void requestPreview();
+  void commitTimelineBatchEdit(const QStringList& clipIds, int destinationTrackIndex,
+                               qint64 startDelta, qint64 durationDelta, int editMode,
+                               int editIntent);
+  void nudgeTimelineSelection(const QStringList& clipIds, int frameCount, int editIntent);
+  void setClipSelection(const QStringList& clipIds, const QString& activeClipId);
+  void selectMarker(const QString& markerId);
+  void selectGap(const QString& gapKey);
+  void pruneTimelineSelection(const edit::Sequence& sequence);
+  [[nodiscard]] std::vector<edit::EntityId> selectedClipIds() const;
+  [[nodiscard]] std::vector<edit::EntityId>
+  expandLinkedSelection(const edit::Sequence& sequence,
+                        const std::vector<edit::EntityId>& clipIds) const;
+  [[nodiscard]] std::uint32_t timelineTimeScale(const edit::Sequence& sequence) const;
+  [[nodiscard]] edit::Time timelineTime(qint64 value) const;
+  [[nodiscard]] qint64 timelineValue(edit::Time time) const;
+  [[nodiscard]] bool applyTrackCommand(edit::EditCommand command, const QString& failureContext);
+  void addTrack(int trackKind);
+  void renameTrack(const QString& trackId, const QString& name);
+  void reorderTrack(const QString& trackId, int destinationIndex);
+  void setTrackLocked(const QString& trackId, bool locked);
+  void setTrackVisible(const QString& trackId, bool visible);
+  void setTrackTargeted(const QString& trackId, bool targeted);
+  void removeTrack(const QString& trackId);
+  void addMarker(qint64 start);
+  void moveMarker(const QString& markerId, qint64 start);
+  void renameMarker(const QString& markerId, const QString& name);
+  void removeMarker(const QString& markerId);
+  void closeGap(const QString& gapKey);
+  void requestPreview(PreviewRequestPolicy policy = PreviewRequestPolicy::Replace);
   void launchPreviewRequest();
   [[nodiscard]] bool startAudioMasterPlayback();
   void stopAudioPlayback() noexcept;
@@ -209,10 +254,22 @@ private:
   std::vector<QFuture<ProxyOutcome>> proxy_futures_;
   std::vector<std::size_t> visible_caption_indices_;
   QString caption_search_;
-  std::optional<edit::EntityId> selected_clip_;
+  // Timeline selection is deliberately transient. It is never stored in a
+  // project snapshot and is pruned against every authoritative revision.
+  std::unordered_set<edit::EntityId> selected_clip_ids_;
+  std::optional<edit::EntityId> active_clip_id_;
+  std::optional<edit::EntityId> selected_transition_id_;
+  // Last-applied speed percentage for the active clip, used when only the
+  // reverse toggle changes (so the rate is preserved).
+  double selected_speed_percent_{100.0};
+  std::optional<edit::EntityId> selected_marker_id_;
+  QString selected_gap_key_;
+  std::uint32_t timeline_time_scale_{48'000};
   qint64 playhead_{0};
   qint64 requested_preview_position_{0};
   std::uint64_t preview_epoch_{0};
+  std::uint64_t preview_request_serial_{0};
+  std::uint64_t preview_presentation_count_{0};
   bool preview_in_flight_{false};
   bool gpu_preview_active_{false};
   bool gpu_fallback_latched_{false};

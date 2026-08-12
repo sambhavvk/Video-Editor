@@ -28,6 +28,10 @@ if(TARGET video_editor_proxy_service AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/pro
   add_subdirectory(proxy_service)
 endif()
 
+if(TARGET video_editor_media_cache AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/media_cache/CMakeLists.txt")
+  add_subdirectory(media_cache)
+endif()
+
 if(TARGET video_editor_render_engine AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/render_engine/CMakeLists.txt")
   add_subdirectory(render_engine)
 endif()

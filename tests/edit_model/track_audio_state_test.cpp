@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include <limits>
 #include <variant>
 
 namespace video_editor::edit {
@@ -152,7 +153,82 @@ TEST(TrackAudioStateTest, RejectsStaleMissingAndNonAudioTargetsAtomically) {
 TEST(TrackAudioStateTest, IsAppendedAfterEveryExistingOperation) {
   EXPECT_EQ(EditOperation{SetClipAudioPropertiesCommand{}}.index(), 26U);
   EXPECT_EQ(EditOperation{SetTrackAudioStateCommand{}}.index(), 27U);
-  EXPECT_EQ(std::variant_size_v<EditOperation>, 28U);
+  EXPECT_EQ(EditOperation{SetClipTitleCommand{}}.index(), 28U);
+  EXPECT_EQ(EditOperation{SetClipSpeedCommand{}}.index(), 29U);
+  EXPECT_EQ(EditOperation{AddTransitionCommand{}}.index(), 30U);
+  EXPECT_EQ(EditOperation{UpdateTransitionCommand{}}.index(), 31U);
+  EXPECT_EQ(EditOperation{RemoveTransitionCommand{}}.index(), 32U);
+  EXPECT_EQ(EditOperation{RenameTrackCommand{}}.index(), 33U);
+  EXPECT_EQ(EditOperation{CloseGapCommand{}}.index(), 38U);
+  EXPECT_EQ(EditOperation{SetTrackAudioMixCommand{}}.index(), 39U);
+  EXPECT_EQ(std::variant_size_v<EditOperation>, 40U);
+}
+
+TEST(TrackAudioMixTest, AppliesGainAndPanToAudioTrackOnly) {
+  const MixerFixture fixture = makeMixerFixture();
+  TimelineEditor editor(fixture.project);
+  const EditCommand command{
+      SetTrackAudioMixCommand{fixture.sequence_id, fixture.audio_track_id, -6.0, 0.5}, {}};
+  auto revision = editor.apply(command, Revision{0});
+  ASSERT_TRUE(revision) << revision.error().message;
+  auto snapshot = editor.snapshot(fixture.sequence_id, revision.value());
+  ASSERT_TRUE(snapshot);
+  const edit::Track* track = snapshot.value().findTrack(fixture.audio_track_id);
+  ASSERT_NE(track, nullptr);
+  EXPECT_DOUBLE_EQ(track->audio_gain_db, -6.0);
+  EXPECT_DOUBLE_EQ(track->audio_pan, 0.5);
+}
+
+TEST(TrackAudioMixTest, RejectsNonAudioTrack) {
+  const MixerFixture fixture = makeMixerFixture();
+  TimelineEditor editor(fixture.project);
+  const EditCommand command{
+      SetTrackAudioMixCommand{fixture.sequence_id, fixture.video_track_id, -6.0, 0.5}, {}};
+  auto revision = editor.apply(command, Revision{0});
+  ASSERT_FALSE(revision);
+  EXPECT_EQ(revision.error().code, EditErrorCode::InvalidTrackKind);
+}
+
+TEST(TrackAudioMixTest, RejectsNonFiniteValues) {
+  const MixerFixture fixture = makeMixerFixture();
+  TimelineEditor editor(fixture.project);
+  const EditCommand command{
+      SetTrackAudioMixCommand{fixture.sequence_id, fixture.audio_track_id,
+                              std::numeric_limits<double>::infinity(), 0.5},
+      {}};
+  auto revision = editor.apply(command, Revision{0});
+  ASSERT_FALSE(revision);
+  EXPECT_EQ(revision.error().code, EditErrorCode::InvalidArgument);
+}
+
+TEST(TrackAudioMixTest, CoalescesAdjacentGainDrags) {
+  const MixerFixture fixture = makeMixerFixture();
+  TimelineEditor editor(fixture.project);
+  const std::string key = "mixer:" + fixture.audio_track_id.toString() + ":gain";
+  auto r1 = editor.apply(
+      EditCommand{SetTrackAudioMixCommand{fixture.sequence_id, fixture.audio_track_id, -1.0, 0.0},
+                  key},
+      Revision{0});
+  ASSERT_TRUE(r1);
+  auto r2 = editor.apply(
+      EditCommand{SetTrackAudioMixCommand{fixture.sequence_id, fixture.audio_track_id, -2.0, 0.0},
+                  key},
+      r1.value());
+  ASSERT_TRUE(r2);
+  auto snapshot = editor.snapshot(fixture.sequence_id, r2.value());
+  ASSERT_TRUE(snapshot);
+  const edit::Track* track = snapshot.value().findTrack(fixture.audio_track_id);
+  ASSERT_NE(track, nullptr);
+  EXPECT_DOUBLE_EQ(track->audio_gain_db, -2.0);
+  // Two coalesced commands collapse into one undo step.
+  ASSERT_TRUE(editor.canUndo());
+  auto undone = editor.undo(r2.value());
+  ASSERT_TRUE(undone);
+  auto after_undo = editor.snapshot(fixture.sequence_id, undone.value());
+  ASSERT_TRUE(after_undo);
+  const edit::Track* undone_track = after_undo.value().findTrack(fixture.audio_track_id);
+  ASSERT_NE(undone_track, nullptr);
+  EXPECT_DOUBLE_EQ(undone_track->audio_gain_db, 0.0);
 }
 
 } // namespace

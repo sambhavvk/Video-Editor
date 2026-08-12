@@ -63,6 +63,12 @@ CREATE TABLE schema_migrations (
 );
 )sql";
 
+constexpr std::string_view kSchemaV2CommandPayloadSchemaVersion = R"sql(
+ALTER TABLE command_journal
+ADD COLUMN payload_schema_version INTEGER NOT NULL DEFAULT 1
+CHECK (payload_schema_version > 0);
+)sql";
+
 struct Migration {
   std::uint32_t from_version;
   std::uint32_t to_version;
@@ -73,9 +79,15 @@ struct Migration {
 // Future migrations are appended here as adjacent, forward-only steps. The
 // runner wraps each entry, its migration record, metadata version, and
 // user_version update in one exclusive transaction.
-constexpr std::array<Migration, 1> kMigrations{{
+constexpr std::array<Migration, 2> kMigrations{{
     {0, 1, "create_project_store_v1", kSchemaV1},
+    {1, 2, "add_command_payload_schema_version_v2", kSchemaV2CommandPayloadSchemaVersion},
 }};
+
+[[nodiscard]] bool is_supported_project_schema_version(const std::uint32_t version) noexcept {
+  return version >= kMinimumSupportedProjectSchemaVersion &&
+         version <= kCurrentProjectSchemaVersion;
+}
 
 [[noreturn]] void throw_sqlite(sqlite3* db, const std::string_view context, const int result) {
   std::string message(context);
@@ -369,13 +381,22 @@ void update_metadata_schema_version(sqlite3* db, const std::uint32_t version) {
   }
 }
 
+[[nodiscard]] std::string unsupported_schema_version_message(const std::uint32_t version) {
+  std::ostringstream message;
+  if (version < kMinimumSupportedProjectSchemaVersion) {
+    message << "Project schema version " << version << " is older than the supported range "
+            << kMinimumSupportedProjectSchemaVersion << "-" << kCurrentProjectSchemaVersion;
+  } else {
+    message << "Project schema version " << version << " is newer than the supported range "
+            << kMinimumSupportedProjectSchemaVersion << "-" << kCurrentProjectSchemaVersion;
+  }
+  return message.str();
+}
+
 void run_migrations(SqliteConnection& connection, const std::string_view initial_project_uuid) {
   std::uint32_t version = read_user_version(connection.native_handle());
-  if (version > kCurrentProjectSchemaVersion) {
-    std::ostringstream message;
-    message << "Project schema version " << version << " is newer than the supported version "
-            << kCurrentProjectSchemaVersion;
-    throw ProjectStoreError(message.str());
+  if (!is_supported_project_schema_version(version) && version != 0) {
+    throw ProjectStoreError(unsupported_schema_version_message(version));
   }
 
   if (version == 0 && count_user_tables(connection.native_handle()) != 0) {
@@ -401,17 +422,21 @@ void run_migrations(SqliteConnection& connection, const std::string_view initial
     }
 
     Transaction transaction(connection, "BEGIN EXCLUSIVE");
-    connection.execute(selected->sql);
-    if (selected->from_version == 0) {
-      insert_initial_metadata(connection.native_handle(), initial_project_uuid);
-    }
-    update_metadata_schema_version(connection.native_handle(), selected->to_version);
-    insert_migration_record(connection.native_handle(), *selected);
+    try {
+      connection.execute(selected->sql);
+      if (selected->from_version == 0) {
+        insert_initial_metadata(connection.native_handle(), initial_project_uuid);
+      }
+      update_metadata_schema_version(connection.native_handle(), selected->to_version);
+      insert_migration_record(connection.native_handle(), *selected);
 
-    const std::string set_user_version =
-        "PRAGMA user_version = " + std::to_string(selected->to_version);
-    connection.execute(set_user_version);
-    transaction.commit();
+      const std::string set_user_version =
+          "PRAGMA user_version = " + std::to_string(selected->to_version);
+      connection.execute(set_user_version);
+      transaction.commit();
+    } catch (const SqliteError& error) {
+      throw ProjectStoreError("Could not migrate the project schema: " + std::string(error.what()));
+    }
 
     version = selected->to_version;
   }
@@ -598,9 +623,8 @@ RecoveryCandidate inspect_recovery_candidate(const std::filesystem::path& path,
     }
 
     const std::uint32_t user_version = read_user_version(connection.native_handle());
-    if (user_version != kCurrentProjectSchemaVersion) {
-      throw ProjectStoreError("Unsupported recovery database schema version " +
-                              std::to_string(user_version));
+    if (!is_supported_project_schema_version(user_version)) {
+      throw ProjectStoreError(unsupported_schema_version_message(user_version));
     }
     validate_schema(connection.native_handle());
     ensure_single_metadata_record(connection.native_handle());
@@ -976,22 +1000,29 @@ IntegrityResult ProjectStore::quick_check() const {
 
 Revision ProjectStore::append_command(const std::string_view command_type,
                                       const std::string_view payload,
-                                      const Revision expected_revision) {
-  return append_payload(command_type, CommandPayload{std::string(payload)}, expected_revision);
+                                      const Revision expected_revision,
+                                      const std::uint32_t payload_schema_version) {
+  return append_payload(command_type, CommandPayload{std::string(payload)}, expected_revision,
+                        payload_schema_version);
 }
 
 Revision ProjectStore::append_command(const std::string_view command_type,
                                       const std::span<const std::byte> payload,
-                                      const Revision expected_revision) {
+                                      const Revision expected_revision,
+                                      const std::uint32_t payload_schema_version) {
   return append_payload(command_type, CommandPayload{BinaryPayload(payload.begin(), payload.end())},
-                        expected_revision);
+                        expected_revision, payload_schema_version);
 }
 
 Revision ProjectStore::append_payload(const std::string_view command_type,
                                       const CommandPayload& payload,
-                                      const Revision expected_revision) {
+                                      const Revision expected_revision,
+                                      const std::uint32_t payload_schema_version) {
   if (command_type.empty()) {
     throw std::invalid_argument("Command type must not be empty");
+  }
+  if (payload_schema_version == 0) {
+    throw std::invalid_argument("Payload schema version must be positive");
   }
   to_sql_revision(expected_revision);
 
@@ -1006,7 +1037,8 @@ Revision ProjectStore::append_payload(const std::string_view command_type,
   const std::int64_t timestamp = now_utc_ms();
   Statement insert(connection_.native_handle(),
                    "INSERT INTO command_journal(revision, command_type, payload_kind, "
-                   "payload_text, payload_blob, created_at_utc_ms) VALUES(?, ?, ?, ?, ?, ?)");
+                   "payload_text, payload_blob, payload_schema_version, created_at_utc_ms) "
+                   "VALUES(?, ?, ?, ?, ?, ?, ?)");
   insert.bind_int64(1, to_sql_revision(next_revision));
   insert.bind_text(2, command_type);
   if (std::holds_alternative<std::string>(payload)) {
@@ -1018,7 +1050,8 @@ Revision ProjectStore::append_payload(const std::string_view command_type,
     insert.bind_null(4);
     insert.bind_blob(5, std::get<BinaryPayload>(payload));
   }
-  insert.bind_int64(6, timestamp);
+  insert.bind_int64(6, static_cast<sqlite3_int64>(payload_schema_version));
+  insert.bind_int64(7, timestamp);
   if (insert.step() != SQLITE_DONE) {
     throw ProjectStoreError("Could not append the command journal entry");
   }
@@ -1040,7 +1073,8 @@ Revision ProjectStore::append_payload(const std::string_view command_type,
 std::vector<JournalEntry> ProjectStore::read_commands(const Revision after_revision) const {
   Statement statement(connection_.native_handle(),
                       "SELECT revision, command_type, payload_kind, payload_text, payload_blob, "
-                      "created_at_utc_ms FROM command_journal WHERE revision > ? "
+                      "payload_schema_version, created_at_utc_ms "
+                      "FROM command_journal WHERE revision > ? "
                       "ORDER BY revision ASC");
   statement.bind_int64(1, to_sql_revision(after_revision));
 
@@ -1057,7 +1091,14 @@ std::vector<JournalEntry> ProjectStore::read_commands(const Revision after_revis
     } else {
       throw ProjectStoreError("Command journal has an unknown payload kind");
     }
-    entry.created_at_utc_ms = statement.column_int64(5);
+    const auto payload_schema_version = statement.column_int64(5);
+    if (payload_schema_version <= 0 ||
+        payload_schema_version >
+            static_cast<sqlite3_int64>(std::numeric_limits<std::uint32_t>::max())) {
+      throw ProjectStoreError("Command journal has an invalid payload schema version");
+    }
+    entry.payload_schema_version = static_cast<std::uint32_t>(payload_schema_version);
+    entry.created_at_utc_ms = statement.column_int64(6);
     entries.push_back(std::move(entry));
   }
   return entries;

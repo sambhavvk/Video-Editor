@@ -26,6 +26,26 @@ namespace {
                      [](const edit::Effect& effect) { return effect.enabled; });
 }
 
+[[nodiscard]] const edit::Clip* find_clip_on_track(const edit::Track& track,
+                                                   const edit::EntityId clip_id) {
+  const auto found =
+      std::find_if(track.clips.begin(), track.clips.end(),
+                   [&clip_id](const edit::Clip& clip) { return clip.id == clip_id; });
+  return found == track.clips.end() ? nullptr : &*found;
+}
+
+[[nodiscard]] bool has_active_transition_on_track(const edit::Sequence& sequence,
+                                                  const edit::Track& track, const edit::Time time) {
+  return std::any_of(sequence.transitions.begin(), sequence.transitions.end(),
+                     [&track, time](const edit::Transition& transition) {
+                       if (!transition.enabled || !transition.range.contains(time)) {
+                         return false;
+                       }
+                       return find_clip_on_track(track, transition.outgoing_clip_id) != nullptr &&
+                              find_clip_on_track(track, transition.incoming_clip_id) != nullptr;
+                     });
+}
+
 [[nodiscard]] RenderResult<GpuImage> stale() {
   return RenderResult<GpuImage>::failure(
       {.code = RenderErrorCode::StaleRequest,
@@ -78,8 +98,13 @@ RenderResult<GpuImage> GpuTimelineRenderer::request_frame(const edit::TimelineSn
   std::vector<GpuLayer> layers;
 
   for (const edit::Track& track : sequence->tracks) {
-    if (track.kind != edit::TrackKind::Video || track.muted) {
+    if (track.kind != edit::TrackKind::Video || track.muted || !track.visible) {
       continue;
+    }
+    if (has_active_transition_on_track(*sequence, track, time)) {
+      return RenderResult<GpuImage>::failure(
+          {.code = RenderErrorCode::GpuUnsupportedTimeline,
+           .message = "GPU timeline preview does not yet support active transitions"});
     }
     if (has_enabled_effects(track.effects)) {
       return RenderResult<GpuImage>::failure(

@@ -6,6 +6,7 @@ add_executable(video_editor_edit_model_tests
   entity_id_test.cpp
   precision_edit_test.cpp
   time_test.cpp
+  title_transition_test.cpp
   track_audio_state_test.cpp
   timeline_editor_test.cpp
 )

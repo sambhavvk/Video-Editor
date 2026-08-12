@@ -6,7 +6,9 @@
 #include <limits>
 #include <mutex>
 #include <stdexcept>
+#include <string_view>
 #include <type_traits>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -50,6 +52,24 @@ struct ClipLocation final {
   return std::nullopt;
 }
 
+struct ConstClipLocation final {
+  const Track* track{nullptr};
+  const Clip* clip{nullptr};
+  std::size_t clip_index{0};
+};
+
+[[nodiscard]] std::optional<ConstClipLocation> clipLocation(const Sequence& sequence,
+                                                            EntityId id) noexcept {
+  for (const auto& track : sequence.tracks) {
+    for (std::size_t index = 0; index < track.clips.size(); ++index) {
+      if (track.clips[index].id == id) {
+        return ConstClipLocation{&track, &track.clips[index], index};
+      }
+    }
+  }
+  return std::nullopt;
+}
+
 void sortClips(Track& track) {
   std::stable_sort(track.clips.begin(), track.clips.end(), [](const Clip& lhs, const Clip& rhs) {
     if (lhs.timeline_range.start == rhs.timeline_range.start) {
@@ -85,12 +105,69 @@ void sortClips(Track& track) {
   });
 }
 
+constexpr double kMinimumUnitColor = 0.0;
+constexpr double kMaximumUnitColor = 1.0;
+
 constexpr double kMaximumPositionMagnitude = 1'000'000.0;
 constexpr double kMinimumScaleMagnitude = 0.0001;
 constexpr double kMaximumScaleMagnitude = 1'000.0;
 constexpr double kMaximumRotationMagnitude = 36'000.0;
 constexpr double kMinimumAudioGainDb = -96.0;
 constexpr double kMaximumAudioGainDb = 24.0;
+constexpr std::size_t kMaximumTrackNameBytes = 256;
+
+[[nodiscard]] bool validUtf8(std::string_view text) noexcept {
+  std::size_t index = 0;
+  while (index < text.size()) {
+    const auto byte = static_cast<unsigned char>(text[index]);
+    std::size_t continuation_count = 0;
+    std::uint32_t code_point = 0;
+    if (byte <= 0x7F) {
+      code_point = byte;
+      continuation_count = 0;
+    } else if ((byte & 0xE0U) == 0xC0U) {
+      code_point = byte & 0x1FU;
+      continuation_count = 1;
+      if (code_point == 0) {
+        return false;
+      }
+    } else if ((byte & 0xF0U) == 0xE0U) {
+      code_point = byte & 0x0FU;
+      continuation_count = 2;
+    } else if ((byte & 0xF8U) == 0xF0U) {
+      code_point = byte & 0x07U;
+      continuation_count = 3;
+    } else {
+      return false;
+    }
+    if (index + continuation_count >= text.size()) {
+      return false;
+    }
+    for (std::size_t continuation = 0; continuation < continuation_count; ++continuation) {
+      const auto next = static_cast<unsigned char>(text[index + 1 + continuation]);
+      if ((next & 0xC0U) != 0x80U) {
+        return false;
+      }
+      code_point = (code_point << 6U) | static_cast<std::uint32_t>(next & 0x3FU);
+    }
+    if ((continuation_count == 1 && code_point < 0x80U) ||
+        (continuation_count == 2 && code_point < 0x800U) ||
+        (continuation_count == 3 && code_point < 0x10000U) || code_point > 0x10FFFFU ||
+        (code_point >= 0xD800U && code_point <= 0xDFFFU)) {
+      return false;
+    }
+    index += continuation_count + 1;
+  }
+  return true;
+}
+
+[[nodiscard]] std::optional<EditError> validateTrackName(std::string_view name) {
+  if (name.empty() || name.size() > kMaximumTrackNameBytes || !validUtf8(name)) {
+    return error(EditErrorCode::InvalidArgument,
+                 "track name must be non-empty valid UTF-8 and at most 256 bytes");
+  }
+  return std::nullopt;
+}
 
 [[nodiscard]] bool inClosedRange(const double value, const double minimum,
                                  const double maximum) noexcept {
@@ -167,6 +244,167 @@ constexpr double kMaximumAudioGainDb = 24.0;
   return std::nullopt;
 }
 
+[[nodiscard]] std::optional<EditError> validateColor(const ColorRgba& color,
+                                                     const std::string_view label) {
+  if (!inClosedRange(color.red, kMinimumUnitColor, kMaximumUnitColor) ||
+      !inClosedRange(color.green, kMinimumUnitColor, kMaximumUnitColor) ||
+      !inClosedRange(color.blue, kMinimumUnitColor, kMaximumUnitColor) ||
+      !inClosedRange(color.alpha, kMinimumUnitColor, kMaximumUnitColor)) {
+    return error(EditErrorCode::InvalidArgument,
+                 std::string(label) + " color channels must be finite and within [0, 1]");
+  }
+  return std::nullopt;
+}
+
+[[nodiscard]] std::optional<EditError> validateTitle(const Title& title) {
+  constexpr std::size_t kMaximumTitleTextBytes = 64U * 1024U;
+  constexpr std::size_t kMaximumTitleFontFamilyBytes = 1024U;
+  constexpr double kMinimumTitleFontSize = 1.0;
+  constexpr double kMaximumTitleFontSize = 4096.0;
+
+  if (!validUtf8(title.text)) {
+    return error(EditErrorCode::InvalidArgument, "title text must be valid UTF-8");
+  }
+  if (title.text.size() > kMaximumTitleTextBytes) {
+    return error(EditErrorCode::InvalidArgument, "title text exceeds the 64 KiB limit");
+  }
+  if (title.font_family.empty() || !validUtf8(title.font_family)) {
+    return error(EditErrorCode::InvalidArgument, "title font family must be non-empty valid UTF-8");
+  }
+  if (title.font_family.size() > kMaximumTitleFontFamilyBytes) {
+    return error(EditErrorCode::InvalidArgument, "title font family exceeds the 1024-byte limit");
+  }
+  if (!std::isfinite(title.font_size) || title.font_size < kMinimumTitleFontSize ||
+      title.font_size > kMaximumTitleFontSize) {
+    return error(EditErrorCode::InvalidArgument,
+                 "title font size must be finite and within [1, 4096]");
+  }
+  if (const auto issue = validateColor(title.foreground_color, "title foreground")) {
+    return issue;
+  }
+  if (const auto issue = validateColor(title.background_color, "title background")) {
+    return issue;
+  }
+  switch (title.horizontal_alignment) {
+  case TitleHorizontalAlignment::Left:
+  case TitleHorizontalAlignment::Center:
+  case TitleHorizontalAlignment::Right:
+    return std::nullopt;
+  }
+  return error(EditErrorCode::InvalidArgument, "title horizontal alignment is not supported");
+}
+
+[[nodiscard]] bool validTransitionKind(const TransitionKind kind) noexcept {
+  switch (kind) {
+  case TransitionKind::CrossDissolve:
+  case TransitionKind::DipToBlack:
+    return true;
+  }
+  return false;
+}
+
+[[nodiscard]] Time sourceDeltaForTimelineDelta(const Clip& clip, Time timeline_delta);
+
+[[nodiscard]] bool hasSourceHandleBefore(const Project& project, const Clip& clip,
+                                         const Time timeline_duration) {
+  if (clip.kind == ClipKind::Title) {
+    return true;
+  }
+  const auto* asset = findAsset(project, clip.asset_id);
+  if (asset == nullptr) {
+    return false;
+  }
+  const auto source_duration = sourceDeltaForTimelineDelta(clip, timeline_duration);
+  return clip.reversed ? asset->duration - clip.source_range.end() >= source_duration
+                       : clip.source_range.start >= source_duration;
+}
+
+[[nodiscard]] bool hasSourceHandleAfter(const Project& project, const Clip& clip,
+                                        const Time timeline_duration) {
+  if (clip.kind == ClipKind::Title) {
+    return true;
+  }
+  const auto* asset = findAsset(project, clip.asset_id);
+  if (asset == nullptr) {
+    return false;
+  }
+  const auto source_duration = sourceDeltaForTimelineDelta(clip, timeline_duration);
+  return clip.reversed ? clip.source_range.start >= source_duration
+                       : asset->duration - clip.source_range.end() >= source_duration;
+}
+
+[[nodiscard]] std::optional<EditError>
+validateTransition(const Project& project, const Sequence& sequence, const Transition& transition) {
+  if (transition.id.isNil()) {
+    return error(EditErrorCode::InvalidArgument, "transition id cannot be nil");
+  }
+  if (transition.outgoing_clip_id == transition.incoming_clip_id) {
+    return error(EditErrorCode::InvalidArgument, "transition clips must be two distinct clips");
+  }
+  if (transition.range.start.isNegative() || transition.range.duration <= Time{}) {
+    return error(EditErrorCode::InvalidArgument,
+                 "transition range must have a non-negative start and positive duration");
+  }
+  if (!validTransitionKind(transition.kind)) {
+    return error(EditErrorCode::InvalidArgument, "transition kind is not supported");
+  }
+
+  const auto outgoing = clipLocation(sequence, transition.outgoing_clip_id);
+  const auto incoming = clipLocation(sequence, transition.incoming_clip_id);
+  if (!outgoing || !incoming) {
+    return error(EditErrorCode::EntityNotFound, "transition clip was not found");
+  }
+  if (outgoing->track != incoming->track || outgoing->track->kind != TrackKind::Video) {
+    return error(EditErrorCode::InvalidTrackKind,
+                 "transition clips must be on the same video track");
+  }
+  if (incoming->clip_index != outgoing->clip_index + 1U) {
+    return error(EditErrorCode::InvalidArgument,
+                 "transition clips must be adjacent neighbors on their track");
+  }
+
+  const auto cut = outgoing->clip->timeline_range.end();
+  if (incoming->clip->timeline_range.start != cut) {
+    return error(EditErrorCode::InvalidArgument,
+                 "transition clips must share one cut with no gap or overlap");
+  }
+  if (transition.range.start >= cut || transition.range.end() <= cut) {
+    return error(EditErrorCode::InvalidArgument,
+                 "transition range must contain timeline time on both sides of the cut");
+  }
+  if (transition.range.start < outgoing->clip->timeline_range.start ||
+      transition.range.end() > incoming->clip->timeline_range.end()) {
+    return error(EditErrorCode::InvalidArgument,
+                 "transition range must stay within the visible bounds of both clips");
+  }
+
+  const auto incoming_pre_cut = cut - transition.range.start;
+  const auto outgoing_post_cut = transition.range.end() - cut;
+  if (!hasSourceHandleBefore(project, *incoming->clip, incoming_pre_cut) ||
+      !hasSourceHandleAfter(project, *outgoing->clip, outgoing_post_cut)) {
+    return error(EditErrorCode::InvalidArgument,
+                 "transition exceeds the available source-media handles");
+  }
+
+  if (transition.enabled) {
+    for (const auto& other : sequence.transitions) {
+      if (other.id == transition.id || !other.enabled) {
+        continue;
+      }
+      const auto other_outgoing = clipLocation(sequence, other.outgoing_clip_id);
+      const auto other_incoming = clipLocation(sequence, other.incoming_clip_id);
+      if (!other_outgoing || !other_incoming) {
+        continue;
+      }
+      if (other_outgoing->track == outgoing->track && other.range.overlaps(transition.range)) {
+        return error(EditErrorCode::Overlap,
+                     "enabled transitions on the same track cannot overlap");
+      }
+    }
+  }
+  return std::nullopt;
+}
+
 [[nodiscard]] std::optional<EditError> validateClip(const Project& project, const Track& track,
                                                     const Clip& clip) {
   if (clip.id.isNil()) {
@@ -184,7 +422,20 @@ constexpr double kMaximumAudioGainDb = 24.0;
     return error(EditErrorCode::InvalidTrackKind,
                  "clip kind is incompatible with destination track");
   }
-  if (clip.kind != ClipKind::Title) {
+  if (clip.kind == ClipKind::Title) {
+    if (!clip.asset_id.isNil()) {
+      return error(EditErrorCode::InvalidArgument, "title clips cannot reference an asset");
+    }
+    if (!clip.title) {
+      return error(EditErrorCode::InvalidArgument, "title clips require a title payload");
+    }
+    if (const auto issue = validateTitle(*clip.title)) {
+      return issue;
+    }
+  } else {
+    if (clip.title) {
+      return error(EditErrorCode::InvalidArgument, "only title clips may carry a title payload");
+    }
     const auto* asset = findAsset(project, clip.asset_id);
     if (asset == nullptr) {
       return error(EditErrorCode::EntityNotFound,
@@ -285,6 +536,15 @@ constexpr double kMaximumAudioGainDb = 24.0;
       if (caption.range.start.isNegative() || caption.range.duration <= Time{}) {
         return error(EditErrorCode::InvalidArgument,
                      "caption range must have a non-negative start and positive duration");
+      }
+    }
+    for (const auto& transition : sequence.transitions) {
+      if (!addId(transition.id)) {
+        return error(EditErrorCode::DuplicateId,
+                     "project contains a duplicate or nil transition id");
+      }
+      if (const auto issue = validateTransition(project, sequence, transition)) {
+        return issue;
       }
     }
   }
@@ -470,6 +730,9 @@ struct PlannedClip final {
   const auto selected = idSet(selected_ids);
   const auto head_delta = command.timeline_range.start - primary.timeline_range.start;
   const auto tail_delta = command.timeline_range.end() - primary.timeline_range.end();
+  if (command.mode == InsertMode::Ripple && head_delta != Time{} && tail_delta != Time{}) {
+    return error(EditErrorCode::InvalidArgument, "ripple trim must adjust exactly one clip edge");
+  }
 
   std::vector<PlannedClip> plans;
   plans.reserve(selected_ids.size());
@@ -498,15 +761,24 @@ struct PlannedClip final {
         return issue;
       }
     }
+    if (command.mode == InsertMode::Ripple && head_delta != Time{}) {
+      // A ripple trim-in changes the media head but keeps the edit's left
+      // timeline edge fixed; downstream material closes/opens by the exact
+      // duration delta below.
+      trimmed.timeline_range.start = location->clip->timeline_range.start;
+    }
     if (const auto issue = validateClip(project, *location->track, trimmed)) {
       return issue;
     }
-    if (hasOverlapExcluding(*location->track, trimmed.timeline_range, selected)) {
+    if (command.mode == InsertMode::RejectOverlap &&
+        hasOverlapExcluding(*location->track, trimmed.timeline_range, selected)) {
       return error(EditErrorCode::Overlap, "trimmed clip overlaps another clip");
     }
     plans.push_back(PlannedClip{id, location->track->id, std::move(trimmed)});
   }
 
+  // First apply the selected trims. Every policy then operates on the complete
+  // candidate, so a linked group is never shifted twice on one track.
   for (auto& plan : plans) {
     auto location = mutableClip(sequence, plan.id);
     if (!location) {
@@ -514,6 +786,157 @@ struct PlannedClip final {
     }
     *location->clip = std::move(plan.clip);
     sortClips(*location->track);
+  }
+
+  if (command.mode == InsertMode::RejectOverlap) {
+    return std::nullopt;
+  }
+
+  if (command.mode == InsertMode::Ripple) {
+    std::unordered_set<EntityId> shifted_tracks;
+    for (const auto& plan : plans) {
+      if (!shifted_tracks.emplace(plan.track_id).second) {
+        continue;
+      }
+      auto* track = mutableTrack(sequence, plan.track_id);
+      const auto* before = findClip(sequence, plan.id);
+      if (track == nullptr || before == nullptr) {
+        return error(EditErrorCode::EntityNotFound, "trimmed clip was not found");
+      }
+      // Every linked companion receives the same timeline head/tail deltas.
+      const auto delta = tail_delta - head_delta;
+      const auto old_end = before->timeline_range.end() - delta;
+      for (auto& clip : track->clips) {
+        if (!selected.contains(clip.id) && clip.timeline_range.start >= old_end) {
+          clip.timeline_range.start = clip.timeline_range.start + delta;
+        }
+      }
+      sortClips(*track);
+    }
+    return std::nullopt;
+  }
+
+  // Overwrite trims retain an unambiguous left or right remainder only. A
+  // clip spanning both new boundaries would require inventing an ID for a
+  // second fragment, which this command intentionally never does.
+  for (const auto& plan : plans) {
+    auto* track = mutableTrack(sequence, plan.track_id);
+    if (track == nullptr) {
+      return error(EditErrorCode::EntityNotFound, "track was not found");
+    }
+    std::vector<Clip> retained;
+    retained.reserve(track->clips.size());
+    for (const auto& existing : track->clips) {
+      if (selected.contains(existing.id) ||
+          !existing.timeline_range.overlaps(plan.clip.timeline_range)) {
+        retained.push_back(existing);
+        continue;
+      }
+      const bool left_remainder = existing.timeline_range.start < plan.clip.timeline_range.start;
+      const bool right_remainder = existing.timeline_range.end() > plan.clip.timeline_range.end();
+      if (left_remainder && right_remainder) {
+        return error(EditErrorCode::Overlap,
+                     "overwrite trim would require splitting an overlapped clip");
+      }
+      if (!left_remainder && !right_remainder) {
+        continue;
+      }
+      Clip trimmed;
+      const auto remainder =
+          left_remainder
+              ? TimeRange(existing.timeline_range.start,
+                          plan.clip.timeline_range.start - existing.timeline_range.start)
+              : TimeRange(plan.clip.timeline_range.end(),
+                          existing.timeline_range.end() - plan.clip.timeline_range.end());
+      if (auto issue = trimPreservingMapping(existing, remainder, trimmed)) {
+        return issue;
+      }
+      retained.push_back(std::move(trimmed));
+    }
+    track->clips = std::move(retained);
+    sortClips(*track);
+  }
+  return std::nullopt;
+}
+
+[[nodiscard]] std::optional<EditError> applySplitClip(Project& project, Sequence& sequence,
+                                                      const SplitClipCommand& command) {
+  auto primary_location = mutableClip(sequence, command.clip_id);
+  if (!primary_location) {
+    return error(EditErrorCode::EntityNotFound, "clip was not found");
+  }
+  const Clip primary = *primary_location->clip;
+  const auto selected_ids = linkedClipIds(sequence, primary, command.include_linked);
+  std::unordered_map<EntityId, EntityId> right_ids;
+  right_ids.emplace(command.clip_id, command.right_clip_id);
+  if (command.right_clip_id.isNil()) {
+    return error(EditErrorCode::InvalidArgument, "right split clip id cannot be nil");
+  }
+  if (command.include_linked) {
+    if (command.linked_right_clip_ids.size() + 1 != selected_ids.size()) {
+      return error(EditErrorCode::InvalidArgument,
+                   "linked split ids must map every companion exactly once");
+    }
+    for (const auto& mapping : command.linked_right_clip_ids) {
+      if (mapping.clip_id == command.clip_id || mapping.clip_id.isNil() ||
+          mapping.right_clip_id.isNil() ||
+          !right_ids.emplace(mapping.clip_id, mapping.right_clip_id).second) {
+        return error(EditErrorCode::InvalidArgument,
+                     "linked split ids contain a duplicate or nil id");
+      }
+    }
+    for (const auto id : selected_ids) {
+      if (!right_ids.contains(id)) {
+        return error(EditErrorCode::InvalidArgument,
+                     "linked split ids are missing a companion mapping");
+      }
+    }
+  } else if (!command.linked_right_clip_ids.empty()) {
+    return error(EditErrorCode::InvalidArgument, "unlinked split cannot carry companion ids");
+  }
+  std::unordered_set<EntityId> new_ids;
+  for (const auto& [_, id] : right_ids) {
+    if (!new_ids.emplace(id).second || findClip(sequence, id) != nullptr) {
+      return error(EditErrorCode::DuplicateId, "right split clip id is already in use");
+    }
+  }
+  struct SplitPlan {
+    Track* track;
+    EntityId original_id;
+    Clip left;
+    Clip right;
+  };
+  std::vector<SplitPlan> plans;
+  plans.reserve(selected_ids.size());
+  for (const auto id : selected_ids) {
+    auto location = mutableClip(sequence, id);
+    if (!location) {
+      return error(EditErrorCode::EntityNotFound, "linked clip was not found");
+    }
+    if (location->track->locked) {
+      return error(EditErrorCode::TrackLocked, "cannot split a clip on a locked track");
+    }
+    Clip left;
+    Clip right;
+    if (auto issue =
+            splitClipObject(*location->clip, command.split_time, right_ids.at(id), left, right)) {
+      return issue;
+    }
+    if (const auto issue = validateClip(project, *location->track, left))
+      return issue;
+    if (const auto issue = validateClip(project, *location->track, right))
+      return issue;
+    plans.push_back(SplitPlan{location->track, id, std::move(left), std::move(right)});
+  }
+  for (auto& plan : plans) {
+    const auto found = std::find_if(plan.track->clips.begin(), plan.track->clips.end(),
+                                    [&](const Clip& clip) { return clip.id == plan.original_id; });
+    if (found == plan.track->clips.end()) {
+      return error(EditErrorCode::EntityNotFound, "split clip was not found");
+    }
+    *found = std::move(plan.left);
+    plan.track->clips.push_back(std::move(plan.right));
+    sortClips(*plan.track);
   }
   return std::nullopt;
 }
@@ -690,6 +1113,12 @@ struct PlannedClip final {
             if (findTrack(*sequence, command.track.id) != nullptr) {
               return error(EditErrorCode::DuplicateId, "a track with the same id already exists");
             }
+            if (command.track.id.isNil()) {
+              return error(EditErrorCode::InvalidArgument, "track id cannot be nil");
+            }
+            if (const auto issue = validateTrackName(command.track.name)) {
+              return issue;
+            }
             if (command.index && *command.index > sequence->tracks.size()) {
               return error(EditErrorCode::InvalidArgument, "track insertion index is out of range");
             }
@@ -713,6 +1142,78 @@ struct PlannedClip final {
               return error(EditErrorCode::TrackLocked, "cannot remove a locked track");
             }
             sequence->tracks.erase(found);
+            return std::nullopt;
+          },
+          [&](const RenameTrackCommand& command) -> std::optional<EditError> {
+            auto* sequence = mutableSequence(project, command.sequence_id);
+            if (sequence == nullptr)
+              return error(EditErrorCode::EntityNotFound, "sequence was not found");
+            auto* track = mutableTrack(*sequence, command.track_id);
+            if (track == nullptr)
+              return error(EditErrorCode::EntityNotFound, "track was not found");
+            if (track->locked)
+              return error(EditErrorCode::TrackLocked, "cannot rename a locked track");
+            if (const auto issue = validateTrackName(command.name))
+              return issue;
+            track->name = command.name;
+            return std::nullopt;
+          },
+          [&](const ReorderTrackCommand& command) -> std::optional<EditError> {
+            auto* sequence = mutableSequence(project, command.sequence_id);
+            if (sequence == nullptr)
+              return error(EditErrorCode::EntityNotFound, "sequence was not found");
+            const auto found =
+                std::find_if(sequence->tracks.begin(), sequence->tracks.end(),
+                             [&](const Track& track) { return track.id == command.track_id; });
+            if (found == sequence->tracks.end())
+              return error(EditErrorCode::EntityNotFound, "track was not found");
+            if (found->locked)
+              return error(EditErrorCode::TrackLocked, "cannot reorder a locked track");
+            if (command.index >= sequence->tracks.size()) {
+              return error(EditErrorCode::InvalidArgument, "track reorder index is out of range");
+            }
+            const auto old_index =
+                static_cast<std::size_t>(std::distance(sequence->tracks.begin(), found));
+            if (old_index != command.index) {
+              auto moved = std::move(*found);
+              sequence->tracks.erase(sequence->tracks.begin() +
+                                     static_cast<std::ptrdiff_t>(old_index));
+              sequence->tracks.insert(sequence->tracks.begin() +
+                                          static_cast<std::ptrdiff_t>(command.index),
+                                      std::move(moved));
+            }
+            return std::nullopt;
+          },
+          [&](const SetTrackLockedCommand& command) -> std::optional<EditError> {
+            auto* sequence = mutableSequence(project, command.sequence_id);
+            if (sequence == nullptr)
+              return error(EditErrorCode::EntityNotFound, "sequence was not found");
+            auto* track = mutableTrack(*sequence, command.track_id);
+            if (track == nullptr)
+              return error(EditErrorCode::EntityNotFound, "track was not found");
+            track->locked = command.locked;
+            return std::nullopt;
+          },
+          [&](const SetTrackVisibilityCommand& command) -> std::optional<EditError> {
+            auto* sequence = mutableSequence(project, command.sequence_id);
+            if (sequence == nullptr)
+              return error(EditErrorCode::EntityNotFound, "sequence was not found");
+            auto* track = mutableTrack(*sequence, command.track_id);
+            if (track == nullptr)
+              return error(EditErrorCode::EntityNotFound, "track was not found");
+            // Visibility is a presentation preference, so a locked track may still be hidden.
+            track->visible = command.visible;
+            return std::nullopt;
+          },
+          [&](const SetTrackTargetedCommand& command) -> std::optional<EditError> {
+            auto* sequence = mutableSequence(project, command.sequence_id);
+            if (sequence == nullptr)
+              return error(EditErrorCode::EntityNotFound, "sequence was not found");
+            auto* track = mutableTrack(*sequence, command.track_id);
+            if (track == nullptr)
+              return error(EditErrorCode::EntityNotFound, "track was not found");
+            // Targeting is a UI routing preference, so a locked track may still be targeted.
+            track->targeted = command.targeted;
             return std::nullopt;
           },
           [&](const InsertClipCommand& command) -> std::optional<EditError> {
@@ -745,26 +1246,7 @@ struct PlannedClip final {
             if (sequence == nullptr) {
               return error(EditErrorCode::EntityNotFound, "sequence was not found");
             }
-            if (findClip(*sequence, command.right_clip_id) != nullptr) {
-              return error(EditErrorCode::DuplicateId, "right split clip id is already in use");
-            }
-            auto location = mutableClip(*sequence, command.clip_id);
-            if (!location) {
-              return error(EditErrorCode::EntityNotFound, "clip was not found");
-            }
-            if (location->track->locked) {
-              return error(EditErrorCode::TrackLocked, "cannot split a clip on a locked track");
-            }
-            Clip left;
-            Clip right;
-            if (auto issue = splitClipObject(*location->clip, command.split_time,
-                                             command.right_clip_id, left, right)) {
-              return issue;
-            }
-            *location->clip = std::move(left);
-            location->track->clips.push_back(std::move(right));
-            sortClips(*location->track);
-            return std::nullopt;
+            return applySplitClip(project, *sequence, command);
           },
           [&](const RemoveClipCommand& command) -> std::optional<EditError> {
             auto* sequence = mutableSequence(project, command.sequence_id);
@@ -969,6 +1451,52 @@ struct PlannedClip final {
             track.clips[index - 1] = std::move(trimmed_previous);
             track.clips[index] = std::move(moved);
             track.clips[index + 1] = std::move(trimmed_next);
+            return std::nullopt;
+          },
+          [&](const CloseGapCommand& command) -> std::optional<EditError> {
+            auto* sequence = mutableSequence(project, command.sequence_id);
+            if (sequence == nullptr)
+              return error(EditErrorCode::EntityNotFound, "sequence was not found");
+            auto* track = mutableTrack(*sequence, command.track_id);
+            if (track == nullptr)
+              return error(EditErrorCode::EntityNotFound, "track was not found");
+            if (track->locked)
+              return error(EditErrorCode::TrackLocked, "cannot close a gap on a locked track");
+            if (command.gap.start.isNegative() || command.gap.duration <= Time{}) {
+              return error(EditErrorCode::InvalidArgument,
+                           "gap must have a non-negative start and positive duration");
+            }
+            const auto limit = sequenceDuration(*sequence);
+            Time cursor{};
+            bool found_gap = false;
+            for (const auto& clip : track->clips) {
+              if (clip.timeline_range.start > cursor &&
+                  TimeRange(cursor, clip.timeline_range.start - cursor) == command.gap) {
+                found_gap = true;
+                break;
+              }
+              cursor = std::max(cursor, clip.timeline_range.end());
+            }
+            if (!found_gap && cursor < limit && TimeRange(cursor, limit - cursor) == command.gap) {
+              found_gap = true;
+            }
+            if (!found_gap)
+              return error(EditErrorCode::InvalidArgument,
+                           "requested range is not the current exact gap");
+            const auto has_later_clip =
+                std::any_of(track->clips.begin(), track->clips.end(), [&](const Clip& clip) {
+                  return clip.timeline_range.start >= command.gap.end();
+                });
+            if (!has_later_clip) {
+              return error(EditErrorCode::InvalidArgument,
+                           "cannot close a terminal gap with no later clip");
+            }
+            for (auto& clip : track->clips) {
+              if (clip.timeline_range.start >= command.gap.end()) {
+                clip.timeline_range.start = clip.timeline_range.start - command.gap.duration;
+              }
+            }
+            sortClips(*track);
             return std::nullopt;
           },
           [&](const AddMarkerCommand& command) -> std::optional<EditError> {
@@ -1190,6 +1718,63 @@ struct PlannedClip final {
             *location->clip = std::move(changed);
             return std::nullopt;
           },
+          [&](const SetClipTitleCommand& command) -> std::optional<EditError> {
+            auto* sequence = mutableSequence(project, command.sequence_id);
+            if (sequence == nullptr) {
+              return error(EditErrorCode::EntityNotFound, "sequence was not found");
+            }
+            auto location = mutableClip(*sequence, command.clip_id);
+            if (!location) {
+              return error(EditErrorCode::EntityNotFound, "clip was not found");
+            }
+            if (location->track->locked) {
+              return error(EditErrorCode::TrackLocked,
+                           "cannot edit a title clip on a locked track");
+            }
+            if (location->clip->kind != ClipKind::Title) {
+              return error(EditErrorCode::InvalidTrackKind,
+                           "only title clips can carry title payloads");
+            }
+            if (const auto issue = validateTitle(command.title)) {
+              return issue;
+            }
+            location->clip->title = command.title;
+            return std::nullopt;
+          },
+          [&](const SetClipSpeedCommand& command) -> std::optional<EditError> {
+            auto* sequence = mutableSequence(project, command.sequence_id);
+            if (sequence == nullptr) {
+              return error(EditErrorCode::EntityNotFound, "sequence was not found");
+            }
+            auto location = mutableClip(*sequence, command.clip_id);
+            if (!location) {
+              return error(EditErrorCode::EntityNotFound, "clip was not found");
+            }
+            if (location->track->locked) {
+              return error(EditErrorCode::TrackLocked, "cannot change speed on a locked track");
+            }
+            if (location->clip->kind == ClipKind::Title) {
+              return error(EditErrorCode::InvalidTrackKind,
+                           "title clips do not support speed or reverse controls");
+            }
+            if (command.playback_rate.denominator() == 0) {
+              return error(EditErrorCode::InvalidArgument, "playback rate denominator cannot be zero");
+            }
+            if (command.playback_rate.numerator() == 0) {
+              return error(EditErrorCode::InvalidArgument,
+                           "playback rate numerator must be positive (use reversed for direction)");
+            }
+            const long double rate =
+                static_cast<long double>(command.playback_rate.numerator()) /
+                static_cast<long double>(command.playback_rate.denominator());
+            if (rate < 0.01L || rate > 100.0L) {
+              return error(EditErrorCode::InvalidArgument,
+                           "playback rate must be between 0.01x and 100x");
+            }
+            location->clip->playback_rate = command.playback_rate;
+            location->clip->reversed = command.reversed;
+            return std::nullopt;
+          },
           [&](const SetTrackAudioStateCommand& command) -> std::optional<EditError> {
             auto* sequence = mutableSequence(project, command.sequence_id);
             if (sequence == nullptr) {
@@ -1206,6 +1791,101 @@ struct PlannedClip final {
             // Track locking protects editorial mutations, not live mixer state.
             track->muted = command.muted;
             track->solo = command.solo;
+            return std::nullopt;
+          },
+          [&](const SetTrackAudioMixCommand& command) -> std::optional<EditError> {
+            auto* sequence = mutableSequence(project, command.sequence_id);
+            if (sequence == nullptr) {
+              return error(EditErrorCode::EntityNotFound, "sequence was not found");
+            }
+            auto* track = mutableTrack(*sequence, command.track_id);
+            if (track == nullptr) {
+              return error(EditErrorCode::EntityNotFound, "track was not found");
+            }
+            if (track->kind != TrackKind::Audio) {
+              return error(EditErrorCode::InvalidTrackKind,
+                           "only audio tracks have mixer gain and pan");
+            }
+            if (!std::isfinite(command.gain_db) || !std::isfinite(command.pan)) {
+              return error(EditErrorCode::InvalidArgument,
+                           "track gain and pan must be finite");
+            }
+            // Track locking protects editorial mutations, not live mixer state.
+            track->audio_gain_db = command.gain_db;
+            track->audio_pan = command.pan;
+            return std::nullopt;
+          },
+          [&](const AddTransitionCommand& command) -> std::optional<EditError> {
+            auto* sequence = mutableSequence(project, command.sequence_id);
+            if (sequence == nullptr) {
+              return error(EditErrorCode::EntityNotFound, "sequence was not found");
+            }
+            const auto outgoing = clipLocation(*sequence, command.transition.outgoing_clip_id);
+            const auto incoming = clipLocation(*sequence, command.transition.incoming_clip_id);
+            if (!outgoing || !incoming) {
+              return error(EditErrorCode::EntityNotFound, "transition clip was not found");
+            }
+            if (outgoing->track->locked || incoming->track->locked) {
+              return error(EditErrorCode::TrackLocked, "cannot add a transition on a locked track");
+            }
+            if (findTransition(*sequence, command.transition.id) != nullptr) {
+              return error(EditErrorCode::DuplicateId,
+                           "a transition with the same id already exists in the sequence");
+            }
+            sequence->transitions.push_back(command.transition);
+            if (const auto issue = validateTransition(project, *sequence, command.transition)) {
+              return issue;
+            }
+            return std::nullopt;
+          },
+          [&](const UpdateTransitionCommand& command) -> std::optional<EditError> {
+            auto* sequence = mutableSequence(project, command.sequence_id);
+            if (sequence == nullptr) {
+              return error(EditErrorCode::EntityNotFound, "sequence was not found");
+            }
+            const auto found =
+                std::find_if(sequence->transitions.begin(), sequence->transitions.end(),
+                             [&](const Transition& transition) {
+                               return transition.id == command.transition.id;
+                             });
+            if (found == sequence->transitions.end()) {
+              return error(EditErrorCode::EntityNotFound, "transition was not found");
+            }
+            const auto outgoing = clipLocation(*sequence, command.transition.outgoing_clip_id);
+            const auto incoming = clipLocation(*sequence, command.transition.incoming_clip_id);
+            if (!outgoing || !incoming) {
+              return error(EditErrorCode::EntityNotFound, "transition clip was not found");
+            }
+            if (outgoing->track->locked || incoming->track->locked) {
+              return error(EditErrorCode::TrackLocked,
+                           "cannot update a transition on a locked track");
+            }
+            *found = command.transition;
+            if (const auto issue = validateTransition(project, *sequence, *found)) {
+              return issue;
+            }
+            return std::nullopt;
+          },
+          [&](const RemoveTransitionCommand& command) -> std::optional<EditError> {
+            auto* sequence = mutableSequence(project, command.sequence_id);
+            if (sequence == nullptr) {
+              return error(EditErrorCode::EntityNotFound, "sequence was not found");
+            }
+            const auto found =
+                std::find_if(sequence->transitions.begin(), sequence->transitions.end(),
+                             [&](const Transition& transition) {
+                               return transition.id == command.transition_id;
+                             });
+            if (found == sequence->transitions.end()) {
+              return error(EditErrorCode::EntityNotFound, "transition was not found");
+            }
+            const auto outgoing = clipLocation(*sequence, found->outgoing_clip_id);
+            const auto incoming = clipLocation(*sequence, found->incoming_clip_id);
+            if ((!outgoing || outgoing->track->locked) || (!incoming || incoming->track->locked)) {
+              return error(EditErrorCode::TrackLocked,
+                           "cannot remove a transition from a locked track");
+            }
+            sequence->transitions.erase(found);
             return std::nullopt;
           }},
       op);
@@ -1231,6 +1911,16 @@ std::string commandName(const EditCommand& command) {
           return "Add track";
         if constexpr (std::is_same_v<T, RemoveTrackCommand>)
           return "Remove track";
+        if constexpr (std::is_same_v<T, RenameTrackCommand>)
+          return "Rename track";
+        if constexpr (std::is_same_v<T, ReorderTrackCommand>)
+          return "Reorder track";
+        if constexpr (std::is_same_v<T, SetTrackLockedCommand>)
+          return "Set track lock";
+        if constexpr (std::is_same_v<T, SetTrackVisibilityCommand>)
+          return "Set track visibility";
+        if constexpr (std::is_same_v<T, SetTrackTargetedCommand>)
+          return "Set track targeting";
         if constexpr (std::is_same_v<T, InsertClipCommand>)
           return "Insert clip";
         if constexpr (std::is_same_v<T, MoveClipCommand>)
@@ -1247,6 +1937,8 @@ std::string commandName(const EditCommand& command) {
           return "Slip clip";
         if constexpr (std::is_same_v<T, SlideClipCommand>)
           return "Slide clip";
+        if constexpr (std::is_same_v<T, CloseGapCommand>)
+          return "Close gap";
         if constexpr (std::is_same_v<T, AddMarkerCommand>)
           return "Add marker";
         if constexpr (std::is_same_v<T, UpdateMarkerCommand>)
@@ -1274,6 +1966,18 @@ std::string commandName(const EditCommand& command) {
           return "Set clip audio properties";
         if constexpr (std::is_same_v<T, SetTrackAudioStateCommand>)
           return "Set track audio state";
+        if constexpr (std::is_same_v<T, SetTrackAudioMixCommand>)
+          return "Set track audio mix";
+        if constexpr (std::is_same_v<T, SetClipTitleCommand>)
+          return "Set clip title";
+        if constexpr (std::is_same_v<T, SetClipSpeedCommand>)
+          return "Set clip speed";
+        if constexpr (std::is_same_v<T, AddTransitionCommand>)
+          return "Add transition";
+        if constexpr (std::is_same_v<T, UpdateTransitionCommand>)
+          return "Update transition";
+        if constexpr (std::is_same_v<T, RemoveTransitionCommand>)
+          return "Remove transition";
         return "Edit";
       },
       command.operation);
@@ -1356,6 +2060,7 @@ struct TimelineEditor::HistoryEntry final {
   std::size_t command_count{1};
   std::shared_ptr<const Project> before;
   std::shared_ptr<const Project> after;
+  std::string command_name;
 };
 
 TimelineEditor::~TimelineEditor() = default;
@@ -1438,9 +2143,67 @@ Result<Revision, EditError> TimelineEditor::apply(EditCommand command, Revision 
       entry.last_command = std::move(command);
       entry.command_count += 1;
     } else {
-      history_.push_back(HistoryEntry{command, command.coalescing_key, 1, before, after});
+      history_.push_back(
+          HistoryEntry{command, command.coalescing_key, 1, before, after, commandName(command)});
       history_cursor_ += 1;
     }
+    return commitState(after);
+  } catch (const std::overflow_error& exception) {
+    return Result<Revision, EditError>::failure(
+        error(EditErrorCode::ArithmeticOverflow, exception.what()));
+  } catch (const std::invalid_argument& exception) {
+    return Result<Revision, EditError>::failure(
+        error(EditErrorCode::InvalidArgument, exception.what()));
+  }
+}
+
+Result<Revision, EditError> TimelineEditor::applyBatch(std::vector<EditCommand> commands,
+                                                       Revision expected_revision,
+                                                       std::string batch_name,
+                                                       std::optional<std::string> coalescing_key) {
+  std::unique_lock lock(mutex_);
+  if (expected_revision != revision_) {
+    return staleRevision(expected_revision);
+  }
+  if (commands.empty()) {
+    return Result<Revision, EditError>::failure(
+        error(EditErrorCode::InvalidArgument, "an edit batch cannot be empty"));
+  }
+  if (batch_name.empty() || !validUtf8(batch_name)) {
+    return Result<Revision, EditError>::failure(
+        error(EditErrorCode::InvalidArgument, "batch name must be non-empty valid UTF-8"));
+  }
+  try {
+    auto candidate = std::make_shared<Project>(*state_);
+    for (const auto& command : commands) {
+      if (auto issue = applyOperation(*candidate, command.operation)) {
+        return Result<Revision, EditError>::failure(std::move(*issue));
+      }
+    }
+    for (auto& sequence : candidate->sequences) {
+      for (auto& track : sequence.tracks) {
+        sortClips(track);
+      }
+    }
+    if (auto issue = validateProject(*candidate)) {
+      return Result<Revision, EditError>::failure(std::move(*issue));
+    }
+    if (revision_.value == std::numeric_limits<std::uint64_t>::max()) {
+      return Result<Revision, EditError>::failure(
+          error(EditErrorCode::ArithmeticOverflow, "project revision counter overflowed"));
+    }
+    if (history_cursor_ < history_.size()) {
+      history_.erase(history_.begin() + static_cast<std::ptrdiff_t>(history_cursor_),
+                     history_.end());
+    }
+    const auto before = state_;
+    const std::shared_ptr<const Project> after = std::move(candidate);
+    const std::string key = coalescing_key.value_or("");
+    // A batch is its own transaction/history entry. Its key is retained for
+    // audit/UI grouping but does not fuse an independently atomic batch.
+    history_.push_back(HistoryEntry{std::move(commands.back()), std::move(key), commands.size(),
+                                    before, after, std::move(batch_name)});
+    ++history_cursor_;
     return commitState(after);
   } catch (const std::overflow_error& exception) {
     return Result<Revision, EditError>::failure(
@@ -1502,8 +2265,8 @@ std::vector<HistoryEntryView> TimelineEditor::history() const {
   std::vector<HistoryEntryView> result;
   result.reserve(history_.size());
   for (const auto& entry : history_) {
-    result.push_back(HistoryEntryView{commandName(entry.last_command), entry.coalescing_key,
-                                      entry.command_count});
+    result.push_back(
+        HistoryEntryView{entry.command_name, entry.coalescing_key, entry.command_count});
   }
   return result;
 }

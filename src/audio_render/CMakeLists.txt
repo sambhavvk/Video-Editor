@@ -13,7 +13,9 @@ pkg_check_modules(AUDIO_RENDER_SWRESAMPLE REQUIRED IMPORTED_TARGET
 
 add_library(video_editor_audio_render
   src/original_audio_registry.cpp
-  src/timeline_audio_renderer.cpp)
+  src/timeline_audio_renderer.cpp
+  src/loudness_normalize.cpp
+  src/track_dsp_chain.cpp)
 
 add_library(video_editor::audio_render ALIAS video_editor_audio_render)
 

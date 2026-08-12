@@ -33,8 +33,21 @@ struct ColorRgba final {
   friend bool operator==(const ColorRgba&, const ColorRgba&) = default;
 };
 
-using EffectValue =
-    std::variant<std::int64_t, double, bool, std::string, Time, Vec2, ColorRgba>;
+enum class TitleHorizontalAlignment { Left, Center, Right };
+
+struct Title final {
+  std::string text;
+  std::string font_family{"sans-serif"};
+  double font_size{96.0};
+  ColorRgba foreground_color{1.0, 1.0, 1.0, 1.0};
+  ColorRgba background_color{0.0, 0.0, 0.0, 0.0};
+  TitleHorizontalAlignment horizontal_alignment{TitleHorizontalAlignment::Center};
+  bool bold{false};
+  bool italic{false};
+  friend bool operator==(const Title&, const Title&) = default;
+};
+
+using EffectValue = std::variant<std::int64_t, double, bool, std::string, Time, Vec2, ColorRgba>;
 
 enum class KeyframeInterpolation { Hold, Linear, Bezier };
 
@@ -100,6 +113,7 @@ struct Asset final {
 enum class TrackKind { Video, Audio, Caption };
 enum class ClipKind { Video, Audio, Title };
 enum class BlendMode { Normal, Add, Multiply, Screen, Overlay };
+enum class TransitionKind { CrossDissolve, DipToBlack };
 
 struct Clip final {
   EntityId id{EntityId::generate()};
@@ -118,6 +132,7 @@ struct Clip final {
   Time fade_in{};
   Time fade_out{};
   std::vector<Effect> effects;
+  std::optional<Title> title;
   friend bool operator==(const Clip&, const Clip&) = default;
 };
 
@@ -133,8 +148,17 @@ struct Track final {
   bool locked{false};
   bool muted{false};
   bool solo{false};
+  // Visibility controls visual compositing only. Targeting is an editorial
+  // routing hint for the UI and never changes rendering.
+  bool visible{true};
+  bool targeted{true};
   std::vector<Clip> clips;
   std::vector<Effect> effects;
+  // Mixer strip gain and pan for audio tracks. Defaults are unity (0 dB,
+  // center). Clip-level gain/pan are applied first; track-level gain/pan are
+  // applied to the accumulated track mix. Non-audio tracks ignore these.
+  double audio_gain_db{0.0};
+  double audio_pan{0.0};
   friend bool operator==(const Track&, const Track&) = default;
 };
 
@@ -165,6 +189,16 @@ struct Caption final {
   friend bool operator==(const Caption&, const Caption&) = default;
 };
 
+struct Transition final {
+  EntityId id{EntityId::generate()};
+  EntityId outgoing_clip_id{};
+  EntityId incoming_clip_id{};
+  TimeRange range{};
+  TransitionKind kind{TransitionKind::CrossDissolve};
+  bool enabled{true};
+  friend bool operator==(const Transition&, const Transition&) = default;
+};
+
 struct Sequence final {
   EntityId id{EntityId::generate()};
   std::string name;
@@ -175,6 +209,7 @@ struct Sequence final {
   std::vector<Track> tracks;
   std::vector<Marker> markers;
   std::vector<Caption> captions;
+  std::vector<Transition> transitions;
   friend bool operator==(const Sequence&, const Sequence&) = default;
 };
 
@@ -188,12 +223,10 @@ struct Project final {
 };
 
 [[nodiscard]] const Asset* findAsset(const Project& project, EntityId id) noexcept;
-[[nodiscard]] const Sequence* findSequence(const Project& project,
-                                           EntityId id) noexcept;
-[[nodiscard]] const Track* findTrack(const Sequence& sequence,
-                                     EntityId id) noexcept;
-[[nodiscard]] const Clip* findClip(const Sequence& sequence,
-                                   EntityId id) noexcept;
+[[nodiscard]] const Sequence* findSequence(const Project& project, EntityId id) noexcept;
+[[nodiscard]] const Track* findTrack(const Sequence& sequence, EntityId id) noexcept;
+[[nodiscard]] const Clip* findClip(const Sequence& sequence, EntityId id) noexcept;
+[[nodiscard]] const Transition* findTransition(const Sequence& sequence, EntityId id) noexcept;
 [[nodiscard]] Time sequenceDuration(const Sequence& sequence);
 
-}  // namespace video_editor::edit
+} // namespace video_editor::edit

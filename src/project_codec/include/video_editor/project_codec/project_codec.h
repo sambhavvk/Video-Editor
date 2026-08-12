@@ -13,7 +13,7 @@
 
 namespace video_editor::project_codec {
 
-inline constexpr std::uint32_t kCurrentSchemaVersion = 1;
+inline constexpr std::uint32_t kCurrentSchemaVersion = 2;
 inline constexpr std::uint32_t kMinimumReaderVersion = 1;
 inline constexpr std::size_t kMaximumSnapshotBytes = 256U * 1024U * 1024U;
 
@@ -37,12 +37,14 @@ struct CodecError final {
 };
 
 class CodecException final : public std::runtime_error {
- public:
+public:
   explicit CodecException(CodecError error);
 
-  [[nodiscard]] const CodecError& error() const noexcept { return error_; }
+  [[nodiscard]] const CodecError& error() const noexcept {
+    return error_;
+  }
 
- private:
+private:
   CodecError error_;
 };
 
@@ -52,7 +54,7 @@ class CodecException final : public std::runtime_error {
 
 // Parses and validates an entire snapshot. No partially decoded project is
 // returned on failure.
-[[nodiscard]] edit::Result<edit::Project, CodecError> deserialize_project(
-    std::span<const std::byte> bytes);
+[[nodiscard]] edit::Result<edit::Project, CodecError>
+deserialize_project(std::span<const std::byte> bytes);
 
-}  // namespace video_editor::project_codec
+} // namespace video_editor::project_codec

@@ -10,7 +10,9 @@ pkg_check_modules(EXPORT_AVUTIL REQUIRED IMPORTED_TARGET
                   libavutil=${VIDEO_EDITOR_AVUTIL_VERSION})
 
 add_library(video_editor_export_service
-  src/export_service.cpp)
+  src/caption_burn_in.cpp
+  src/export_service.cpp
+  src/presets.cpp)
 
 add_library(VideoEditor::ExportService ALIAS video_editor_export_service)
 
@@ -28,6 +30,7 @@ target_link_libraries(
     video_editor_edit_model
     video_editor::project_options
   PRIVATE
+    VideoEditor::CaptionService
     video_editor::project_warnings
     PkgConfig::EXPORT_AVFORMAT
     PkgConfig::EXPORT_AVCODEC

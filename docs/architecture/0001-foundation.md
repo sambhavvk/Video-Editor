@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: MPL-2.0 -->
+
 # ADR 0001: Native modular editor foundation
 
 - **Status:** accepted
@@ -19,4 +21,3 @@ into the same render graph; quality policy is the only allowed difference.
 - UI, storage, media, rendering, audio, and workers can be developed in parallel behind contracts.
 - Dependency builds and their licenses are release inputs, not incidental system configuration.
 - Public schema and protocol changes require migrations and compatibility fixtures.
-

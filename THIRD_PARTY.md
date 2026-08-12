@@ -9,6 +9,7 @@ offers.
 | Qt | 6.11.1 | Dynamically linked LGPL modules only | LGPL-3.0-only |
 | FFmpeg | 8.1.2 | Shared libraries, `--disable-gpl --disable-nonfree` | LGPL-2.1-or-later |
 | libplacebo | 7.360.1 | Shared D3D11/Vulkan backends | LGPL-2.1-or-later |
+| miniaudio | 0.11.25 | Source-integrated device adapter; decoding disabled | MIT-0 |
 | SQLite | 3.45+ | Thread-safe, WAL support | Public domain blessing |
 | Abseil | 20250512.1 | Static support library for Protocol Buffers | Apache-2.0 |
 | Protocol Buffers | 35.1 | Shared runtime | BSD-3-Clause |

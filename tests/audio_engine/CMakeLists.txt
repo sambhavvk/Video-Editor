@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: MPL-2.0
 
 add_executable(video_editor_audio_engine_tests
-  audio_engine_test.cpp)
+  audio_engine_test.cpp
+  playback_meter_test.cpp
+  xrun_drift_validation_test.cpp)
 
 target_link_libraries(
   video_editor_audio_engine_tests

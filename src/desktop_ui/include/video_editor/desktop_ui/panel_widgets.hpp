@@ -63,11 +63,15 @@ public slots:
   void setSelectionName(const QString& name);
   void setClipCapabilities(bool visual, bool audio);
   void setParameter(const QString& parameterId, const QVariant& value);
+  // Title clips show the title controls group; media clips show the speed group.
+  void setTitleControlsVisible(bool visible);
+  void setSpeedControlsVisible(bool visible);
   void clearSelection();
 
 signals:
   void parameterEdited(const QString& parameterId, const QVariant& value);
   void keyframeToggleRequested(const QString& parameterId);
+  void addTitleRequested();
 
 private:
   QLabel* selection_name_{nullptr};
@@ -76,6 +80,8 @@ private:
   QWidget* visual_controls_{nullptr};
   QWidget* audio_controls_{nullptr};
   QWidget* advanced_controls_{nullptr};
+  QWidget* title_controls_{nullptr};
+  QWidget* speed_controls_{nullptr};
 };
 
 class EffectsPanelWidget final : public QWidget {
@@ -109,9 +115,13 @@ public:
   explicit AudioMixerWidget(QWidget* parent = nullptr);
   void setTracks(const QVector<AudioTrackView>& tracks);
   void setTrackNames(const QStringList& names);
+  // Push a live level reading for one strip. Called by the controller from its
+  // playback poll. Values are dBFS peak per channel (negative or zero).
+  void setMeterLevels(int trackIndex, const QVector<float>& peakDbfs);
 
 signals:
   void gainEdited(int trackIndex, double decibels);
+  void panEdited(int trackIndex, double pan);
   void muteToggled(int trackIndex, bool muted);
   void soloToggled(int trackIndex, bool soloed);
 
@@ -152,15 +162,36 @@ public:
   [[nodiscard]] QString selectedPresetId() const;
   void setExportEnabled(bool enabled);
   void setExportRunning(bool running, int percent = 0);
+  void loadPlatformPresets();
+  void setEncoderCapabilities(const QString& summary);
+  void setDestinationPath(const QString& path);
+  [[nodiscard]] QString captionModeKey() const;
+  [[nodiscard]] QString sidecarFormatKey() const;
+  [[nodiscard]] int overrideWidth() const;
+  [[nodiscard]] int overrideHeight() const;
+  [[nodiscard]] unsigned int overrideFrameRateNum() const;
+  [[nodiscard]] unsigned int overrideFrameRateDen() const;
+  [[nodiscard]] unsigned int overrideAudioBitrate() const;
 
 signals:
   void presetChanged(const QString& presetId);
   void exportRequested(const QString& presetId);
+  void destinationBrowseRequested();
+  void cancelRequested();
 
 private:
   QComboBox* preset_{nullptr};
   QToolButton* export_button_{nullptr};
   QProgressBar* export_progress_{nullptr};
+  QLineEdit* destination_{nullptr};
+  QToolButton* browse_button_{nullptr};
+  QComboBox* resolution_{nullptr};
+  QComboBox* frame_rate_{nullptr};
+  QComboBox* audio_bitrate_{nullptr};
+  QComboBox* caption_mode_{nullptr};
+  QComboBox* sidecar_format_{nullptr};
+  QLabel* encoder_summary_{nullptr};
+  QLabel* preset_notes_{nullptr};
 };
 
 } // namespace video_editor::desktop_ui

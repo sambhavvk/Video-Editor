@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: MPL-2.0 -->
+
 # ADR 0002: SQLite working database and checkpoint project files
 
 - **Status:** accepted
@@ -18,4 +20,3 @@ project data and remain outside the checkpoint.
 - A crash can recover every committed edit while an active gesture may be discarded.
 - Project files can be copied independently of runtime WAL/SHM files.
 - Forward migrations are transactional and always preserve a pre-migration backup.
-

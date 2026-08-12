@@ -31,3 +31,7 @@ Testing/
 test-results/
 coverage/
 
+priority.md
+
+# Zed editor
+.zed/

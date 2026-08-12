@@ -12,6 +12,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QProcess>
 #include <QSettings>
 #include <QSignalSpy>
 #include <QStandardPaths>
@@ -64,6 +65,29 @@ void writePpmFrame(const QString& path, const int width, const int height) {
   file.close();
 }
 
+bool writePlaybackVideo(const QString& path) {
+  const QStringList arguments{
+      QStringLiteral("-hide_banner"),
+      QStringLiteral("-loglevel"),
+      QStringLiteral("error"),
+      QStringLiteral("-nostdin"),
+      QStringLiteral("-y"),
+      QStringLiteral("-f"),
+      QStringLiteral("lavfi"),
+      QStringLiteral("-i"),
+      QStringLiteral("testsrc2=size=1920x1080:rate=2:duration=30"),
+      QStringLiteral("-c:v"),
+      QStringLiteral("mpeg4"),
+      QStringLiteral("-q:v"),
+      QStringLiteral("4"),
+      QStringLiteral("-pix_fmt"),
+      QStringLiteral("yuv420p"),
+      path,
+  };
+  return QProcess::execute(QStringLiteral(VIDEO_EDITOR_APP_TEST_FFMPEG), arguments) == 0 &&
+         QFileInfo::exists(path);
+}
+
 std::size_t audioClipCount(const video_editor::edit::Project& project) {
   if (project.sequences.empty()) {
     return 0;
@@ -86,6 +110,10 @@ private slots:
   void initTestCase();
   void importsInsertsAndRoundTripsUndo();
   void derivesSequenceFormatFromFirstVideoClip();
+  void professionalTimelineInteractionsUseOneAtomicHistoryStep();
+  void batchSplitAndFrameNudgePreserveExactSelectionGeometry();
+  void rollEditsUseTheGestureEdge();
+  void presentsFramesContinuouslyWhilePlaybackIsRunning();
   void importsSearchesAndExportsCaptions();
   void realAudioDeviceUsesTheSampleCounterAsMasterClock();
 
@@ -225,9 +253,9 @@ void EditorControllerTest::derivesSequenceFormatFromFirstVideoClip() {
 
   const QString clip_id = QString::fromStdString(
       transform_undone->sequences.front().tracks.front().clips.front().id.toString());
-  window.timeline()->clipEditCommitted(
-      clip_id, 0, 48'000, 0, video_editor::desktop_ui::TimelineWidget::EditMode::Move,
-      video_editor::desktop_ui::TimelineWidget::EditIntent::Normal, false);
+  window.timeline()->clipBatchEditCommitted(
+      {clip_id}, 0, 48'000, 0, video_editor::desktop_ui::TimelineWidget::EditMode::Move,
+      video_editor::desktop_ui::TimelineWidget::EditIntent::Normal, {});
   const auto moved = controller.editor().projectAt(controller.editor().revision());
   QCOMPARE(moved->sequences.front().tracks.front().clips.front().timeline_range.start,
            video_editor::edit::Time(1, 1));
@@ -243,6 +271,285 @@ void EditorControllerTest::derivesSequenceFormatFromFirstVideoClip() {
   QCOMPARE(undone->sequences.front().width, 1'920U);
   QCOMPARE(undone->sequences.front().height, 1'080U);
   QCOMPARE(undone->sequences.front().tracks.front().clips.size(), 0U);
+}
+
+void EditorControllerTest::professionalTimelineInteractionsUseOneAtomicHistoryStep() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString frame_path = directory.filePath(QStringLiteral("timeline-frame.ppm"));
+  writePpmFrame(frame_path, 16, 10);
+
+  QSettings settings(directory.filePath(QStringLiteral("timeline-ui.ini")), QSettings::IniFormat);
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+  controller.importPaths({frame_path});
+  QTRY_COMPARE_WITH_TIMEOUT(
+      controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
+  const QString asset_id = window.mediaBin()->items().front().id;
+  window.mediaActivated(asset_id);
+
+  auto project = controller.editor().projectAt(controller.editor().revision());
+  const auto tracks_before_add = project->sequences.front().tracks.size();
+  const QString first_clip =
+      QString::fromStdString(project->sequences.front().tracks.front().clips.front().id.toString());
+  window.timeline()->trackAddRequested(video_editor::desktop_ui::TrackKind::Video);
+  project = controller.editor().projectAt(controller.editor().revision());
+  QCOMPARE(project->sequences.front().tracks.size(), tracks_before_add + 1U);
+  const auto& added = project->sequences.front().tracks.back();
+  QCOMPARE(added.kind, video_editor::edit::TrackKind::Video);
+  const QString second_track = QString::fromStdString(added.id.toString());
+  for (const auto& track : project->sequences.front().tracks) {
+    if (track.kind == video_editor::edit::TrackKind::Video && track.id != added.id) {
+      window.timeline()->trackTargetToggled(QString::fromStdString(track.id.toString()), false);
+    }
+  }
+  window.timeline()->trackRenameRequested(second_track, QStringLiteral("B-roll"));
+  window.timeline()->trackVisibilityToggled(second_track, false);
+  project = controller.editor().projectAt(controller.editor().revision());
+  const auto renamed =
+      std::find_if(project->sequences.front().tracks.begin(),
+                   project->sequences.front().tracks.end(), [&second_track](const auto& track) {
+                     return QString::fromStdString(track.id.toString()) == second_track;
+                   });
+  QVERIFY(renamed != project->sequences.front().tracks.end());
+  QCOMPARE(renamed->name, std::string("B-roll"));
+  QVERIFY(!renamed->visible);
+  QVERIFY(renamed->targeted);
+
+  window.seekRequested(6 * 48'000);
+  window.mediaActivated(asset_id);
+  project = controller.editor().projectAt(controller.editor().revision());
+  const auto second_track_after =
+      std::find_if(project->sequences.front().tracks.begin(),
+                   project->sequences.front().tracks.end(), [&second_track](const auto& track) {
+                     return QString::fromStdString(track.id.toString()) == second_track;
+                   });
+  QVERIFY(second_track_after != project->sequences.front().tracks.end());
+  QCOMPARE(second_track_after->clips.size(), 1U);
+  const QString second_clip =
+      QString::fromStdString(second_track_after->clips.front().id.toString());
+
+  const auto revision_before_move = controller.editor().revision();
+  window.timeline()->clipBatchEditCommitted(
+      {first_clip, second_clip}, 0, 48'000, 0,
+      video_editor::desktop_ui::TimelineWidget::EditMode::Move,
+      video_editor::desktop_ui::TimelineWidget::EditIntent::Normal, {});
+  project = controller.editor().projectAt(controller.editor().revision());
+  QCOMPARE(controller.editor().revision().value, revision_before_move.value + 1U);
+  QCOMPARE(project->sequences.front().tracks.front().clips.front().timeline_range.start,
+           video_editor::edit::Time(1, 1));
+  // The UI's visual selection is ordered by clip position, not by the drag
+  // anchor. The active (second) clip must therefore receive the destination
+  // track while the other selected clip remains on its source track.
+  const auto moved_second = std::find_if(
+      project->sequences.front().tracks.front().clips.begin(),
+      project->sequences.front().tracks.front().clips.end(), [&second_clip](const auto& clip) {
+        return QString::fromStdString(clip.id.toString()) == second_clip;
+      });
+  QVERIFY(moved_second != project->sequences.front().tracks.front().clips.end());
+  QCOMPARE(moved_second->timeline_range.start, video_editor::edit::Time(7, 1));
+
+  window.undoRequested();
+  project = controller.editor().projectAt(controller.editor().revision());
+  QCOMPARE(project->sequences.front().tracks.front().clips.front().timeline_range.start,
+           video_editor::edit::Time{});
+  const auto undone_second_track =
+      std::find_if(project->sequences.front().tracks.begin(),
+                   project->sequences.front().tracks.end(), [&second_track](const auto& track) {
+                     return QString::fromStdString(track.id.toString()) == second_track;
+                   });
+  QVERIFY(undone_second_track != project->sequences.front().tracks.end());
+  QCOMPARE(undone_second_track->clips.front().timeline_range.start, video_editor::edit::Time(6, 1));
+
+  window.timeline()->markerAddRequested(96'000);
+  project = controller.editor().projectAt(controller.editor().revision());
+  QCOMPARE(project->sequences.front().markers.size(), 1U);
+  const QString marker_id =
+      QString::fromStdString(project->sequences.front().markers.front().id.toString());
+  window.timeline()->markerMoveCommitted(marker_id, 144'000, {});
+  window.timeline()->markerRenameRequested(marker_id, QStringLiteral("Chapter 1"));
+  project = controller.editor().projectAt(controller.editor().revision());
+  QCOMPARE(project->sequences.front().markers.front().range.start, video_editor::edit::Time(3, 1));
+  QCOMPARE(project->sequences.front().markers.front().label, std::string("Chapter 1"));
+}
+
+void EditorControllerTest::batchSplitAndFrameNudgePreserveExactSelectionGeometry() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString frame_path = directory.filePath(QStringLiteral("selection-frame.ppm"));
+  writePpmFrame(frame_path, 16, 10);
+
+  QSettings settings(directory.filePath(QStringLiteral("selection-ui.ini")), QSettings::IniFormat);
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+  controller.importPaths({frame_path});
+  QTRY_COMPARE_WITH_TIMEOUT(
+      controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
+  const QString asset_id = window.mediaBin()->items().front().id;
+  window.mediaActivated(asset_id);
+
+  auto project = controller.editor().projectAt(controller.editor().revision());
+  const auto& sequence = project->sequences.front();
+  const QString first_track = QString::fromStdString(sequence.tracks.front().id.toString());
+  const QString second_track = QString::fromStdString(sequence.tracks.at(1).id.toString());
+  const QString first_clip =
+      QString::fromStdString(sequence.tracks.front().clips.front().id.toString());
+  window.timeline()->trackTargetToggled(first_track, false);
+  window.mediaActivated(asset_id);
+  project = controller.editor().projectAt(controller.editor().revision());
+  const auto second_track_it =
+      std::find_if(project->sequences.front().tracks.begin(),
+                   project->sequences.front().tracks.end(), [&second_track](const auto& track) {
+                     return QString::fromStdString(track.id.toString()) == second_track;
+                   });
+  QVERIFY(second_track_it != project->sequences.front().tracks.end());
+  QCOMPARE(second_track_it->clips.size(), 1U);
+  const QString second_clip = QString::fromStdString(second_track_it->clips.front().id.toString());
+
+  // Start each selection member between frame boundaries. Nudge must add one
+  // rational frame duration without snapping either clip independently.
+  window.timeline()->clipBatchEditCommitted(
+      {first_clip}, 0, 1, 0, video_editor::desktop_ui::TimelineWidget::EditMode::Move,
+      video_editor::desktop_ui::TimelineWidget::EditIntent::Normal, {});
+  window.timeline()->clipBatchEditCommitted(
+      {second_clip}, 1, 2, 0, video_editor::desktop_ui::TimelineWidget::EditMode::Move,
+      video_editor::desktop_ui::TimelineWidget::EditIntent::Normal, {});
+  project = controller.editor().projectAt(controller.editor().revision());
+  const auto& after_offsets = project->sequences.front();
+  const auto first_before = after_offsets.tracks.front().clips.front().timeline_range.start;
+  const auto second_before_track = std::find_if(
+      after_offsets.tracks.begin(), after_offsets.tracks.end(), [&second_track](const auto& track) {
+        return QString::fromStdString(track.id.toString()) == second_track;
+      });
+  QVERIFY(second_before_track != after_offsets.tracks.end());
+  const auto second_before = second_before_track->clips.front().timeline_range.start;
+  const auto frame_delta = after_offsets.frame_rate.frameTime();
+
+  window.timeline()->clipSelectionChanged({first_clip, second_clip}, second_clip);
+  window.timeline()->frameNudgeRequested(
+      {first_clip, second_clip}, 1, video_editor::desktop_ui::TimelineWidget::EditIntent::Normal);
+  project = controller.editor().projectAt(controller.editor().revision());
+  const auto& nudged = project->sequences.front();
+  const auto second_nudged_track =
+      std::find_if(nudged.tracks.begin(), nudged.tracks.end(), [&second_track](const auto& track) {
+        return QString::fromStdString(track.id.toString()) == second_track;
+      });
+  QVERIFY(second_nudged_track != nudged.tracks.end());
+  QCOMPARE(nudged.tracks.front().clips.front().timeline_range.start, first_before + frame_delta);
+  QCOMPARE(second_nudged_track->clips.front().timeline_range.start, second_before + frame_delta);
+
+  const auto split_time = 2 * window.timeline()->timeScale();
+  window.seekRequested(split_time);
+  const auto revision_before_split = controller.editor().revision();
+  window.splitClipRequested();
+  project = controller.editor().projectAt(controller.editor().revision());
+  QCOMPARE(controller.editor().revision().value, revision_before_split.value + 1U);
+  QCOMPARE(project->sequences.front().tracks.front().clips.size(), 2U);
+  const auto split_second_track =
+      std::find_if(project->sequences.front().tracks.begin(),
+                   project->sequences.front().tracks.end(), [&second_track](const auto& track) {
+                     return QString::fromStdString(track.id.toString()) == second_track;
+                   });
+  QVERIFY(split_second_track != project->sequences.front().tracks.end());
+  QCOMPARE(split_second_track->clips.size(), 2U);
+}
+
+void EditorControllerTest::rollEditsUseTheGestureEdge() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString frame_path = directory.filePath(QStringLiteral("roll-frame.ppm"));
+  writePpmFrame(frame_path, 16, 10);
+
+  QSettings settings(directory.filePath(QStringLiteral("roll-ui.ini")), QSettings::IniFormat);
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+  controller.importPaths({frame_path});
+  QTRY_COMPARE_WITH_TIMEOUT(
+      controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
+  const QString asset_id = window.mediaBin()->items().front().id;
+  window.mediaActivated(asset_id);
+
+  auto project = controller.editor().projectAt(controller.editor().revision());
+  const auto clip_duration =
+      project->sequences.front().tracks.front().clips.front().timeline_range.duration;
+  const auto ui_scale = window.timeline()->timeScale();
+  const auto duration_ui =
+      static_cast<qint64>(clip_duration
+                              .rescaledTo(static_cast<std::uint32_t>(ui_scale),
+                                          video_editor::edit::RoundingMode::NearestTiesEven)
+                              .value());
+  const qint64 one_second = ui_scale;
+  const QString first_id =
+      QString::fromStdString(project->sequences.front().tracks.front().clips.front().id.toString());
+  // Give both edit sides one second of source handle. Creator-imported stills
+  // otherwise consume their full source range and a roll would correctly be
+  // rejected by the precision model.
+  window.timeline()->clipBatchEditCommitted(
+      {first_id}, 0, 0, -one_second, video_editor::desktop_ui::TimelineWidget::EditMode::TrimOut,
+      video_editor::desktop_ui::TimelineWidget::EditIntent::Normal, {});
+  window.seekRequested(duration_ui - one_second);
+  window.mediaActivated(asset_id);
+  project = controller.editor().projectAt(controller.editor().revision());
+  const QString middle_before_trim =
+      QString::fromStdString(project->sequences.front().tracks.front().clips.at(1).id.toString());
+  window.timeline()->clipBatchEditCommitted(
+      {middle_before_trim}, 0, 0, -one_second,
+      video_editor::desktop_ui::TimelineWidget::EditMode::TrimOut,
+      video_editor::desktop_ui::TimelineWidget::EditIntent::Normal, {});
+  window.seekRequested((duration_ui - one_second) * 2);
+  window.mediaActivated(asset_id);
+  project = controller.editor().projectAt(controller.editor().revision());
+  const auto& clips = project->sequences.front().tracks.front().clips;
+  QCOMPARE(clips.size(), 3U);
+  const QString middle_id = QString::fromStdString(clips.at(1).id.toString());
+  const auto incoming_cut = clips.at(1).timeline_range.start;
+  const auto outgoing_cut = clips.at(1).timeline_range.end();
+
+  window.timeline()->clipActivated(middle_id);
+  window.timeline()->clipBatchEditCommitted(
+      {middle_id}, 0, one_second, -one_second,
+      video_editor::desktop_ui::TimelineWidget::EditMode::Roll,
+      video_editor::desktop_ui::TimelineWidget::EditIntent::Normal, {});
+  project = controller.editor().projectAt(controller.editor().revision());
+  QCOMPARE(project->sequences.front().tracks.front().clips.at(0).timeline_range.end(),
+           incoming_cut + video_editor::edit::Time(1, 1));
+  window.undoRequested();
+
+  window.timeline()->clipActivated(middle_id);
+  window.timeline()->clipBatchEditCommitted(
+      {middle_id}, 0, one_second, one_second,
+      video_editor::desktop_ui::TimelineWidget::EditMode::Roll,
+      video_editor::desktop_ui::TimelineWidget::EditIntent::Normal, {});
+  project = controller.editor().projectAt(controller.editor().revision());
+  QCOMPARE(project->sequences.front().tracks.front().clips.at(1).timeline_range.end(),
+           outgoing_cut + video_editor::edit::Time(1, 1));
+}
+
+void EditorControllerTest::presentsFramesContinuouslyWhilePlaybackIsRunning() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString video_path = directory.filePath(QStringLiteral("realtime-preview.mkv"));
+  QVERIFY(writePlaybackVideo(video_path));
+
+  QSettings settings(directory.filePath(QStringLiteral("playback-ui.ini")), QSettings::IniFormat);
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+  controller.importPaths({video_path});
+  QTRY_COMPARE_WITH_TIMEOUT(
+      controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
+  window.mediaActivated(window.mediaBin()->items().front().id);
+  QTRY_VERIFY_WITH_TIMEOUT(window.programViewer()->hasFrame(), 10'000);
+
+  // Force the deterministic CPU fallback so a render lasts longer than the
+  // 16 ms transport timer on ordinary development hardware.
+  window.parameterEdited(QStringLiteral("blendMode"), QStringLiteral("add"));
+  const std::uint64_t before_playback = controller.previewPresentationCount();
+  window.playbackRateRequested(2.0);
+
+  QTRY_VERIFY_WITH_TIMEOUT(controller.playbackRunning() &&
+                               controller.previewPresentationCount() >= before_playback + 2U,
+                           10'000);
+  window.playbackRateRequested(0.0);
 }
 
 void EditorControllerTest::importsSearchesAndExportsCaptions() {

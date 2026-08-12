@@ -17,9 +17,14 @@ if(NOT TARGET video_editor_desktop_ui)
 endif()
 
 find_package(Qt6 6.11 REQUIRED COMPONENTS Test Widgets)
+find_package(GTest CONFIG REQUIRED)
 
 add_executable(video_editor_desktop_ui_tests
     editor_window_test.cpp
+)
+
+add_executable(video_editor_deliver_panel_tests
+    deliver_panel_test.cpp
 )
 
 target_compile_features(video_editor_desktop_ui_tests PRIVATE cxx_std_20)
@@ -30,13 +35,31 @@ target_link_libraries(video_editor_desktop_ui_tests
         Qt6::Widgets
 )
 
-set_target_properties(video_editor_desktop_ui_tests PROPERTIES
+target_compile_features(video_editor_deliver_panel_tests PRIVATE cxx_std_20)
+target_link_libraries(video_editor_deliver_panel_tests
+    PRIVATE
+        VideoEditor::DesktopUi
+        VideoEditor::ExportService
+        video_editor::media_codec
+        video_editor::project_warnings
+        GTest::gtest_main
+        Qt6::Test
+        Qt6::Widgets
+)
+
+set_target_properties(video_editor_desktop_ui_tests video_editor_deliver_panel_tests PROPERTIES
     AUTOMOC ON
     CXX_EXTENSIONS OFF
 )
 
 add_test(NAME desktop_ui.editor_window COMMAND video_editor_desktop_ui_tests)
 set_tests_properties(desktop_ui.editor_window PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+    TIMEOUT 30
+)
+
+add_test(NAME desktop_ui.deliver_panel COMMAND video_editor_deliver_panel_tests)
+set_tests_properties(desktop_ui.deliver_panel PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     TIMEOUT 30
 )

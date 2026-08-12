@@ -33,7 +33,9 @@ target_include_directories(video_editor_desktop_ui
 )
 
 target_compile_features(video_editor_desktop_ui PUBLIC cxx_std_20)
-target_link_libraries(video_editor_desktop_ui PUBLIC Qt6::Core Qt6::Gui Qt6::Widgets)
+target_link_libraries(video_editor_desktop_ui
+    PUBLIC Qt6::Core Qt6::Gui Qt6::Widgets
+    PRIVATE VideoEditor::ExportService video_editor::media_codec)
 
 set_target_properties(video_editor_desktop_ui PROPERTIES
     AUTOMOC ON

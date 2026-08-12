@@ -75,6 +75,9 @@ public:
   void setMediaItems(const QVector<MediaItemView>& items);
   void setTimelineView(qint64 duration, qint64 timeScale, QVector<TimelineTrackView> tracks,
                        QVector<TimelineClipView> clips);
+  void setTimelineView(qint64 duration, qint64 timeScale, QVector<TimelineTrackView> tracks,
+                       QVector<TimelineClipView> clips, QVector<TimelineMarkerView> markers,
+                       QVector<TimelineGapView> gaps);
   void showTransientMessage(const QString& message, int timeoutMs = 4000);
 
 public slots:
@@ -101,6 +104,12 @@ signals:
   void mediaActivated(const QString& mediaId);
   void effectAddRequested(const QString& effectId);
   void parameterEdited(const QString& parameterId, const QVariant& value);
+  void keyframeToggleRequested(const QString& parameterId);
+  void addTitleRequested();
+  void transitionActivated(const QString& transitionId);
+  void transitionDurationEdited(const QString& transitionId, qint64 duration);
+  void transitionRemoved(const QString& transitionId);
+  void transitionPresetChanged(const QString& transitionId, const QString& kind);
 
 protected:
   void closeEvent(QCloseEvent* event) override;

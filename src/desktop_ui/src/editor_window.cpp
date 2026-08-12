@@ -140,6 +140,15 @@ void EditorWindow::setTimelineView(qint64 duration, qint64 timeScale,
   timeline_->setTimeline(duration, timeScale, std::move(tracks), std::move(clips));
 }
 
+void EditorWindow::setTimelineView(qint64 duration, qint64 timeScale,
+                                   QVector<TimelineTrackView> tracks,
+                                   QVector<TimelineClipView> clips,
+                                   QVector<TimelineMarkerView> markers,
+                                   QVector<TimelineGapView> gaps) {
+  timeline_->setTimeline(duration, timeScale, std::move(tracks), std::move(clips),
+                         std::move(markers), std::move(gaps));
+}
+
 void EditorWindow::showTransientMessage(const QString& message, int timeoutMs) {
   statusBar()->showMessage(message, timeoutMs);
 }
@@ -323,12 +332,10 @@ void EditorWindow::createCentralArea() {
   trimLabel->setFont(trimFont);
   trimLayout->addWidget(trimLabel);
   trimLayout->addSpacing(12);
-  for (const auto& text : {tr("Ripple"), tr("Roll"), tr("Slip"), tr("Slide")}) {
-    auto* mode = new QToolButton(precision_trim_);
-    mode->setText(text);
-    mode->setAccessibleName(tr("%1 trim mode").arg(text));
-    mode->setCheckable(true);
-    mode->setAutoExclusive(true);
+  for (const auto* id : {"tool.rippleTrim", "tool.roll", "tool.slip", "tool.slide"}) {
+    auto* mode = makeActionButton(action(QString::fromLatin1(id)), precision_trim_);
+    mode->setObjectName(QStringLiteral("precision.%1").arg(QString::fromLatin1(id)));
+    mode->setToolButtonStyle(Qt::ToolButtonTextOnly);
     trimLayout->addWidget(mode);
   }
   trimLayout->addStretch();
@@ -458,6 +465,31 @@ void EditorWindow::createActions() {
   create(QStringLiteral("zoomFitTimeline"), tr("Fit Timeline"),
          tr("Fit the sequence in the timeline"), QKeySequence{tr("Shift+Z")});
 
+  auto* timelineToolGroup = new QActionGroup(this);
+  timelineToolGroup->setExclusive(true);
+  const auto addTimelineTool = [create, timelineToolGroup](const QString& id, const QString& text,
+                                                           const QString& description,
+                                                           const QKeySequence& shortcut) {
+    auto* tool = create(id, text, description, shortcut);
+    tool->setCheckable(true);
+    timelineToolGroup->addAction(tool);
+    return tool;
+  };
+  auto* selectTool =
+      addTimelineTool(QStringLiteral("tool.select"), tr("Select"),
+                      tr("Select, move, and edge-trim clips"), QKeySequence{tr("V")});
+  selectTool->setChecked(true);
+  addTimelineTool(QStringLiteral("tool.rippleTrim"), tr("Ripple Trim"),
+                  tr("Trim and ripple following material"), QKeySequence{tr("R")});
+  addTimelineTool(QStringLiteral("tool.overwriteTrim"), tr("Overwrite Trim"),
+                  tr("Trim without moving following material"), QKeySequence{tr("W")});
+  addTimelineTool(QStringLiteral("tool.roll"), tr("Roll"),
+                  tr("Roll an edit between adjacent clips"), QKeySequence{tr("N")});
+  addTimelineTool(QStringLiteral("tool.slip"), tr("Slip"),
+                  tr("Change source timing without moving the clip"), QKeySequence{tr("Y")});
+  addTimelineTool(QStringLiteral("tool.slide"), tr("Slide"),
+                  tr("Move a clip and trim its neighbours"), QKeySequence{tr("U")});
+
   auto* sourceMonitor =
       create(QStringLiteral("sourceMonitor"), tr("Source Monitor"),
              tr("Show a second monitor for source media"), QKeySequence{tr("Shift+2")});
@@ -555,6 +587,11 @@ void EditorWindow::createMenus() {
   timelineMenu->addAction(action(QStringLiteral("zoomInTimeline")));
   timelineMenu->addAction(action(QStringLiteral("zoomOutTimeline")));
   timelineMenu->addAction(action(QStringLiteral("zoomFitTimeline")));
+  timelineMenu->addSeparator();
+  for (const auto* id : {"tool.select", "tool.rippleTrim", "tool.overwriteTrim", "tool.roll",
+                         "tool.slip", "tool.slide"}) {
+    timelineMenu->addAction(action(QString::fromLatin1(id)));
+  }
 
   auto* view = menuBar()->addMenu(tr("&View"));
   view->setObjectName(QStringLiteral("viewMenu"));
@@ -620,6 +657,11 @@ void EditorWindow::createToolBars() {
   timelineTools->setMovable(true);
   timelineTools->addAction(action(QStringLiteral("splitClip")));
   timelineTools->addSeparator();
+  for (const auto* id : {"tool.select", "tool.rippleTrim", "tool.overwriteTrim", "tool.roll",
+                         "tool.slip", "tool.slide"}) {
+    timelineTools->addAction(action(QString::fromLatin1(id)));
+  }
+  timelineTools->addSeparator();
   timelineTools->addAction(action(QStringLiteral("zoomOutTimeline")));
   timelineTools->addAction(action(QStringLiteral("zoomFitTimeline")));
   timelineTools->addAction(action(QStringLiteral("zoomInTimeline")));
@@ -657,6 +699,16 @@ void EditorWindow::connectControllerSurface() {
   connect(effects_panel_, &EffectsPanelWidget::effectAddRequested, this,
           &EditorWindow::effectAddRequested);
   connect(inspector_, &InspectorWidget::parameterEdited, this, &EditorWindow::parameterEdited);
+  connect(inspector_, &InspectorWidget::keyframeToggleRequested, this,
+          &EditorWindow::keyframeToggleRequested);
+  connect(inspector_, &InspectorWidget::addTitleRequested, this, &EditorWindow::addTitleRequested);
+  connect(timeline_, &TimelineWidget::transitionActivated, this,
+          &EditorWindow::transitionActivated);
+  connect(timeline_, &TimelineWidget::transitionDurationEdited, this,
+          &EditorWindow::transitionDurationEdited);
+  connect(timeline_, &TimelineWidget::transitionRemoved, this, &EditorWindow::transitionRemoved);
+  connect(timeline_, &TimelineWidget::transitionPresetChanged, this,
+          &EditorWindow::transitionPresetChanged);
   connect(deliver_panel_, &DeliverPanelWidget::exportRequested, this,
           &EditorWindow::exportRequested);
   connect(action(QStringLiteral("safeGuides")), &QAction::toggled, program_viewer_,
@@ -667,6 +719,16 @@ void EditorWindow::connectControllerSurface() {
           &TimelineWidget::zoomOut);
   connect(action(QStringLiteral("zoomFitTimeline")), &QAction::triggered, timeline_,
           &TimelineWidget::zoomToFit);
+  const auto bindTool = [this](const char* actionId, TimelineWidget::ToolMode mode) {
+    connect(action(QString::fromLatin1(actionId)), &QAction::triggered, this,
+            [this, mode] { timeline_->setToolMode(mode); });
+  };
+  bindTool("tool.select", TimelineWidget::ToolMode::Select);
+  bindTool("tool.rippleTrim", TimelineWidget::ToolMode::RippleTrim);
+  bindTool("tool.overwriteTrim", TimelineWidget::ToolMode::OverwriteTrim);
+  bindTool("tool.roll", TimelineWidget::ToolMode::Roll);
+  bindTool("tool.slip", TimelineWidget::ToolMode::Slip);
+  bindTool("tool.slide", TimelineWidget::ToolMode::Slide);
   connect(action(QStringLiteral("previousFrame")), &QAction::triggered, this, [this] {
     const auto frame = qMax<qint64>(1, timeline_->timeScale() / 30);
     timeline_->setPlayhead(timeline_->playhead() - frame);

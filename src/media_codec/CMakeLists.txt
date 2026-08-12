@@ -2,6 +2,11 @@
 
 find_package(PkgConfig REQUIRED)
 
+# Legal gate flags for delivery codecs
+# These default to OFF and are flipped by release management after codec/patent review
+option(VIDEO_EDITOR_H264_DELIVERY_APPROVED "H.264 delivery legally approved for distribution" OFF)
+option(VIDEO_EDITOR_AAC_DELIVERY_APPROVED "AAC delivery legally approved for distribution" OFF)
+
 function(video_editor_split_dependency_version version prefix)
   if(NOT "${version}" MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)$")
     message(FATAL_ERROR "${prefix} must be an exact major.minor.patch version: ${version}")
@@ -35,7 +40,8 @@ pkg_check_modules(SWSCALE REQUIRED IMPORTED_TARGET libswscale=${VIDEO_EDITOR_SWS
 
 add_library(video_editor_media_codec
   src/probe.cpp
-  src/runtime.cpp)
+  src/runtime.cpp
+  src/encoder_capabilities.cpp)
 
 add_library(video_editor::media_codec ALIAS video_editor_media_codec)
 
@@ -56,6 +62,14 @@ target_link_libraries(
     PkgConfig::AVUTIL
     PkgConfig::SWRESAMPLE
     PkgConfig::SWSCALE)
+
+# Legal gate compile definitions (only set when ON)
+if(VIDEO_EDITOR_H264_DELIVERY_APPROVED)
+  target_compile_definitions(video_editor_media_codec PRIVATE VIDEO_EDITOR_H264_DELIVERY_APPROVED=1)
+endif()
+if(VIDEO_EDITOR_AAC_DELIVERY_APPROVED)
+  target_compile_definitions(video_editor_media_codec PRIVATE VIDEO_EDITOR_AAC_DELIVERY_APPROVED=1)
+endif()
 
 set_target_properties(video_editor_media_codec PROPERTIES
   CXX_VISIBILITY_PRESET hidden

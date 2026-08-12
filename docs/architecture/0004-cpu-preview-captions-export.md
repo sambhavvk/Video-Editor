@@ -1,6 +1,8 @@
+<!-- SPDX-License-Identifier: MPL-2.0 -->
+
 # ADR 0004: CPU preview, caption, and reference-export contracts
 
-- Status: Accepted
+- Status: Accepted; video-only export decision superseded in part by ADR 0009
 - Date: 2026-08-06
 - Owners: Core/Media and Desktop/Product
 
@@ -9,6 +11,11 @@
 The first integrated desktop slice needs to exercise the same immutable timeline used by later GPU
 preview and worker export. It must also avoid presenting unfinished audio or codec paths as if they
 were release-ready.
+
+> **Historical note:** This ADR records why the initial reference exporter was deliberately
+> video-only. [ADR 0009](0009-timeline-audio-render-and-mux.md) adds the originals-only 48 kHz
+> timeline-audio and mux contract; the remaining preview, caption, revision, proxy, and destination
+> safety decisions below remain in force.
 
 ## Decision
 
@@ -31,5 +38,6 @@ were release-ready.
 
 The working slice can verify exact edit-to-frame behavior, caption round-trips, cancellation, and
 destination safety before GPU and realtime-audio complexity is introduced. Creator delivery
-presets requiring muxed audio or H.264 remain release-blocked until the audio renderer, licensed
-encoder bundle, and worker integration pass their gates.
+At the time of this decision, presets requiring muxed audio or H.264 remained release-blocked until
+the audio renderer, licensed encoder bundle, and worker integration passed their gates. ADR 0009
+subsequently resolves the deterministic PCM reference-master part, not the H.264/AAC creator gate.

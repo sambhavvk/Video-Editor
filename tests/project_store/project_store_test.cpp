@@ -82,13 +82,83 @@ sqlite3_int64 query_int64(sqlite3* db, const char* sql) {
   return value;
 }
 
+bool table_has_column(sqlite3* db, const std::string_view table, const std::string_view column) {
+  sqlite3_stmt* statement = nullptr;
+  const std::string sql = "PRAGMA table_info(" + std::string(table) + ")";
+  if (sqlite3_prepare_v2(db, sql.c_str(), -1, &statement, nullptr) != SQLITE_OK) {
+    throw std::runtime_error(sqlite3_errmsg(db));
+  }
+
+  bool found = false;
+  while (sqlite3_step(statement) == SQLITE_ROW) {
+    const auto* value = sqlite3_column_text(statement, 1);
+    if (value != nullptr && column == reinterpret_cast<const char*>(value)) {
+      found = true;
+      break;
+    }
+  }
+  sqlite3_finalize(statement);
+  return found;
+}
+
+void create_legacy_v1_project(const std::filesystem::path& path) {
+  SqliteConnection connection(path, SqliteOpenMode::kReadWriteCreate);
+  connection.execute(R"sql(
+CREATE TABLE project_metadata (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  project_uuid TEXT NOT NULL CHECK (length(project_uuid) > 0),
+  schema_version INTEGER NOT NULL CHECK (schema_version >= 1),
+  head_revision INTEGER NOT NULL CHECK (head_revision >= 0),
+  saved_revision INTEGER NOT NULL CHECK (
+    saved_revision >= 0 AND saved_revision <= head_revision
+  ),
+  clean_close INTEGER NOT NULL CHECK (clean_close IN (0, 1)),
+  heartbeat_utc_ms INTEGER NOT NULL CHECK (heartbeat_utc_ms >= 0)
+);
+
+CREATE TABLE command_journal (
+  revision INTEGER PRIMARY KEY CHECK (revision > 0),
+  command_type TEXT NOT NULL CHECK (length(command_type) > 0),
+  payload_kind INTEGER NOT NULL CHECK (payload_kind IN (0, 1)),
+  payload_text TEXT,
+  payload_blob BLOB,
+  created_at_utc_ms INTEGER NOT NULL CHECK (created_at_utc_ms >= 0),
+  CHECK (
+    (payload_kind = 0 AND payload_text IS NOT NULL AND payload_blob IS NULL) OR
+    (payload_kind = 1 AND payload_text IS NULL AND payload_blob IS NOT NULL)
+  )
+);
+
+CREATE TABLE schema_migrations (
+  version INTEGER PRIMARY KEY CHECK (version > 0),
+  name TEXT NOT NULL,
+  applied_at_utc_ms INTEGER NOT NULL CHECK (applied_at_utc_ms >= 0)
+);
+)sql");
+  connection.execute("PRAGMA user_version = 1");
+  connection.execute(
+      "INSERT INTO project_metadata(singleton, project_uuid, schema_version, head_revision, "
+      "saved_revision, clean_close, heartbeat_utc_ms) "
+      "VALUES(1, '019ab123-4567-7abc-8def-0123456789ab', 1, 2, 1, 0, 123456)");
+  connection.execute(
+      "INSERT INTO command_journal(revision, command_type, payload_kind, payload_text, "
+      "payload_blob, created_at_utc_ms) "
+      "VALUES(1, 'legacy_text', 0, 'payload', NULL, 100)");
+  connection.execute(
+      "INSERT INTO command_journal(revision, command_type, payload_kind, payload_text, "
+      "payload_blob, created_at_utc_ms) "
+      "VALUES(2, 'legacy_blob', 1, NULL, x'0102ff', 200)");
+  connection.execute("INSERT INTO schema_migrations(version, name, applied_at_utc_ms) "
+                     "VALUES(1, 'create_project_store_v1', 42)");
+}
+
 void set_heartbeat(const std::filesystem::path& path, const std::int64_t heartbeat_utc_ms) {
   SqliteConnection connection(path, SqliteOpenMode::kReadWrite);
   connection.execute("UPDATE project_metadata SET heartbeat_utc_ms = " +
                      std::to_string(heartbeat_utc_ms) + " WHERE singleton = 1");
 }
 
-TEST(ProjectStoreTest, CreatesVersionOneWalDatabaseAndMetadata) {
+TEST(ProjectStoreTest, CreatesCurrentVersionWalDatabaseAndMetadata) {
   TemporaryDirectory temporary;
   const auto path = temporary.file("working.sqlite");
   constexpr std::string_view kProjectUuid = "019ab123-4567-7abc-8def-0123456789ab";
@@ -109,8 +179,10 @@ TEST(ProjectStoreTest, CreatesVersionOneWalDatabaseAndMetadata) {
 
   SqliteConnection inspection(path, SqliteOpenMode::kReadOnly);
   EXPECT_EQ(query_text(inspection.native_handle(), "PRAGMA journal_mode"), "wal");
-  EXPECT_EQ(query_text(inspection.native_handle(), "PRAGMA user_version"), "1");
-  EXPECT_EQ(query_text(inspection.native_handle(), "SELECT count(*) FROM schema_migrations"), "1");
+  EXPECT_EQ(query_text(inspection.native_handle(), "PRAGMA user_version"), "2");
+  EXPECT_EQ(query_text(inspection.native_handle(), "SELECT count(*) FROM schema_migrations"), "2");
+  EXPECT_TRUE(
+      table_has_column(inspection.native_handle(), "command_journal", "payload_schema_version"));
 }
 
 TEST(ProjectStoreTest, GeneratesAUuidV7WhenNoneIsProvided) {
@@ -137,7 +209,7 @@ TEST(ProjectStoreTest, PersistsTextAndBinaryJournalEntriesAcrossReopen) {
   {
     ProjectStore store(path);
     EXPECT_EQ(store.append_command("insert_clip", text_payload, 0), 1U);
-    EXPECT_EQ(store.append_command("set_effect", kBinaryPayload, 1), 2U);
+    EXPECT_EQ(store.append_command("set_effect", kBinaryPayload, 1, 2), 2U);
     EXPECT_EQ(store.append_command("empty_blob", std::span<const std::byte>{}, 2), 3U);
     store.mark_clean_close(3);
   }
@@ -147,19 +219,31 @@ TEST(ProjectStoreTest, PersistsTextAndBinaryJournalEntriesAcrossReopen) {
   ASSERT_EQ(entries.size(), 3U);
   EXPECT_EQ(entries[0].revision, 1U);
   EXPECT_EQ(entries[0].command_type, "insert_clip");
+  EXPECT_EQ(entries[0].payload_schema_version, 1U);
   ASSERT_TRUE(std::holds_alternative<std::string>(entries[0].payload));
   EXPECT_EQ(std::get<std::string>(entries[0].payload), text_payload);
   EXPECT_EQ(entries[1].revision, 2U);
   EXPECT_EQ(entries[1].command_type, "set_effect");
+  EXPECT_EQ(entries[1].payload_schema_version, 2U);
   ASSERT_TRUE(std::holds_alternative<BinaryPayload>(entries[1].payload));
   const BinaryPayload expected(kBinaryPayload.begin(), kBinaryPayload.end());
   EXPECT_EQ(std::get<BinaryPayload>(entries[1].payload), expected);
   EXPECT_EQ(entries[2].revision, 3U);
+  EXPECT_EQ(entries[2].payload_schema_version, 1U);
   ASSERT_TRUE(std::holds_alternative<BinaryPayload>(entries[2].payload));
   EXPECT_TRUE(std::get<BinaryPayload>(entries[2].payload).empty());
   EXPECT_TRUE(reopened.recovery_status().previous_clean_close);
   EXPECT_TRUE(reopened.recovery_status().had_unsaved_changes);
   EXPECT_TRUE(reopened.recovery_status().recovery_recommended);
+}
+
+TEST(ProjectStoreTest, RejectsNonPositivePayloadSchemaVersion) {
+  TemporaryDirectory temporary;
+  ProjectStore store(temporary.file("working.sqlite"));
+
+  EXPECT_THROW(static_cast<void>(store.append_command("snapshot", "{}", 0, 0)),
+               std::invalid_argument);
+  EXPECT_TRUE(store.read_commands().empty());
 }
 
 TEST(ProjectStoreTest, InvalidInitialUuidDoesNotLeaveAPartialSchema) {
@@ -260,7 +344,87 @@ TEST(ProjectStoreTest, MigratesAnEmptyVersionZeroDatabaseForward) {
   EXPECT_EQ(migrated.metadata().schema_version, kCurrentProjectSchemaVersion);
   EXPECT_TRUE(migrated.quick_check().ok());
   SqliteConnection inspection(path, SqliteOpenMode::kReadOnly);
+  EXPECT_EQ(query_text(inspection.native_handle(), "PRAGMA user_version"), "2");
+}
+
+TEST(ProjectStoreTest, MigratesVersionOneProjectsToVersionTwoAndCreatesBackup) {
+  TemporaryDirectory temporary;
+  const auto path = temporary.file("legacy.sqlite");
+  create_legacy_v1_project(path);
+
+  ProjectStore migrated(path);
+  const auto metadata = migrated.metadata();
+  EXPECT_EQ(metadata.schema_version, 2U);
+  EXPECT_EQ(metadata.head_revision, 2U);
+  EXPECT_EQ(metadata.saved_revision, 1U);
+  EXPECT_FALSE(metadata.clean_close);
+  EXPECT_GT(metadata.heartbeat_utc_ms, 123456);
+
+  const auto entries = migrated.read_commands();
+  ASSERT_EQ(entries.size(), 2U);
+  EXPECT_EQ(entries[0].payload_schema_version, 1U);
+  EXPECT_EQ(entries[1].payload_schema_version, 1U);
+  EXPECT_EQ(migrated.recovery_status().head_revision, 2U);
+  EXPECT_EQ(migrated.recovery_status().saved_revision, 1U);
+  EXPECT_FALSE(migrated.recovery_status().previous_clean_close);
+  EXPECT_TRUE(migrated.recovery_status().had_unsaved_changes);
+  EXPECT_TRUE(migrated.recovery_status().recovery_recommended);
+  EXPECT_EQ(migrated.recovery_status().last_heartbeat_utc_ms, 123456);
+
+  const auto backup = path.string() + ".pre-migration-v1.bak";
+  ASSERT_TRUE(std::filesystem::exists(backup));
+
+  SqliteConnection inspection(path, SqliteOpenMode::kReadOnly);
+  EXPECT_EQ(query_text(inspection.native_handle(), "PRAGMA user_version"), "2");
+  EXPECT_TRUE(
+      table_has_column(inspection.native_handle(), "command_journal", "payload_schema_version"));
+  EXPECT_EQ(query_text(inspection.native_handle(),
+                       "SELECT payload_schema_version FROM command_journal "
+                       "WHERE revision = 1"),
+            "1");
+
+  SqliteConnection backup_db(backup, SqliteOpenMode::kReadOnly);
+  EXPECT_EQ(query_text(backup_db.native_handle(), "PRAGMA user_version"), "1");
+  EXPECT_FALSE(
+      table_has_column(backup_db.native_handle(), "command_journal", "payload_schema_version"));
+}
+
+TEST(ProjectStoreTest, RollsBackFailedVersionOneToTwoMigration) {
+  TemporaryDirectory temporary;
+  const auto path = temporary.file("broken-legacy.sqlite");
+  create_legacy_v1_project(path);
+  {
+    SqliteConnection connection(path, SqliteOpenMode::kReadWrite);
+    connection.execute(
+        "ALTER TABLE command_journal ADD COLUMN payload_schema_version INTEGER NOT NULL "
+        "DEFAULT 1 CHECK (payload_schema_version > 0)");
+  }
+
+  EXPECT_THROW({ ProjectStore broken(path); }, ProjectStoreError);
+
+  SqliteConnection inspection(path, SqliteOpenMode::kReadOnly);
   EXPECT_EQ(query_text(inspection.native_handle(), "PRAGMA user_version"), "1");
+  EXPECT_EQ(query_text(inspection.native_handle(),
+                       "SELECT count(*) FROM schema_migrations WHERE version = 2"),
+            "0");
+}
+
+TEST(ProjectStoreTest, RecoveryCatalogAcceptsReadableVersionOneProjects) {
+  TemporaryDirectory temporary;
+  const auto path = temporary.file("legacy.working.sqlite");
+  create_legacy_v1_project(path);
+
+  const auto catalog = scan_recovery_directory(temporary.path());
+
+  ASSERT_EQ(catalog.candidates.size(), 1U);
+  const auto& candidate = catalog.candidates.front();
+  EXPECT_TRUE(candidate.valid_project_database);
+  EXPECT_TRUE(candidate.integrity_ok);
+  EXPECT_EQ(candidate.schema_version, 1U);
+  EXPECT_EQ(candidate.head_revision, 2U);
+  EXPECT_EQ(candidate.saved_revision, 1U);
+  EXPECT_FALSE(candidate.clean_close);
+  EXPECT_TRUE(candidate.recovery_recommended);
 }
 
 TEST(ProjectStoreTest, RejectsUnknownAndFutureSchemas) {

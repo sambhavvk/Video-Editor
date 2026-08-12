@@ -7,6 +7,7 @@
 #include <optional>
 #include <string>
 #include <variant>
+#include <vector>
 
 namespace video_editor::edit {
 
@@ -39,6 +40,31 @@ struct RemoveTrackCommand final {
   EntityId sequence_id;
   EntityId track_id;
 };
+struct RenameTrackCommand final {
+  EntityId sequence_id;
+  EntityId track_id;
+  std::string name;
+};
+struct ReorderTrackCommand final {
+  EntityId sequence_id;
+  EntityId track_id;
+  std::size_t index{0};
+};
+struct SetTrackLockedCommand final {
+  EntityId sequence_id;
+  EntityId track_id;
+  bool locked{false};
+};
+struct SetTrackVisibilityCommand final {
+  EntityId sequence_id;
+  EntityId track_id;
+  bool visible{true};
+};
+struct SetTrackTargetedCommand final {
+  EntityId sequence_id;
+  EntityId track_id;
+  bool targeted{true};
+};
 struct InsertClipCommand final {
   EntityId sequence_id;
   EntityId track_id;
@@ -64,18 +90,32 @@ struct TrimClipCommand final {
   // Linked companions receive the same head and tail timeline deltas. Their
   // source ranges are derived from their own rate and direction.
   bool include_linked{false};
+  InsertMode mode{InsertMode::RejectOverlap};
+};
+struct LinkedSplitId final {
+  EntityId clip_id;
+  EntityId right_clip_id;
 };
 struct SplitClipCommand final {
   EntityId sequence_id;
   EntityId clip_id;
   Time split_time;
   EntityId right_clip_id{EntityId::generate()};
+  bool include_linked{false};
+  // Required exactly once for every linked companion when include_linked is
+  // true. The selected clip continues to use right_clip_id.
+  std::vector<LinkedSplitId> linked_right_clip_ids;
 };
 struct RemoveClipCommand final {
   EntityId sequence_id;
   EntityId clip_id;
   bool ripple{false};
   bool include_linked{false};
+};
+struct CloseGapCommand final {
+  EntityId sequence_id;
+  EntityId track_id;
+  TimeRange gap;
 };
 struct RollEditCommand final {
   EntityId sequence_id;
@@ -152,11 +192,40 @@ struct SetClipAudioPropertiesCommand final {
   Time fade_in{};
   Time fade_out{};
 };
+struct SetClipTitleCommand final {
+  EntityId sequence_id;
+  EntityId clip_id;
+  Title title;
+};
+struct SetClipSpeedCommand final {
+  EntityId sequence_id;
+  EntityId clip_id;
+  Rate playback_rate{1, 1};
+  bool reversed{false};
+};
 struct SetTrackAudioStateCommand final {
   EntityId sequence_id;
   EntityId track_id;
   bool muted{false};
   bool solo{false};
+};
+struct SetTrackAudioMixCommand final {
+  EntityId sequence_id;
+  EntityId track_id;
+  double gain_db{0.0};
+  double pan{0.0};
+};
+struct AddTransitionCommand final {
+  EntityId sequence_id;
+  Transition transition;
+};
+struct UpdateTransitionCommand final {
+  EntityId sequence_id;
+  Transition transition;
+};
+struct RemoveTransitionCommand final {
+  EntityId sequence_id;
+  EntityId transition_id;
 };
 
 using EditOperation =
@@ -167,7 +236,11 @@ using EditOperation =
                  RemoveMarkerCommand, AddCaptionCommand, UpdateCaptionCommand, RemoveCaptionCommand,
                  AddClipEffectCommand, RemoveClipEffectCommand, SetClipEffectParameterCommand,
                  SetSequenceFormatCommand, SetClipTransformCommand, SetClipBlendModeCommand,
-                 SetClipAudioPropertiesCommand, SetTrackAudioStateCommand>;
+                 SetClipAudioPropertiesCommand, SetTrackAudioStateCommand, SetClipTitleCommand,
+                 SetClipSpeedCommand, AddTransitionCommand, UpdateTransitionCommand,
+                 RemoveTransitionCommand, RenameTrackCommand, ReorderTrackCommand,
+                 SetTrackLockedCommand, SetTrackVisibilityCommand, SetTrackTargetedCommand,
+                 CloseGapCommand, SetTrackAudioMixCommand>;
 
 struct EditCommand final {
   EditOperation operation;

@@ -4,6 +4,7 @@
 #include "video_editor/audio_render/timeline_audio_renderer.h"
 #include "video_editor/edit_model/result.h"
 #include "video_editor/edit_model/timeline_editor.h"
+#include "video_editor/export_service/presets.h"
 #include "video_editor/render_engine/cpu_renderer.h"
 
 #include <cstdint>
@@ -13,13 +14,10 @@
 #include <optional>
 #include <stop_token>
 #include <string>
+#include <vector>
 
 namespace video_editor::export_service {
 
-enum class VideoPreset : std::uint8_t {
-  Ffv1Matroska,
-  ProRes422HqMov,
-};
 
 struct PresetInfo final {
   VideoPreset preset{VideoPreset::Ffv1Matroska};
@@ -53,6 +51,22 @@ struct ExportRequest final {
   bool include_audio{false};
   std::stop_token cancellation;
   ProgressCallback progress;
+
+  // NEW creator-ready controls:
+  PlatformPreset platform_preset{PlatformPreset::ReferenceFfv1};
+  CaptionExportMode caption_mode{CaptionExportMode::None};
+  SidecarFormat sidecar_format{SidecarFormat::Srt};
+  // Resolution override (0 = use sequence dimensions). Must be even for H.264.
+  std::uint32_t override_width{0};
+  std::uint32_t override_height{0};
+  // Frame-rate override (0/0 = use sequence frame rate).
+  std::uint32_t override_frame_rate_num{0};
+  std::uint32_t override_frame_rate_den{0};
+  // Audio bitrate override (0 = preset default).
+  std::uint32_t override_audio_bitrate{0};
+  // Captions to burn in / export as sidecar. Drawn from the snapshot's
+  // sequence.captions by the caller, or left empty for None mode.
+  std::vector<edit::Caption> captions;
 };
 
 enum class ExportErrorCode : std::uint8_t {
@@ -90,6 +104,8 @@ struct ExportResult final {
   edit::Time encoded_audio_duration{};
   bool video_exported{true};
   bool audio_exported{false};
+  // Path to the sidecar caption file if one was written alongside the media.
+  std::filesystem::path caption_sidecar_path;
 };
 
 using ExportOutcome = edit::Result<ExportResult, ExportError>;

@@ -4,10 +4,15 @@
 
 #include "video_editor/desktop_ui/panel_widgets.hpp"
 
+#include "video_editor/export_service/presets.h"
+#include "video_editor/media_codec/encoder_capabilities.h"
+
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QGroupBox>
+#include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
@@ -25,6 +30,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <cmath>
 
 namespace video_editor::desktop_ui {
 namespace {
@@ -295,6 +301,104 @@ InspectorWidget::InspectorWidget(QWidget* parent) : QWidget(parent) {
                 0.01);
   editorLayout->addWidget(audio);
 
+  auto* titleGroup = new QGroupBox(tr("Title"), editor);
+  titleGroup->setObjectName(QStringLiteral("inspectorTitleGroup"));
+  title_controls_ = titleGroup;
+  auto* titleForm = new QFormLayout(titleGroup);
+  titleForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+  auto* titleText = new QLineEdit(titleGroup);
+  titleText->setObjectName(QStringLiteral("inspector.titleText"));
+  titleText->setAccessibleName(tr("Title text"));
+  titleText->setPlaceholderText(tr("Title text"));
+  connect(titleText, &QLineEdit::textEdited, this,
+          [this](const QString& text) { emit parameterEdited(QStringLiteral("titleText"), text); });
+  titleForm->addRow(tr("Text"), titleText);
+  auto* titleFontEdit = new QLineEdit(titleGroup);
+  titleFontEdit->setObjectName(QStringLiteral("inspector.titleFont"));
+  titleFontEdit->setAccessibleName(tr("Title font family"));
+  titleFontEdit->setText(QStringLiteral("sans-serif"));
+  connect(titleFontEdit, &QLineEdit::textEdited, this, [this](const QString& text) {
+    emit parameterEdited(QStringLiteral("titleFont"), text);
+  });
+  titleForm->addRow(tr("Font"), titleFontEdit);
+  const auto addTitleField = [this, titleGroup, titleForm](const QString& label,
+                                                          const QString& id,
+                                                          const QString& suffix,
+                                                          double minimum, double maximum,
+                                                          double value, double step) {
+    auto* field = makeInspectorField(id, suffix, minimum, maximum, value, step, titleGroup,
+                                     [this, id](double updated) {
+                                       emit parameterEdited(id, updated);
+                                     });
+    titleForm->addRow(label, field);
+  };
+  addTitleField(tr("Size"), QStringLiteral("titleSize"), QStringLiteral(" pt"), 1.0, 4096.0,
+                96.0, 1.0);
+  auto* titleAlign = new QComboBox(titleGroup);
+  titleAlign->setObjectName(QStringLiteral("inspector.titleAlign"));
+  titleAlign->setAccessibleName(tr("Title alignment"));
+  titleAlign->addItem(tr("Left"), QStringLiteral("left"));
+  titleAlign->addItem(tr("Center"), QStringLiteral("center"));
+  titleAlign->addItem(tr("Right"), QStringLiteral("right"));
+  titleAlign->setCurrentIndex(1);
+  connect(titleAlign, &QComboBox::currentIndexChanged, this, [this, titleAlign](const int index) {
+    emit parameterEdited(QStringLiteral("titleAlign"), titleAlign->itemData(index));
+  });
+  titleForm->addRow(tr("Alignment"), titleAlign);
+  auto* titleBold = new QToolButton(titleGroup);
+  titleBold->setObjectName(QStringLiteral("inspector.titleBold"));
+  titleBold->setAccessibleName(tr("Bold"));
+  titleBold->setText(tr("B"));
+  titleBold->setCheckable(true);
+  QFont boldFont = titleBold->font();
+  boldFont.setBold(true);
+  titleBold->setFont(boldFont);
+  connect(titleBold, &QToolButton::toggled, this,
+          [this](const bool checked) {
+            emit parameterEdited(QStringLiteral("titleBold"), checked);
+          });
+  auto* titleItalic = new QToolButton(titleGroup);
+  titleItalic->setObjectName(QStringLiteral("inspector.titleItalic"));
+  titleItalic->setAccessibleName(tr("Italic"));
+  titleItalic->setText(tr("I"));
+  titleItalic->setCheckable(true);
+  QFont italicFont = titleItalic->font();
+  italicFont.setItalic(true);
+  titleItalic->setFont(italicFont);
+  connect(titleItalic, &QToolButton::toggled, this, [this](const bool checked) {
+    emit parameterEdited(QStringLiteral("titleItalic"), checked);
+  });
+  auto* titleStyleRow = new QWidget(titleGroup);
+  auto* titleStyleLayout = new QHBoxLayout(titleStyleRow);
+  titleStyleLayout->setContentsMargins(0, 0, 0, 0);
+  titleStyleLayout->setSpacing(4);
+  titleStyleLayout->addWidget(titleBold);
+  titleStyleLayout->addWidget(titleItalic);
+  titleStyleLayout->addStretch();
+  titleForm->addRow(tr("Style"), titleStyleRow);
+  titleGroup->setVisible(false);
+  editorLayout->addWidget(titleGroup);
+
+  auto* speedGroup = new QGroupBox(tr("Speed"), editor);
+  speedGroup->setObjectName(QStringLiteral("inspectorSpeedGroup"));
+  speed_controls_ = speedGroup;
+  auto* speedForm = new QFormLayout(speedGroup);
+  auto* speedField = makeInspectorField(QStringLiteral("speed"), QStringLiteral(" %"), 0.01,
+                                         20'000.0, 100.0, 1.0, speedGroup,
+                                         [this](double updated) {
+                                           emit parameterEdited(QStringLiteral("speed"), updated);
+                                         });
+  speedForm->addRow(tr("Rate"), speedField);
+  auto* reverseCheck = new QCheckBox(tr("Reverse"), speedGroup);
+  reverseCheck->setObjectName(QStringLiteral("inspector.reverse"));
+  reverseCheck->setAccessibleName(tr("Reverse playback"));
+  connect(reverseCheck, &QCheckBox::toggled, this, [this](const bool checked) {
+    emit parameterEdited(QStringLiteral("reverse"), checked);
+  });
+  speedForm->addRow(QString{}, reverseCheck);
+  speedGroup->setVisible(false);
+  editorLayout->addWidget(speedGroup);
+
   auto* advanced = new QGroupBox(tr("Advanced controls"), editor);
   advanced->setObjectName(QStringLiteral("inspectorAdvancedGroup"));
   advanced_controls_ = advanced;
@@ -367,6 +471,14 @@ void InspectorWidget::setClipCapabilities(const bool visual, const bool audio) {
   audio_controls_->setVisible(audio);
 }
 
+void InspectorWidget::setTitleControlsVisible(const bool visible) {
+  title_controls_->setVisible(visible);
+}
+
+void InspectorWidget::setSpeedControlsVisible(const bool visible) {
+  speed_controls_->setVisible(visible);
+}
+
 void InspectorWidget::setParameter(const QString& parameterId, const QVariant& value) {
   if (auto* spin = findChild<QDoubleSpinBox*>(QStringLiteral("inspector.%1").arg(parameterId))) {
     const QSignalBlocker blocker(spin);
@@ -381,6 +493,21 @@ void InspectorWidget::setParameter(const QString& parameterId, const QVariant& v
     } else {
       combo->setCurrentText(value.toString());
     }
+    return;
+  }
+  if (auto* line = findChild<QLineEdit*>(QStringLiteral("inspector.%1").arg(parameterId))) {
+    const QSignalBlocker blocker(line);
+    line->setText(value.toString());
+    return;
+  }
+  if (auto* check = findChild<QCheckBox*>(QStringLiteral("inspector.%1").arg(parameterId))) {
+    const QSignalBlocker blocker(check);
+    check->setChecked(value.toBool());
+    return;
+  }
+  if (auto* tool = findChild<QToolButton*>(QStringLiteral("inspector.%1").arg(parameterId))) {
+    const QSignalBlocker blocker(tool);
+    tool->setChecked(value.toBool());
   }
 }
 
@@ -533,16 +660,34 @@ void AudioMixerWidget::setTracks(const QVector<AudioTrackView>& tracks) {
     fader->setObjectName(QStringLiteral("audioFader.%1").arg(index));
     fader->setAccessibleName(tr("Gain for %1").arg(track.displayName));
     fader->setRange(-60, 12);
-    fader->setValue(0);
+    fader->setValue(static_cast<int>(std::round(track.gain_db)));
     fader->setTickPosition(QSlider::TicksBothSides);
     fader->setTickInterval(12);
-    fader->setEnabled(false);
-    fader->setToolTip(tr("Use the selected audio clip's Inspector for clip gain."));
+    fader->setEnabled(true);
+    fader->setToolTip(tr("Track gain in decibels."));
     stripLayout->addWidget(fader, 2, Qt::AlignHCenter);
 
-    auto* value = new QLabel(QStringLiteral("0.0 dB"), strip);
+    auto* value = new QLabel(QStringLiteral("%1 dB").arg(track.gain_db, 0, 'f', 1), strip);
+    value->setObjectName(QStringLiteral("mixerGainValue.%1").arg(index));
     value->setAlignment(Qt::AlignCenter);
     stripLayout->addWidget(value);
+
+    auto* pan = new QSlider(Qt::Horizontal, strip);
+    pan->setObjectName(QStringLiteral("audioPan.%1").arg(index));
+    pan->setAccessibleName(tr("Pan for %1").arg(track.displayName));
+    pan->setRange(-100, 100);
+    pan->setValue(static_cast<int>(std::round(track.pan * 100.0)));
+    pan->setTickPosition(QSlider::TicksBothSides);
+    pan->setTickInterval(50);
+    auto* pan_label = new QLabel(QStringLiteral("C"), strip);
+    pan_label->setObjectName(QStringLiteral("mixerPanValue.%1").arg(index));
+    pan_label->setAlignment(Qt::AlignCenter);
+    auto* pan_row = new QHBoxLayout;
+    pan_row->addWidget(new QLabel(QStringLiteral("L"), strip));
+    pan_row->addWidget(pan, 1);
+    pan_row->addWidget(new QLabel(QStringLiteral("R"), strip));
+    stripLayout->addLayout(pan_row);
+    stripLayout->addWidget(pan_label);
 
     auto* buttons = new QHBoxLayout;
     auto* mute = new QToolButton(strip);
@@ -565,6 +710,17 @@ void AudioMixerWidget::setTracks(const QVector<AudioTrackView>& tracks) {
       value->setText(QStringLiteral("%1 dB").arg(static_cast<double>(gain), 0, 'f', 1));
       emit gainEdited(index, static_cast<double>(gain));
     });
+    connect(pan, &QSlider::valueChanged, this, [this, index, pan_label](int pan_value) {
+      const double pan_normalized = static_cast<double>(pan_value) / 100.0;
+      if (pan_value == 0) {
+        pan_label->setText(tr("C"));
+      } else if (pan_value < 0) {
+        pan_label->setText(QStringLiteral("L%1").arg(std::abs(pan_value)));
+      } else {
+        pan_label->setText(QStringLiteral("R%1").arg(pan_value));
+      }
+      emit panEdited(index, pan_normalized);
+    });
     connect(mute, &QToolButton::toggled, this,
             [this, index](bool muted) { emit muteToggled(index, muted); });
     connect(solo, &QToolButton::toggled, this,
@@ -572,6 +728,29 @@ void AudioMixerWidget::setTracks(const QVector<AudioTrackView>& tracks) {
     layout->addWidget(strip);
   }
   layout->addStretch();
+}
+
+void AudioMixerWidget::setMeterLevels(const int trackIndex, const QVector<float>& peakDbfs) {
+  if (trackIndex < 0) {
+    return;
+  }
+  // The meter widget range is 0..60 where 0 = -60 dBFS and 60 = 0 dBFS.
+  // Values below -60 clamp to 0 (silent); values above 0 clamp to 60.
+  auto* meter = findChild<QProgressBar*>(QStringLiteral("audioMeter.%1").arg(trackIndex));
+  if (meter == nullptr) {
+    return;
+  }
+  if (peakDbfs.isEmpty()) {
+    meter->setValue(0);
+    return;
+  }
+  // Show the louder of the channels for a single-bar meter.
+  float loudest = peakDbfs.first();
+  for (float v : peakDbfs) {
+    loudest = std::max(loudest, v);
+  }
+  const int scaled = static_cast<int>(std::clamp(loudest + 60.0F, 0.0F, 60.0F));
+  meter->setValue(scaled);
 }
 
 CaptionsPanelWidget::CaptionsPanelWidget(QWidget* parent) : QWidget(parent) {
@@ -696,51 +875,110 @@ DeliverPanelWidget::DeliverPanelWidget(QWidget* parent) : QWidget(parent) {
   font.setWeight(QFont::DemiBold);
   heading->setFont(font);
   layout->addWidget(heading);
-  layout->addWidget(makeMutedLabel(
-      tr("CPU reference masters use the sequence resolution and original media."), this));
 
-  auto* form = new QFormLayout;
+  auto* presetForm = new QFormLayout;
   preset_ = new QComboBox(this);
   preset_->setObjectName(QStringLiteral("exportPreset"));
   preset_->setAccessibleName(tr("Export preset"));
-  preset_->addItem(tr("Lossless master · FFV1 / Matroska"), QStringLiteral("master.ffv1"));
-  preset_->addItem(tr("Editing master · ProRes 422 HQ / MOV"), QStringLiteral("master.prores"));
-  form->addRow(tr("Preset"), preset_);
+  presetForm->addRow(tr("Preset"), preset_);
+  layout->addLayout(presetForm);
 
-  auto* destination = new QLineEdit(this);
-  destination->setObjectName(QStringLiteral("exportDestination"));
-  destination->setAccessibleName(tr("Export destination"));
-  destination->setPlaceholderText(tr("Choose when exporting…"));
-  form->addRow(tr("Destination"), destination);
-  layout->addLayout(form);
+  auto* destinationRow = new QHBoxLayout;
+  destination_ = new QLineEdit(this);
+  destination_->setObjectName(QStringLiteral("destinationField"));
+  destination_->setAccessibleName(tr("Export destination"));
+  destination_->setReadOnly(true);
+  destination_->setPlaceholderText(tr("Choose a destination…"));
+  browse_button_ = new QToolButton(this);
+  browse_button_->setObjectName(QStringLiteral("browseButton"));
+  browse_button_->setAccessibleName(tr("Browse for export destination"));
+  browse_button_->setText(tr("Browse…"));
+  destinationRow->addWidget(destination_);
+  destinationRow->addWidget(browse_button_);
+  auto* destinationWidget = new QWidget(this);
+  destinationWidget->setLayout(destinationRow);
+  auto* destinationForm = new QFormLayout;
+  destinationForm->addRow(tr("Destination"), destinationWidget);
+  layout->addLayout(destinationForm);
 
   auto* summary = new QGroupBox(tr("Summary"), this);
   auto* summaryLayout = new QFormLayout(summary);
-  summaryLayout->addRow(tr("Video"), new QLabel(tr("Sequence resolution · Rec.709 SDR"), summary));
-  summaryLayout->addRow(tr("Audio"), new QLabel(tr("48 kHz stereo PCM · original media"), summary));
-  summaryLayout->addRow(tr("Source"), new QLabel(tr("Original media"), summary));
+  auto* summaryVideo = new QLabel(summary);
+  auto* summaryAudio = new QLabel(summary);
+  auto* summarySource = new QLabel(tr("Original media"), summary);
+  summaryLayout->addRow(tr("Video"), summaryVideo);
+  summaryLayout->addRow(tr("Audio"), summaryAudio);
+  summaryLayout->addRow(tr("Source"), summarySource);
   layout->addWidget(summary);
 
   auto* advanced = new QGroupBox(tr("Advanced settings"), this);
   advanced->setCheckable(true);
   advanced->setChecked(false);
   auto* advancedForm = new QFormLayout(advanced);
-  auto* encoder = new QComboBox(advanced);
-  encoder->addItems({tr("Deterministic software reference")});
-  encoder->setAccessibleName(tr("Encoder preference"));
-  advancedForm->addRow(tr("Encoder"), encoder);
-  auto* captions = new QComboBox(advanced);
-  captions->addItems({tr("None · use caption panel for SRT/WebVTT")});
-  captions->setAccessibleName(tr("Caption export mode"));
-  advancedForm->addRow(tr("Captions"), captions);
+
+  resolution_ = new QComboBox(advanced);
+  resolution_->setObjectName(QStringLiteral("resolutionCombo"));
+  resolution_->setAccessibleName(tr("Export resolution"));
+  resolution_->addItem(tr("Use sequence"), QVariantList{0, 0});
+  resolution_->addItem(tr("1920×1080"), QVariantList{1920, 1080});
+  resolution_->addItem(tr("2560×1440"), QVariantList{2560, 1440});
+  resolution_->addItem(tr("3840×2160"), QVariantList{3840, 2160});
+  resolution_->addItem(tr("1080×1920 (vertical)"), QVariantList{1080, 1920});
+  resolution_->addItem(tr("720×1280 (vertical)"), QVariantList{720, 1280});
+  advancedForm->addRow(tr("Resolution"), resolution_);
+
+  frame_rate_ = new QComboBox(advanced);
+  frame_rate_->setObjectName(QStringLiteral("frameRateCombo"));
+  frame_rate_->setAccessibleName(tr("Export frame rate"));
+  frame_rate_->addItem(tr("Use sequence"), QVariantList{0, 0});
+  for (const auto& rate : {24, 25, 30, 50, 60}) {
+    frame_rate_->addItem(tr("%1 fps").arg(rate), QVariantList{rate, 1});
+  }
+  advancedForm->addRow(tr("Frame rate"), frame_rate_);
+
+  audio_bitrate_ = new QComboBox(advanced);
+  audio_bitrate_->setObjectName(QStringLiteral("audioBitrateCombo"));
+  audio_bitrate_->setAccessibleName(tr("Export audio bitrate"));
+  audio_bitrate_->addItem(tr("Use preset default"), 0u);
+  for (const auto bitrate : {64u, 96u, 128u, 192u, 256u}) {
+    audio_bitrate_->addItem(tr("%1 kbps").arg(bitrate), bitrate * 1000u);
+  }
+  advancedForm->addRow(tr("Audio bitrate"), audio_bitrate_);
+
+  caption_mode_ = new QComboBox(advanced);
+  caption_mode_->setObjectName(QStringLiteral("captionModeCombo"));
+  caption_mode_->setAccessibleName(tr("Caption export mode"));
+  caption_mode_->addItem(tr("None"), QStringLiteral("none"));
+  caption_mode_->addItem(tr("Burn in"), QStringLiteral("burn_in"));
+  caption_mode_->addItem(tr("Sidecar file"), QStringLiteral("sidecar"));
+  caption_mode_->addItem(tr("Burn in + sidecar"), QStringLiteral("burn_in_and_sidecar"));
+  advancedForm->addRow(tr("Captions"), caption_mode_);
+
+  sidecar_format_ = new QComboBox(advanced);
+  sidecar_format_->setObjectName(QStringLiteral("sidecarFormatCombo"));
+  sidecar_format_->setAccessibleName(tr("Caption sidecar format"));
+  sidecar_format_->addItem(tr("SRT"), QStringLiteral("srt"));
+  sidecar_format_->addItem(tr("WebVTT"), QStringLiteral("vtt"));
+  advancedForm->addRow(tr("Sidecar format"), sidecar_format_);
+
+  encoder_summary_ = makeMutedLabel(QString(), advanced);
+  encoder_summary_->setObjectName(QStringLiteral("encoderSummary"));
+  encoder_summary_->setAccessibleName(tr("Encoder capabilities"));
+  encoder_summary_->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+  advancedForm->addRow(tr("Encoder"), encoder_summary_);
   layout->addWidget(advanced);
+
+  preset_notes_ = makeMutedLabel(QString(), this);
+  preset_notes_->setObjectName(QStringLiteral("presetNotes"));
+  preset_notes_->setAccessibleName(tr("Preset notes"));
+  preset_notes_->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+  layout->addWidget(preset_notes_);
   layout->addStretch();
 
   export_progress_ = new QProgressBar(this);
   export_progress_->setObjectName(QStringLiteral("exportProgress"));
   export_progress_->setAccessibleName(tr("Export progress"));
   export_progress_->setRange(0, 100);
-  export_progress_->setValue(0);
   export_progress_->setTextVisible(true);
   export_progress_->hide();
   layout->addWidget(export_progress_);
@@ -754,10 +992,54 @@ DeliverPanelWidget::DeliverPanelWidget(QWidget* parent) : QWidget(parent) {
   export_button_->setMinimumHeight(38);
   layout->addWidget(export_button_);
 
-  connect(preset_, &QComboBox::currentIndexChanged, this,
-          [this] { emit presetChanged(selectedPresetId()); });
-  connect(export_button_, &QToolButton::clicked, this,
-          [this] { emit exportRequested(selectedPresetId()); });
+  connect(browse_button_, &QToolButton::clicked, this,
+          &DeliverPanelWidget::destinationBrowseRequested);
+  connect(caption_mode_, &QComboBox::currentIndexChanged, this, [this] {
+    const auto mode = captionModeKey();
+    sidecar_format_->setEnabled(mode == QStringLiteral("sidecar") ||
+                                mode == QStringLiteral("burn_in_and_sidecar"));
+  });
+  connect(preset_, &QComboBox::currentIndexChanged, this, [this, summaryVideo, summaryAudio] {
+    const auto info = export_service::platform_preset_info(
+        static_cast<export_service::PlatformPreset>(preset_->currentIndex()));
+    summaryVideo->setText(info.audio_only ? tr("Audio only") :
+                          QString::fromStdString(info.intended_video_codec));
+    summaryAudio->setText(QString::fromStdString(info.intended_audio_codec));
+    preset_notes_->setText(QString::fromStdString(info.notes));
+    emit presetChanged(selectedPresetId());
+  });
+  connect(export_button_, &QToolButton::clicked, this, [this] {
+    if (export_progress_->isVisible()) {
+      emit cancelRequested();
+    } else {
+      emit exportRequested(selectedPresetId());
+    }
+  });
+
+  loadPlatformPresets();
+  sidecar_format_->setEnabled(false);
+}
+
+void DeliverPanelWidget::loadPlatformPresets() {
+  preset_->clear();
+  const auto presets = export_service::available_platform_presets();
+  for (const auto& info : presets) {
+    preset_->addItem(QString::fromStdString(info.display_name),
+                     QString::number(static_cast<int>(info.preset)));
+  }
+  const auto matrix = media::probe_encoder_capabilities();
+  setEncoderCapabilities(QString::fromStdString(media::format_capability_summary(matrix)));
+  if (preset_->count() > 0) {
+    preset_->setCurrentIndex(0);
+  }
+}
+
+void DeliverPanelWidget::setEncoderCapabilities(const QString& summary) {
+  encoder_summary_->setText(summary);
+}
+
+void DeliverPanelWidget::setDestinationPath(const QString& path) {
+  destination_->setText(path);
 }
 
 QString DeliverPanelWidget::selectedPresetId() const {
@@ -774,6 +1056,34 @@ void DeliverPanelWidget::setExportRunning(const bool running, const int percent)
   export_button_->setText(running ? tr("Cancel export") : tr("Export master"));
   export_button_->setAccessibleName(running ? tr("Cancel current export")
                                             : tr("Export video master"));
+}
+
+QString DeliverPanelWidget::captionModeKey() const {
+  return caption_mode_->currentData().toString();
+}
+
+QString DeliverPanelWidget::sidecarFormatKey() const {
+  return sidecar_format_->currentData().toString();
+}
+
+int DeliverPanelWidget::overrideWidth() const {
+  return resolution_->currentData().toList().value(0).toInt();
+}
+
+int DeliverPanelWidget::overrideHeight() const {
+  return resolution_->currentData().toList().value(1).toInt();
+}
+
+unsigned int DeliverPanelWidget::overrideFrameRateNum() const {
+  return frame_rate_->currentData().toList().value(0).toUInt();
+}
+
+unsigned int DeliverPanelWidget::overrideFrameRateDen() const {
+  return frame_rate_->currentData().toList().value(1).toUInt();
+}
+
+unsigned int DeliverPanelWidget::overrideAudioBitrate() const {
+  return audio_bitrate_->currentData().toUInt();
 }
 
 } // namespace video_editor::desktop_ui

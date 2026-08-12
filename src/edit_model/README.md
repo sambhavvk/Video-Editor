@@ -22,8 +22,9 @@ Current vertical-slice invariants:
 - Sequence frame rate and canvas dimensions change together through one typed,
   revision-checked command; zero-sized canvases are rejected before mutation.
 - Clips occupy half-open, non-overlapping ranges on a track.
-- Media clips reference a project asset of the matching kind; title clips have
-  no asset requirement.
+- Media clips reference a project asset of the matching kind and must not carry
+  title styling payloads. Title clips own a validated `Title` payload and do
+  not reference media.
 - Timeline and source starts are non-negative and durations are positive.
 - Caption tracks reserve UI/model ordering but captions currently live on the
   sequence, which permits overlapping multilingual caption proposals.
@@ -44,6 +45,12 @@ Current vertical-slice invariants:
   distances prefer playhead, marker, clip edge, and frame grid in that order,
   followed by stable time/identity/track/edge ordering.
 - Unknown effects retain their version and opaque payload without evaluation.
+- Sequence-owned transitions are exact timeline entities with explicit IDs,
+  adjacent outgoing/incoming clip IDs, a half-open range straddling their cut,
+  a typed kind, and an enabled flag. Enabled transitions are limited to adjacent clips on the
+  same video track, must straddle their shared cut, require sufficient source
+  handles for both sides, and cannot overlap another enabled transition on the
+  same track.
 
 ## Clip property commands
 
@@ -82,6 +89,32 @@ Property validation is strict and atomic:
 - A stale revision, missing sequence or clip, wrong clip kind, locked track,
   non-finite number, or out-of-range value leaves the project and undo history
   unchanged.
+
+## Titles and transitions
+
+Titles and transitions are canonical edit-model state rather than UI-only
+presets:
+
+```cpp
+SetClipTitleCommand{sequence_id, clip_id, title};
+AddTransitionCommand{sequence_id, transition};
+UpdateTransitionCommand{sequence_id, transition};
+RemoveTransitionCommand{sequence_id, transition_id};
+```
+
+- `SetClipTitleCommand` applies only to title clips on unlocked tracks.
+  Title text and font family must be valid UTF-8. Text is limited to 64 KiB, the font-family name
+  to 1024 bytes, font size to 1–4096 sequence pixels, and foreground/background colors to finite
+  normalized RGBA.
+- Transitions belong to the sequence instead of a specific track object so they
+  survive clip-vector updates and serialize independently of track layout.
+- Every transition command is revision checked, undoable, and coalescible like
+  other inspector edits.
+- Any other edit which would leave an existing transition invalid is rejected
+  atomically during whole-project validation.
+
+Use `findTransition(sequence, id)` to inspect the authoritative transition
+record in an immutable snapshot.
 
 Audio-track mute and solo are also revisioned project state. Only audio tracks
 accept `SetTrackAudioStateCommand`; missing sequences or tracks and video or

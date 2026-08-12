@@ -21,7 +21,8 @@ using Revision = std::uint64_t;
 using BinaryPayload = std::vector<std::byte>;
 using CommandPayload = std::variant<std::string, BinaryPayload>;
 
-inline constexpr std::uint32_t kCurrentProjectSchemaVersion = 1;
+inline constexpr std::uint32_t kCurrentProjectSchemaVersion = 2;
+inline constexpr std::uint32_t kMinimumSupportedProjectSchemaVersion = 1;
 
 class ProjectStoreError : public std::runtime_error {
 public:
@@ -64,6 +65,7 @@ struct JournalEntry {
   Revision revision = 0;
   std::string command_type;
   CommandPayload payload;
+  std::uint32_t payload_schema_version = 1;
   std::int64_t created_at_utc_ms = 0;
 };
 
@@ -148,9 +150,9 @@ public:
   [[nodiscard]] IntegrityResult quick_check() const;
 
   Revision append_command(std::string_view command_type, std::string_view payload,
-                          Revision expected_revision);
+                          Revision expected_revision, std::uint32_t payload_schema_version = 1);
   Revision append_command(std::string_view command_type, std::span<const std::byte> payload,
-                          Revision expected_revision);
+                          Revision expected_revision, std::uint32_t payload_schema_version = 1);
 
   [[nodiscard]] std::vector<JournalEntry> read_commands(Revision after_revision = 0) const;
 
@@ -167,7 +169,7 @@ public:
 
 private:
   Revision append_payload(std::string_view command_type, const CommandPayload& payload,
-                          Revision expected_revision);
+                          Revision expected_revision, std::uint32_t payload_schema_version);
   void initialize(OpenOptions options);
 
   SqliteConnection connection_;

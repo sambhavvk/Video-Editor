@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
@@ -36,10 +37,12 @@ struct EditError final {
 };
 
 class TimelineSnapshot final {
- public:
+public:
   TimelineSnapshot() = default;
 
-  [[nodiscard]] Revision revision() const noexcept { return revision_; }
+  [[nodiscard]] Revision revision() const noexcept {
+    return revision_;
+  }
   [[nodiscard]] const Project& project() const;
   [[nodiscard]] const Sequence& sequence() const;
   [[nodiscard]] const Track* findTrack(EntityId id) const noexcept;
@@ -48,10 +51,9 @@ class TimelineSnapshot final {
   [[nodiscard]] std::vector<Gap> gaps(EntityId track_id,
                                       std::optional<Time> end = std::nullopt) const;
 
- private:
+private:
   friend class TimelineEditor;
-  TimelineSnapshot(Revision revision, std::shared_ptr<const Project> project,
-                   EntityId sequence_id);
+  TimelineSnapshot(Revision revision, std::shared_ptr<const Project> project, EntityId sequence_id);
 
   Revision revision_{};
   std::shared_ptr<const Project> project_;
@@ -65,15 +67,17 @@ struct HistoryEntryView final {
 };
 
 class TimelineEditor final {
- public:
+public:
   explicit TimelineEditor(Project initial_project = Project{});
   ~TimelineEditor();
   TimelineEditor(const TimelineEditor&) = delete;
   TimelineEditor& operator=(const TimelineEditor&) = delete;
 
   [[nodiscard]] Revision revision() const noexcept;
-  [[nodiscard]] Result<Revision, EditError> apply(EditCommand command,
-                                                  Revision expected_revision);
+  [[nodiscard]] Result<Revision, EditError> apply(EditCommand command, Revision expected_revision);
+  [[nodiscard]] Result<Revision, EditError>
+  applyBatch(std::vector<EditCommand> commands, Revision expected_revision, std::string batch_name,
+             std::optional<std::string> coalescing_key = std::nullopt);
   [[nodiscard]] Result<Revision, EditError> undo(Revision expected_revision);
   [[nodiscard]] Result<Revision, EditError> redo(Revision expected_revision);
 
@@ -81,18 +85,15 @@ class TimelineEditor final {
   [[nodiscard]] bool canRedo() const noexcept;
   [[nodiscard]] std::vector<HistoryEntryView> history() const;
 
-  [[nodiscard]] Result<TimelineSnapshot, EditError> snapshot(
-      EntityId sequence_id, Revision revision) const;
-  [[nodiscard]] std::shared_ptr<const Project> projectAt(
-      Revision revision) const;
+  [[nodiscard]] Result<TimelineSnapshot, EditError> snapshot(EntityId sequence_id,
+                                                             Revision revision) const;
+  [[nodiscard]] std::shared_ptr<const Project> projectAt(Revision revision) const;
 
- private:
+private:
   struct HistoryEntry;
 
-  [[nodiscard]] Result<Revision, EditError> staleRevision(
-      Revision expected) const;
-  [[nodiscard]] Result<Revision, EditError> commitState(
-      std::shared_ptr<const Project> next_state);
+  [[nodiscard]] Result<Revision, EditError> staleRevision(Revision expected) const;
+  [[nodiscard]] Result<Revision, EditError> commitState(std::shared_ptr<const Project> next_state);
 
   mutable std::shared_mutex mutex_;
   Revision revision_{};
@@ -102,4 +103,4 @@ class TimelineEditor final {
   std::size_t history_cursor_{0};
 };
 
-}  // namespace video_editor::edit
+} // namespace video_editor::edit
