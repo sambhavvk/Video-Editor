@@ -6,9 +6,11 @@ pkg_check_modules(EBUR128 REQUIRED IMPORTED_TARGET libebur128=1.2.6)
 add_library(video_editor_audio_engine
   src/async_realtime_playback.cpp
   src/audio_block.cpp
+  src/dialogue_denoise.cpp
   src/dsp.cpp
   src/loudness_meter.cpp
   src/miniaudio_output_device.cpp
+  src/playback_meter.cpp
   src/realtime_playback.cpp
   src/spsc_audio_ring.cpp)
 

@@ -3,6 +3,7 @@
 
 #include "video_editor/audio_engine/audio_block.h"
 #include "video_editor/audio_engine/audio_output_device.h"
+#include "video_editor/audio_engine/playback_meter.h"
 
 #include <chrono>
 #include <cstddef>
@@ -133,6 +134,9 @@ struct PlaybackDiagnostics final {
   bool device_open{false};
   bool device_running{false};
   std::string last_error;
+  // Latest per-channel peak/RMS reading from the playback meter (linear
+  // amplitude, 0..1). Updated on every callback; the reader converts to dBFS.
+  PlaybackMeter::Reading meter_reading{};
 };
 
 class RealtimeAudioPlayback final {
@@ -177,6 +181,10 @@ public:
   [[nodiscard]] bool device_present() const noexcept;
   [[nodiscard]] bool device_open() const noexcept;
   [[nodiscard]] PlaybackDiagnostics diagnostics() const;
+
+  // Read the latest meter levels and reset the accumulators. Safe to call
+  // from any thread; typically called from the controller's poll timer.
+  [[nodiscard]] PlaybackMeter::Reading read_meter() const noexcept;
 
   // Async control infrastructure can interrupt a blocking prefill/provider
   // pull without entering the control mutex. Direct synchronous users do not

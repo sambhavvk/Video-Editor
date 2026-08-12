@@ -85,6 +85,9 @@ public:
   [[nodiscard]] bool device_open() const noexcept;
   [[nodiscard]] std::size_t render_callback(std::span<float> interleaved_output) noexcept;
   [[nodiscard]] AsyncPlaybackDiagnostics diagnostics() const;
+  // Read the latest meter levels and reset the accumulators. Safe to call
+  // from the GUI thread.
+  [[nodiscard]] PlaybackMeter::Reading read_meter() const noexcept;
 
   // Test/worker synchronization helper. GUI code should observe versions via
   // diagnostics instead of waiting.

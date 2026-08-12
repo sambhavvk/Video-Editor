@@ -558,6 +558,13 @@ public:
       xrun_count.fetch_add(1U, std::memory_order_relaxed);
       underrun_frames.fetch_add(frame_count - read, std::memory_order_relaxed);
     }
+    // Feed the audible output to the meter. Only the samples actually read
+    // from the ring are metered; zero-fill (underrun) is excluded so the
+    // meter reflects real signal, not silence gaps.
+    if (read > 0U) {
+      meter.process(output.data(), read / kPlaybackAudioFormat.channels,
+                    kPlaybackAudioFormat.channels);
+    }
     consumer_active.clear(std::memory_order_release);
     active_callbacks.fetch_sub(1U, std::memory_order_release);
     return read;
@@ -585,6 +592,7 @@ public:
         .device_open = device != nullptr && device->is_open(),
         .device_running = device != nullptr && device->is_running(),
         .last_error = {},
+        .meter_reading = meter.read(),
     };
     result.last_error = last_error_copy();
     return result;
@@ -616,6 +624,7 @@ public:
   std::atomic<bool> external_cancellation_requested{false};
   std::atomic<std::shared_ptr<std::stop_source>> worker_cancellation{nullptr};
   std::string last_error;
+  mutable PlaybackMeter meter;
 };
 
 RealtimeAudioPlayback::RealtimeAudioPlayback(std::shared_ptr<PlaybackAudioProvider> provider,
@@ -689,6 +698,10 @@ bool RealtimeAudioPlayback::device_open() const noexcept {
 
 PlaybackDiagnostics RealtimeAudioPlayback::diagnostics() const {
   return impl_->diagnostics();
+}
+
+PlaybackMeter::Reading RealtimeAudioPlayback::read_meter() const noexcept {
+  return impl_->meter.read();
 }
 
 void RealtimeAudioPlayback::request_control_cancellation() noexcept {

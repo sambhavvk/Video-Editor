@@ -435,6 +435,10 @@ AsyncPlaybackDiagnostics AsyncRealtimeAudioPlayback::diagnostics() const {
   return impl_->diagnostics();
 }
 
+PlaybackMeter::Reading AsyncRealtimeAudioPlayback::read_meter() const noexcept {
+  return impl_->playback.read_meter();
+}
+
 bool AsyncRealtimeAudioPlayback::wait_until_completed(
     const std::uint64_t version, const std::chrono::milliseconds timeout) const {
   std::unique_lock lock(impl_->result_mutex);
