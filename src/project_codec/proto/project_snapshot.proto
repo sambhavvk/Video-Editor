@@ -1,0 +1,255 @@
+// SPDX-License-Identifier: MPL-2.0
+syntax = "proto3";
+
+package video_editor.persistence.v1;
+
+message EntityId {
+  bytes value = 1;
+}
+
+message Time {
+  sint64 value = 1;
+  uint32 timescale = 2;
+}
+
+message TimeRange {
+  Time start = 1;
+  Time duration = 2;
+}
+
+message Rate {
+  uint32 numerator = 1;
+  uint32 denominator = 2;
+}
+
+message Vec2 {
+  double x = 1;
+  double y = 2;
+}
+
+message ColorRgba {
+  double red = 1;
+  double green = 2;
+  double blue = 3;
+  double alpha = 4;
+}
+
+enum TitleAlignment {
+  TITLE_ALIGNMENT_UNSPECIFIED = 0;
+  TITLE_ALIGNMENT_LEFT = 1;
+  TITLE_ALIGNMENT_CENTER = 2;
+  TITLE_ALIGNMENT_RIGHT = 3;
+}
+
+message Title {
+  string text = 1;
+  string font_family = 2;
+  double font_size = 3;
+  ColorRgba text_color = 4;
+  ColorRgba background_color = 5;
+  TitleAlignment alignment = 6;
+  bool bold = 7;
+  bool italic = 8;
+}
+
+message StringEntry {
+  string key = 1;
+  string value = 2;
+}
+
+enum KeyframeInterpolation {
+  KEYFRAME_INTERPOLATION_UNSPECIFIED = 0;
+  KEYFRAME_INTERPOLATION_HOLD = 1;
+  KEYFRAME_INTERPOLATION_LINEAR = 2;
+  KEYFRAME_INTERPOLATION_BEZIER = 3;
+}
+
+message EffectValue {
+  oneof value {
+    sint64 integer_value = 1;
+    double double_value = 2;
+    bool boolean_value = 3;
+    string string_value = 4;
+    Time time_value = 5;
+    Vec2 vec2_value = 6;
+    ColorRgba color_value = 7;
+  }
+}
+
+message Keyframe {
+  EntityId id = 1;
+  Time time = 2;
+  EffectValue value = 3;
+  KeyframeInterpolation interpolation = 4;
+  Vec2 incoming_control = 5;
+  Vec2 outgoing_control = 6;
+}
+
+message EffectParameter {
+  string id = 1;
+  EffectValue value = 2;
+  repeated Keyframe keyframes = 3;
+}
+
+message Effect {
+  EntityId id = 1;
+  string type = 2;
+  uint32 version = 3;
+  bool enabled = 4;
+  bool known = 5;
+  repeated EffectParameter parameters = 6;
+  bytes opaque_payload = 7;
+}
+
+message Transform {
+  Vec2 position = 1;
+  Vec2 scale = 2;
+  double rotation_degrees = 3;
+  double anchor_x = 4;
+  double anchor_y = 5;
+  double crop_left = 6;
+  double crop_top = 7;
+  double crop_right = 8;
+  double crop_bottom = 9;
+  double opacity = 10;
+}
+
+message Asset {
+  EntityId id = 1;
+  string name = 2;
+  string source_uri = 3;
+  string fingerprint = 4;
+  Time duration = 5;
+  bool has_video = 6;
+  bool has_audio = 7;
+  uint32 width = 8;
+  uint32 height = 9;
+  optional Rate nominal_frame_rate = 10;
+  uint32 audio_sample_rate = 11;
+  uint32 audio_channels = 12;
+  repeated StringEntry metadata = 13;
+}
+
+enum TrackKind {
+  TRACK_KIND_UNSPECIFIED = 0;
+  TRACK_KIND_VIDEO = 1;
+  TRACK_KIND_AUDIO = 2;
+  TRACK_KIND_CAPTION = 3;
+}
+
+enum ClipKind {
+  CLIP_KIND_UNSPECIFIED = 0;
+  CLIP_KIND_VIDEO = 1;
+  CLIP_KIND_AUDIO = 2;
+  CLIP_KIND_TITLE = 3;
+}
+
+enum BlendMode {
+  BLEND_MODE_UNSPECIFIED = 0;
+  BLEND_MODE_NORMAL = 1;
+  BLEND_MODE_ADD = 2;
+  BLEND_MODE_MULTIPLY = 3;
+  BLEND_MODE_SCREEN = 4;
+  BLEND_MODE_OVERLAY = 5;
+}
+
+enum TransitionKind {
+  TRANSITION_KIND_UNSPECIFIED = 0;
+  TRANSITION_KIND_CROSS_DISSOLVE = 1;
+  TRANSITION_KIND_DIP_TO_BLACK = 2;
+}
+
+message Transition {
+  EntityId id = 1;
+  EntityId outgoing_clip_id = 2;
+  EntityId incoming_clip_id = 3;
+  TimeRange timeline_range = 4;
+  TransitionKind kind = 5;
+  bool enabled = 6;
+}
+
+message Clip {
+  EntityId id = 1;
+  EntityId asset_id = 2;
+  ClipKind kind = 3;
+  string name = 4;
+  TimeRange timeline_range = 5;
+  TimeRange source_range = 6;
+  Rate playback_rate = 7;
+  bool reversed = 8;
+  optional EntityId linked_group = 9;
+  Transform transform = 10;
+  BlendMode blend_mode = 11;
+  double audio_gain_db = 12;
+  double audio_pan = 13;
+  Time fade_in = 14;
+  Time fade_out = 15;
+  repeated Effect effects = 16;
+  optional Title title = 17;
+}
+
+message Track {
+  EntityId id = 1;
+  TrackKind kind = 2;
+  string name = 3;
+  bool locked = 4;
+  bool muted = 5;
+  bool solo = 6;
+  repeated Clip clips = 7;
+  repeated Effect effects = 8;
+  // Optional so schema-v2 payloads written before these fields retain the
+  // model defaults when decoded.
+  optional bool visible = 9;
+  optional bool targeted = 10;
+}
+
+message Marker {
+  EntityId id = 1;
+  TimeRange range = 2;
+  string label = 3;
+  ColorRgba color = 4;
+}
+
+message CaptionStyle {
+  string font_family = 1;
+  double font_size = 2;
+  ColorRgba text_color = 3;
+  ColorRgba background_color = 4;
+  bool bold = 5;
+  bool italic = 6;
+}
+
+message Caption {
+  EntityId id = 1;
+  TimeRange range = 2;
+  string text = 3;
+  string language = 4;
+  CaptionStyle style = 5;
+}
+
+message Sequence {
+  EntityId id = 1;
+  string name = 2;
+  Rate frame_rate = 3;
+  uint32 width = 4;
+  uint32 height = 5;
+  uint32 audio_sample_rate = 6;
+  repeated Track tracks = 7;
+  repeated Marker markers = 8;
+  repeated Caption captions = 9;
+  repeated Transition transitions = 10;
+}
+
+message Project {
+  EntityId id = 1;
+  string name = 2;
+  repeated Asset assets = 3;
+  repeated Sequence sequences = 4;
+  repeated StringEntry metadata = 5;
+}
+
+message ProjectSnapshot {
+  uint32 schema_version = 1;
+  uint32 minimum_reader_version = 2;
+  Project project = 3;
+}

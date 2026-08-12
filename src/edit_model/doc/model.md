@@ -1,0 +1,113 @@
+<!-- SPDX-License-Identifier: MPL-2.0 -->
+
+# Canonical project model API reference
+
+Header: `video_editor/edit_model/model.h`
+
+Namespace: `video_editor::edit`
+
+## Overview
+
+This header defines the dependency-free, authoritative values stored in immutable project
+revisions. Values use ordinary C++ ownership and contain no Qt, FFmpeg, SQLite, Protobuf, or GPU
+types. Callers may prepare mutable values privately; values reached through a `TimelineSnapshot`
+are immutable and may be read concurrently for the snapshot lifetime.
+
+## Enumerations
+
+| Enum | Values | Meaning |
+| --- | --- | --- |
+| `TitleHorizontalAlignment` | `Left`, `Center`, `Right` | Horizontal title layout inside the sequence canvas. |
+| `KeyframeInterpolation` | `Hold`, `Linear`, `Bezier` | Parameter interpolation after a keyframe. |
+| `TrackKind` | `Video`, `Audio`, `Caption` | Determines the content accepted by a track. Caption entities remain sequence-owned. |
+| `ClipKind` | `Video`, `Audio`, `Title` | Determines media/title validation and render behavior. |
+| `BlendMode` | `Normal`, `Add`, `Multiply`, `Screen`, `Overlay` | Supported visual compositing operation. |
+| `TransitionKind` | `CrossDissolve`, `DipToBlack` | Supported CPU-reference transition. |
+
+## Primitive and effect values
+
+| Type | Significant fields | Description |
+| --- | --- | --- |
+| `Revision` | `value` | Monotonic project-head identity. |
+| `Vec2` | `x`, `y` | Two-component numeric value used by transforms and curve controls. |
+| `ColorRgba` | `red`, `green`, `blue`, `alpha` | Straight normalized color channels. |
+| `Title` | `text`, `font_family`, `font_size`, foreground/background colors, alignment, `bold`, `italic` | Complete persistent title payload. |
+| `EffectValue` | Variant of integer, double, bool, string, `Time`, `Vec2`, `ColorRgba` | Typed effect value storage. |
+| `Keyframe` | `id`, `time`, `value`, interpolation, incoming/outgoing controls | One exact-time parameter sample. |
+| `EffectParameter` | `id`, `value`, `keyframes` | Current parameter value and its curve. |
+| `Effect` | `id`, `type`, `version`, `enabled`, `known`, parameter map, `opaque_payload` | Typed/versioned processing node. Unknown future effects remain opaque and disabled. |
+| `Transform` | position, scale, rotation, anchor, crop edges, opacity | Visual placement and crop state in sequence space. |
+
+## Media and timeline entities
+
+| Type | Significant fields | Description |
+| --- | --- | --- |
+| `Asset` | identity/name/URI/fingerprint, duration, stream flags and descriptors, metadata | Reference to original media and its probed descriptors. Media bytes are not embedded. |
+| `Clip` | identity, asset/kind/name, timeline/source ranges, rate/reverse/link, transform/blend/audio/effects/title | One non-destructive timeline use of media or generated title content. |
+| `Gap` | `timeline_range` | Derived half-open empty range. It has no persistent identity. |
+| `Track` | identity/kind/name, lock/mute/solo, `visible`, `targeted`, clips/effects | Ordered timeline lane. Visibility controls visual composition; targeting is an editorial routing hint. Both default true. |
+| `Marker` | identity, exact range, label, color | Sequence annotation. A zero-duration range is a point marker. |
+| `CaptionStyle` | font, size, text/background colors, bold/italic | Persistent caption styling. |
+| `Caption` | identity, exact range, text, language, style | Sequence-owned caption cue. |
+| `Transition` | identity, outgoing/incoming clip IDs, exact range, kind, enabled | Sequence-owned relation over one adjacent video-track cut. |
+| `Sequence` | identity/name, frame rate/raster/audio format, ordered tracks, markers, captions, transitions | Complete editorial timeline. |
+| `Project` | identity/name, assets, sequences, metadata | Root authoritative state serialized into project snapshots. |
+
+## Validation relationships
+
+A video track accepts video and title clips; an audio track accepts audio clips. Title clips use a
+nil asset ID and require a `Title`; media clips require an existing compatible asset and must not
+carry title state. Clip ranges are positive, non-overlapping within a track, and source-bounded.
+Locked tracks reject structural edits. Track order, name, visibility, targeting, mute, and solo are
+project state and therefore round-trip through checkpoints.
+
+An enabled transition refers to adjacent clips on the same video track. Its range begins inside the
+outgoing clip, ends inside the incoming clip, strictly straddles their shared cut, and requires
+available source handles. Enabled transition ranges on one track cannot overlap.
+
+## Lookup and duration functions
+
+### `const Asset* findAsset(const Project& project, EntityId id) noexcept`
+
+Returns a borrowed pointer to the matching asset or null.
+
+### `const Sequence* findSequence(const Project& project, EntityId id) noexcept`
+
+Returns a borrowed pointer to the matching sequence or null.
+
+### `const Track* findTrack(const Sequence& sequence, EntityId id) noexcept`
+
+Returns a borrowed pointer to the matching track or null.
+
+### `const Clip* findClip(const Sequence& sequence, EntityId id) noexcept`
+
+Searches all sequence tracks and returns a borrowed pointer to the matching clip or null.
+
+### `const Transition* findTransition(const Sequence& sequence, EntityId id) noexcept`
+
+Returns a borrowed pointer to the matching sequence-owned transition or null.
+
+### `Time sequenceDuration(const Sequence& sequence)`
+
+Returns the latest end among clips, captions, markers, and transitions using exact time arithmetic.
+The function may report arithmetic failure through the model's normal exception policy.
+
+Borrowed pointers above must not outlive or be used after mutation of the owning value. Pointers
+from an immutable snapshot remain valid for that snapshot's lifetime.
+
+## Usage example
+
+```cpp
+edit::Track voice;
+voice.kind = edit::TrackKind::Audio;
+voice.name = "A1 Dialogue";
+voice.visible = true;
+voice.targeted = true;
+
+edit::Sequence sequence;
+sequence.name = "Main";
+sequence.frame_rate = edit::Rate{30'000, 1'001};
+sequence.tracks.push_back(std::move(voice));
+```
+
+AI assistance has been used to create this output.

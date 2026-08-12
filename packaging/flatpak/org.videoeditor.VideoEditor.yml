@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: MPL-2.0
+
+app-id: org.videoeditor.VideoEditor
+runtime: org.kde.Platform
+runtime-version: '6.11'
+sdk: org.kde.Sdk
+command: VideoEditor
+
+finish-args:
+  # Qt's X11 backend requires shared IPC; Wayland remains the preferred path.
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio
+  - --device=dri
+  # File chooser portals cover normal imports. These grants cover creator media
+  # directories and removable drives without exposing the entire host filesystem.
+  - --filesystem=xdg-videos:rw
+  - --filesystem=xdg-documents:rw
+  - --filesystem=xdg-download:rw
+  - --filesystem=/run/media:rw
+  - --filesystem=/media:rw
+
+cleanup:
+  - /include
+  - /lib/cmake
+  - /lib/pkgconfig
+  - /share/aclocal
+  - /share/doc
+  - /share/man
+
+modules:
+  - name: video-editor
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DVIDEO_EDITOR_BUILD_TESTS=OFF
+      - -DVIDEO_EDITOR_BUILD_DESKTOP_UI=ON
+      - -DVIDEO_EDITOR_BUILD_MEDIA=ON
+      - -DVIDEO_EDITOR_BUILD_WORKERS=ON
+    post-install:
+      - install -Dm644 packaging/flatpak/org.videoeditor.VideoEditor.desktop /app/share/applications/org.videoeditor.VideoEditor.desktop
+      - install -Dm644 packaging/flatpak/org.videoeditor.VideoEditor.metainfo.xml /app/share/metainfo/org.videoeditor.VideoEditor.metainfo.xml
+      - install -Dm644 packaging/flatpak/org.videoeditor.VideoEditor.svg /app/share/icons/hicolor/scalable/apps/org.videoeditor.VideoEditor.svg
+    sources:
+      # DEVELOPMENT ONLY. This is a valid local source, not a release source.
+      # The release gate requires replacing it with a reviewed archive URL and
+      # SHA-256 recorded in release-sources.json.
+      - type: dir
+        path: ../..
+

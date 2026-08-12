@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: CC0-1.0 -->
+<component type="desktop-application">
+  <id>org.videoeditor.VideoEditor</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MPL-2.0</project_license>
+  <name>Video Editor</name>
+  <summary>An offline-first editor for growing video creators</summary>
+  <description>
+    <p>
+      Video Editor combines an approachable creator workflow with an exact,
+      non-destructive timeline. Projects and media stay local by default.
+    </p>
+    <p>
+      The current package metadata describes a pre-beta development build.
+      Codec availability depends on the reviewed distribution dependency set.
+    </p>
+  </description>
+  <launchable type="desktop-id">org.videoeditor.VideoEditor.desktop</launchable>
+  <developer id="org.videoeditor">
+    <name>Video Editor contributors</name>
+  </developer>
+  <provides>
+    <binary>VideoEditor</binary>
+  </provides>
+  <categories>
+    <category>AudioVideo</category>
+    <category>AudioVideoEditing</category>
+  </categories>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="0.1.0" date="2026-08-06" type="development">
+      <description>
+        <p>Architecture-foundation preview; not a public beta release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

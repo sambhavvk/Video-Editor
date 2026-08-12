@@ -1,0 +1,154 @@
+<!-- SPDX-License-Identifier: MPL-2.0 -->
+
+# Architecture overview
+
+The editor separates authoritative editorial state from media decoding, rendering, presentation,
+and rebuildable artifacts. Typed edit commands produce immutable revisions; preview, persistence,
+and export consume those revisions without allowing FFmpeg, Qt, SQLite, or GPU types into the edit
+model.
+
+```mermaid
+flowchart LR
+    UI["Qt desktop UI"] --> Controller["Application controller"]
+    Controller -->|"typed command + expected revision"| Edit["Edit model"]
+    Edit -->|"immutable project snapshot"| Codec["Project codec"]
+    Codec --> Store["SQLite project store"]
+    Edit -->|"timeline snapshot"| Render["CPU render engine"]
+    Registry["Original/proxy asset registry"] --> Playback["FFmpeg playback provider"]
+    Playback --> Render
+    Playback --> GpuTimeline["Optional per-clip GPU timeline renderer"]
+    GpuTimeline --> GPU["libplacebo D3D11 / Vulkan"]
+    Render --> GPU
+    GPU --> Viewer["Qt Program viewer"]
+    Render -->|"fallback"| Viewer
+    Render --> Export["Reference exporter"]
+    AudioRegistry["Original-audio registry"] --> AudioRender["48 kHz timeline audio renderer"]
+    Edit -->|"timeline snapshot"| AudioRender
+    AudioRender --> Export
+    AudioRender -->|"immutable snapshot ranges"| Realtime["Pre-render ring + sample clock"]
+    Realtime --> Device["Optional miniaudio output"]
+    Realtime -->|"master playhead"| Controller
+    Import["Asset service"] --> Registry
+    Import --> Proxy["Proxy service"]
+    Import --> MediaCache["Media cache: thumbnails, waveforms, metadata"]
+    MediaCache --> CacheStore["Content-addressed LRU store"]
+    Jobs["Protobuf job protocol"] --> Worker["Worker host: probe and proxy"]
+```
+
+The diagram describes the engine contracts and current desktop wiring. The engine decodes active
+video clips and the desktop requests supported transforms directly on a libplacebo GPU before its
+CPU renderer. The offscreen result is downloaded for the Qt viewer. Unsupported timeline content
+falls back to CPU for that frame; backend/device failures preserve a CPU result and latch CPU-only
+preview for the session. The desktop does not yet supply a native presentation surface, zero-copy
+decode import, or broad effects/color graph. Forward 1× desktop transport connects the timeline audio
+renderer to the realtime pre-render ring and optional miniaudio output; its latency-compensated
+sample position, not the end of the submitted device buffer, drives video requests. Other shuttle
+rates and unavailable/failed devices use an explicit silent timer fallback. The worker can execute
+probe and proxy requests, but desktop process
+launch/IPC routing and export/transcription workers are not connected.
+
+## Module boundaries
+
+| Module | Owns | Must not be mistaken for |
+| --- | --- | --- |
+| `edit_model` | Exact `Time`, project entities including canonical titles/transitions and track state, validation, typed commands, atomic command batches, revisions, immutable snapshots, undo/redo, derived gaps, snapping | A renderer, database, or UI toolkit |
+| `project_codec` | Deterministic schema-v2 Protobuf serialization plus a backward schema-v1 reader | The `.veproj` container or command history |
+| `project_store` | SQLite schema-v2 journal payload versions, forward migration/backups, WAL working database, checkpoint save, integrity checks, recovery catalog | Media storage or timeline semantics |
+| `media_codec` | Narrow FFmpeg runtime/version checks and media probing | Timeline ownership |
+| `asset_service` | File fingerprints, import/relink validation, proxy recommendation policy | A persistent media-bin database |
+| `proxy_service` | Cancellable proxy transcode, profile fallback, versioned PTS sidecar, atomic output | Authoritative media or a cache eviction service |
+| `media_cache` | Content-addressed rebuildable-artifact store (100 GB LRU budget, atomic put, inventory) and the thumbnail, waveform, and metadata services that fill it | Authoritative media, the edit model, or a cache eviction policy for proxies |
+| `playback` | Original/proxy registry, persistent FFmpeg decode sessions, keyframe seek, epoch cancellation, CPU color conversion | Audio-device playback or full color management |
+| `render_engine` | Pull-based deterministic CPU frame graph including title/transition reference rendering and cache; capability-gated libplacebo D3D11/Vulkan backend, per-clip GPU transform/Normal-composite path, typed per-frame CPU fallback, offscreen upload/readback, and device-loss reporting | Native desktop swapchain presentation, native GPU title/transition shaders, rotation around a moved pivot, effects/color parity, hardware decoder, or zero-copy bridge |
+| `export_service` | Revision-bound, originals-only video plus deterministic 48 kHz stereo PCM mux, exact counts, and atomic commit | H.264/AAC, caption embedding, effects mastering, or render queue |
+| `audio_engine` | Planar float blocks, SPSC ring, DSP/loudness primitives, fixed-format realtime pre-render/callback/sample-clock controller, and optional miniaudio adapter | Timeline decode, revision ownership, or a connected effect/mastering graph |
+| `audio_render` | Originals-only FFmpeg decode/resample and deterministic immutable-snapshot mixing to exact 48 kHz stereo blocks | An audio-device callback, effect/master graph, or muxer |
+| `caption_service` | SRT/WebVTT parse, validate, reflow, search, serialize, and edit-model conversion | Speech recognition or caption rendering |
+| `job_service` | Versioned Protobuf messages, framing, job IDs, and cancellation registry | Process spawning or a durable job scheduler |
+| `workers` | Framed worker executable with fail-closed probe and synchronous proxy jobs plus versioned events | Desktop process orchestration or a complete cancellable export/transcription farm |
+| `desktop_ui` | Qt Widgets shell, docks, workspaces, virtualized multi-selection timeline surface, professional tool/header interaction, panels, accessibility labels | Editorial truth or an independent snap algorithm |
+| `app` | Cross-module orchestration, transient selection, exact UI/model time conversion, current project lifecycle, async import/preview/proxy/export, view models | A reusable core contract |
+
+## Dependency direction
+
+The key rule is inward dependency toward the edit model:
+
+- `edit_model` has no Qt, FFmpeg, SQLite, Protobuf, or GPU dependency.
+- `caption_service`, `project_codec`, and `render_engine` depend on edit-model contracts.
+- `playback` implements the renderer's narrow frame-provider interface and hides FFmpeg types.
+- `audio_render` depends on edit/audio contracts and an originals-only provider; it performs I/O on
+  decode/export threads and must never run in an audio-device callback.
+- `audio_engine` owns the realtime callback boundary. Its provider may decode and allocate only on
+  the pre-render worker; the callback consumes a bounded SPSC ring, zero-fills underruns, and updates
+  atomics. The application provider owns an immutable timeline snapshot and translates exact sample
+  ranges into `audio_render` requests.
+- `render_engine` owns both the CPU oracle and GPU capability boundary. Its per-clip GPU path fails
+  closed on unsupported timeline features; the controller selects it before CPU, while a device or
+  render error never changes the edit revision and retains the CPU result as fallback.
+- `project_store` stores opaque command/snapshot payloads and does not interpret edit semantics.
+- `desktop_ui` emits presentation-oriented signals; `app` converts them into typed edit commands.
+  The controller also supplies a synchronous presentation-level resolver backed by the edit-model
+  snapping query, so the widget never duplicates marker/frame/edge tie semantics.
+- `app` is the composition root and may depend on the desktop and engine modules.
+
+Public-contract changes require an ADR and the repository's two-owner review. The source dependency
+contract is recorded in `cmake/DependencyVersions.cmake`.
+
+## Revision and preview flow
+
+1. A UI gesture ends and the controller constructs one `EditCommand` or an atomic command batch
+   with the editor's current expected revision. Selection changes themselves remain transient.
+2. The edit model copies the project, applies and validates every requested operation, then
+   publishes one next immutable revision and history entry. A stale revision or failed batch member
+   returns an error without publishing partial state.
+3. The controller serializes the resulting project snapshot and appends it to the SQLite journal.
+   If persistence fails, it rolls back the model edit.
+4. Views are rebuilt from the current immutable project. Preview requests use a monotonically newer
+   epoch; stale decode work returns a cancellation-style error rather than updating the viewer.
+5. Export captures one `TimelineSnapshot`, creates independent originals-only video and audio
+   providers, disables proxies, renders exact frame/sample ranges, and remains isolated from later
+   UI revisions.
+
+## Authoritative and rebuildable state
+
+Authoritative state consists of the project entities, journal revisions, project metadata, media
+references/fingerprints, title payloads, transitions, track name/order/lock/visibility/targeting,
+effect parameters, captions, and schema versions. Clip/marker/gap selection and derived gap keys are
+presentation state, not project entities. Original media remains
+authoritative for image/audio content but is referenced rather than embedded.
+
+Proxies, PTS sidecars, thumbnails, waveforms, decoded frames, render results, GPU textures, and
+transcription models are rebuildable and stay outside `.veproj`. Proxies, a per-asset thumbnail
+service, a waveform pyramid service, a metadata document service, and a shared content-addressed
+cache store with a 100 GB LRU budget are implemented in `media_cache`; the unified budget is not
+yet shared across proxies and these artifacts, and a cache browser UI remains future work.
+
+## Concurrency and cancellation
+
+Import, preview, proxy generation, and export run away from the Qt UI thread. Preview uses request
+epochs. Proxy and export use C++ stop tokens and only atomically commit finished files. The present
+desktop runs proxy and export work in-process through QtConcurrent. Process isolation is represented
+by `job_service`; the worker host supports probe and synchronous proxy jobs, but the desktop does
+not launch or route work to it and proxy cancellation cannot be consumed during the blocking job.
+
+The realtime audio path has a dedicated pre-render worker and a fixed 48 kHz stereo float32 device
+boundary. Its callback performs ring reads, deterministic zero-fill, and atomic diagnostics only.
+For forward 1× desktop playback, the latency-compensated playback position is the video master
+clock; the submitted-buffer position and latency uncertainty remain diagnostics. Pause/resume/seek
+operate on the same controller, while edits and project replacement destroy the old revision's
+playback. `AsyncRealtimeAudioPlayback` supplies a serialized background control thread with versioned
+requested/effective state; the desktop enqueues commands, waits for effective completion without
+blocking Qt signals, and only then adopts audio as master. During a pending start or seek it holds the
+video position rather than advancing from a conflicting timer. When miniaudio is absent or a
+device/provider fails, and for reverse or non-1× shuttle, the controller reports the limitation and
+uses silent timer-driven video.
+
+## Further reading
+
+- [Exact timeline semantics](../reference/timeline-semantics.md)
+- [Project format and recovery](../reference/project-format-and-recovery.md)
+- [Media, proxies, and cache](../reference/media-proxies-and-cache.md)
+- [Beta feature status](../beta-feature-status.md)
+- [Accepted ADRs](../index.md#architecture-decisions)
+- [Schema v2 title and transition contracts](0013-schema-v2-titles-transitions.md)
+- [Professional timeline interaction boundary](0014-professional-timeline-interaction.md)

@@ -1,0 +1,131 @@
+# SPDX-License-Identifier: MPL-2.0
+
+name: Linux core sanitizers (no Qt or FFmpeg)
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-sanitizers-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CMAKE_VERSION: 3.31.6
+  CMAKE_SHA256: 5a1133ff103c71eb5120e2cc3de922733e7d8a26a98ae716397e8676adb367bf
+  ABSEIL_VERSION: '20250512.1'
+  ABSEIL_SHA256: 9b7a064305e9fd94d124ffa6cc358592eb42b5da588fb4e07d09254aa40086db
+  PROTOBUF_VERSION: '35.1'
+  PROTOBUF_SHA256: f0b6838e7522a8da96126d487068c959bc624926368f3024ac8fd03abd0a1ac4
+  ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:strict_string_checks=1
+  UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+
+jobs:
+  asan-ubsan:
+    name: Ubuntu 24.04 / Clang / ASan+UBSan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install sanitizer build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            ca-certificates \
+            clang \
+            curl \
+            libgtest-dev \
+            libsqlite3-dev \
+            llvm \
+            ninja-build \
+            zlib1g-dev
+
+      - name: Install the pinned CMake frontend
+        shell: bash
+        run: |
+          archive="${RUNNER_TEMP}/cmake.tar.gz"
+          curl --location --fail --silent --show-error \
+            "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz" \
+            --output "${archive}"
+          echo "${CMAKE_SHA256}  ${archive}" | sha256sum --check --strict
+          mkdir --parents "${RUNNER_TEMP}/cmake"
+          tar --extract --gzip --file "${archive}" --directory "${RUNNER_TEMP}/cmake" \
+            --strip-components=1
+          echo "${RUNNER_TEMP}/cmake/bin" >> "${GITHUB_PATH}"
+
+      - name: Build the pinned Abseil CMake package
+        shell: bash
+        run: |
+          archive="${RUNNER_TEMP}/abseil.tar.gz"
+          source_root="${RUNNER_TEMP}/abseil-source"
+          prefix="${RUNNER_TEMP}/dependency-install"
+          curl --location --fail --silent --show-error \
+            "https://github.com/abseil/abseil-cpp/releases/download/${ABSEIL_VERSION}/abseil-cpp-${ABSEIL_VERSION}.tar.gz" \
+            --output "${archive}"
+          echo "${ABSEIL_SHA256}  ${archive}" | sha256sum --check --strict
+          mkdir --parents "${source_root}"
+          tar --extract --gzip --file "${archive}" --directory "${source_root}"
+          cmake \
+            -S "${source_root}/abseil-cpp-${ABSEIL_VERSION}" \
+            -B "${RUNNER_TEMP}/abseil-build" \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="${prefix}" \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DABSL_BUILD_TESTING=OFF \
+            -DABSL_ENABLE_INSTALL=ON
+          cmake --build "${RUNNER_TEMP}/abseil-build" --target install --parallel 2
+
+      - name: Build the pinned Protobuf CMake package
+        shell: bash
+        run: |
+          archive="${RUNNER_TEMP}/protobuf.tar.gz"
+          source_root="${RUNNER_TEMP}/protobuf-source"
+          prefix="${RUNNER_TEMP}/dependency-install"
+          curl --location --fail --silent --show-error \
+            "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOBUF_VERSION}/protobuf-${PROTOBUF_VERSION}.tar.gz" \
+            --output "${archive}"
+          echo "${PROTOBUF_SHA256}  ${archive}" | sha256sum --check --strict
+          mkdir --parents "${source_root}"
+          tar --extract --gzip --file "${archive}" --directory "${source_root}"
+          cmake \
+            -S "${source_root}/protobuf-${PROTOBUF_VERSION}" \
+            -B "${RUNNER_TEMP}/protobuf-build" \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="${prefix}" \
+            -DCMAKE_PREFIX_PATH="${prefix}" \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -Dprotobuf_BUILD_SHARED_LIBS=OFF \
+            -Dprotobuf_BUILD_TESTS=OFF \
+            -Dprotobuf_LOCAL_DEPENDENCIES_ONLY=ON \
+            -Dprotobuf_WITH_ZLIB=ON
+          cmake --build "${RUNNER_TEMP}/protobuf-build" --target install --parallel 2
+          echo "CMAKE_PREFIX_PATH=${prefix}" >> "${GITHUB_ENV}"
+          echo "${prefix}/bin" >> "${GITHUB_PATH}"
+
+      - name: Configure the dependency-light core with sanitizers
+        env:
+          CC: clang
+          CXX: clang++
+        run: >-
+          cmake -S . -B build/ci-sanitizers -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DVIDEO_EDITOR_BUILD_TESTS=ON
+          -DVIDEO_EDITOR_BUILD_DESKTOP_UI=OFF
+          -DVIDEO_EDITOR_BUILD_MEDIA=OFF
+          -DVIDEO_EDITOR_BUILD_WORKERS=OFF
+          -DVIDEO_EDITOR_ENABLE_SANITIZERS=ON
+
+      - name: Build
+        run: cmake --build build/ci-sanitizers --parallel 2
+
+      - name: Test under ASan and UBSan
+        run: ctest --test-dir build/ci-sanitizers --output-on-failure --no-tests=error
