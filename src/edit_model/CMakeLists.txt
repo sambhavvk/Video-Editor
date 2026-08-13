@@ -20,6 +20,7 @@ if(MSVC AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 add_library(video_editor_edit_model STATIC
+  src/effect_evaluator.cpp
   src/entity_id.cpp
   src/model.cpp
   src/snapping.cpp

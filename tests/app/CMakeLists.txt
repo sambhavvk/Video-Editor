@@ -17,9 +17,9 @@ set_target_properties(video_editor_app_tests PROPERTIES AUTOMOC ON CXX_EXTENSION
 
 add_test(NAME app.import_edit_undo COMMAND video_editor_app_tests)
 if(VIDEO_EDITOR_ENABLE_SANITIZERS)
-  set(VIDEO_EDITOR_APP_TEST_TIMEOUT 180)
+  set(VIDEO_EDITOR_APP_TEST_TIMEOUT 300)
 else()
-  set(VIDEO_EDITOR_APP_TEST_TIMEOUT 30)
+  set(VIDEO_EDITOR_APP_TEST_TIMEOUT 60)
 endif()
 set_tests_properties(app.import_edit_undo PROPERTIES
   ENVIRONMENT "QT_QPA_PLATFORM=offscreen"

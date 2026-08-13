@@ -701,6 +701,20 @@ void EditorWindow::connectControllerSurface() {
   connect(inspector_, &InspectorWidget::parameterEdited, this, &EditorWindow::parameterEdited);
   connect(inspector_, &InspectorWidget::keyframeToggleRequested, this,
           &EditorWindow::keyframeToggleRequested);
+  connect(inspector_, &InspectorWidget::effectParameterEdited, this,
+          &EditorWindow::effectParameterEdited);
+  connect(inspector_, &InspectorWidget::effectKeyframeToggleRequested, this,
+          &EditorWindow::effectKeyframeToggleRequested);
+  connect(inspector_, &InspectorWidget::effectKeyframeSelected, this,
+          &EditorWindow::effectKeyframeSelected);
+  connect(inspector_, &InspectorWidget::effectKeyframeValueEdited, this,
+          &EditorWindow::effectKeyframeValueEdited);
+  connect(inspector_, &InspectorWidget::effectKeyframeInterpolationEdited, this,
+          &EditorWindow::effectKeyframeInterpolationEdited);
+  connect(inspector_, &InspectorWidget::effectKeyframeRemoved, this,
+          &EditorWindow::effectKeyframeRemoved);
+  connect(inspector_, &InspectorWidget::effectKeyframeControlPointsEdited, this,
+          &EditorWindow::effectKeyframeControlPointsEdited);
   connect(inspector_, &InspectorWidget::addTitleRequested, this, &EditorWindow::addTitleRequested);
   connect(timeline_, &TimelineWidget::transitionActivated, this,
           &EditorWindow::transitionActivated);

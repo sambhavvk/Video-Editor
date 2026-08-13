@@ -1,13 +1,18 @@
 // SPDX-License-Identifier: MPL-2.0
+#include "export_service_testing.hpp"
 #include "video_editor/audio_render/original_audio_registry.h"
 #include "video_editor/export_service/export_service.h"
+#include "video_editor/media_codec/encoder_capabilities.h"
+#include "video_editor/render_engine/frame.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/error.h>
+#include <libavutil/frame.h>
 #include <libavutil/intreadwrite.h>
 #include <libavutil/mathematics.h>
+#include <libavutil/mem.h>
 }
 
 #include <gtest/gtest.h>
@@ -278,6 +283,7 @@ struct DecodedAudio final {
   std::vector<std::int64_t> frame_start_samples;
   std::vector<int> frame_sample_counts;
   std::vector<std::array<std::int16_t, 2>> samples;
+  std::uint64_t trimmed_sample_count{0};
 };
 
 [[nodiscard]] DecodedVideo decode_video(const std::filesystem::path& path,
@@ -402,7 +408,9 @@ struct DecodedAudio final {
   DecodedAudio result{.codec_id = stream->codecpar->codec_id,
                       .frame_start_samples = {},
                       .frame_sample_counts = {},
-                      .samples = {}};
+                      .samples = {},
+                      .trimmed_sample_count = 0};
+  std::uint64_t decoded_sample_count = 0;
   const auto receive = [&] {
     while (true) {
       const int received = avcodec_receive_frame(codec.get(), frame.get());
@@ -412,20 +420,30 @@ struct DecodedAudio final {
       if (received < 0) {
         throw std::runtime_error("avcodec_receive_frame: " + ffmpeg_error(received));
       }
-      if (frame->format != AV_SAMPLE_FMT_S16 || frame->ch_layout.nb_channels != 2 ||
-          frame->best_effort_timestamp == AV_NOPTS_VALUE) {
-        throw std::runtime_error("decoded export audio has an unexpected format or timestamp");
+      if ((frame->format != AV_SAMPLE_FMT_S16 && frame->format != AV_SAMPLE_FMT_FLTP) ||
+          frame->ch_layout.nb_channels != 2) {
+        throw std::runtime_error("decoded export audio has an unexpected format");
       }
+      const std::int64_t sequential_start =
+          result.frame_start_samples.empty()
+              ? 0
+              : result.frame_start_samples.back() + result.frame_sample_counts.back();
       result.frame_start_samples.push_back(
-          av_rescale_q_rnd(frame->best_effort_timestamp, stream->time_base,
-                           AVRational{1, static_cast<int>(audio_render::kTimelineAudioSampleRate)},
-                           static_cast<AVRounding>(AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX)));
+          frame->best_effort_timestamp == AV_NOPTS_VALUE
+              ? sequential_start
+              : av_rescale_q_rnd(
+                    frame->best_effort_timestamp, stream->time_base,
+                    AVRational{1, static_cast<int>(audio_render::kTimelineAudioSampleRate)},
+                    static_cast<AVRounding>(AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX)));
       result.frame_sample_counts.push_back(frame->nb_samples);
+      decoded_sample_count += static_cast<std::uint64_t>(frame->nb_samples);
       for (int index = 0; index < frame->nb_samples; ++index) {
-        const auto offset = static_cast<std::size_t>(index) * 4U;
-        result.samples.push_back(
-            {static_cast<std::int16_t>(AV_RL16(frame->data[0] + offset)),
-             static_cast<std::int16_t>(AV_RL16(frame->data[0] + offset + 2U))});
+        if (frame->format == AV_SAMPLE_FMT_S16) {
+          const auto offset = static_cast<std::size_t>(index) * 4U;
+          result.samples.push_back(
+              {static_cast<std::int16_t>(AV_RL16(frame->data[0] + offset)),
+               static_cast<std::int16_t>(AV_RL16(frame->data[0] + offset + 2U))});
+        }
       }
       av_frame_unref(frame.get());
     }
@@ -449,6 +467,9 @@ struct DecodedAudio final {
     throw std::runtime_error("audio decoder flush failed: " + ffmpeg_error(status));
   }
   receive();
+  // FFmpeg's Opus decoder applies initial padding and discard-padding while
+  // producing frames, so this count already represents the audible samples.
+  result.trimmed_sample_count = decoded_sample_count;
   return result;
 }
 
@@ -608,6 +629,271 @@ TEST(ExportService, ProResMovPresetExportsWhenCompatibleEncoderIsAvailable) {
   const auto decoded_audio = decode_audio(destination);
   EXPECT_EQ(decoded_audio.codec_id, AV_CODEC_ID_PCM_S16LE);
   EXPECT_EQ(decoded_audio.samples.size(), 5'600U);
+}
+
+TEST(ExportService, Nv12ConversionWritesExactBlackBytesWithoutGuardOverwrite) {
+  constexpr int width = 4;
+  constexpr int height = 2;
+  constexpr std::size_t guard_size = 16;
+  constexpr std::uint8_t guard = 0xA5;
+  auto make_plane = [guard](const std::size_t payload_size) {
+    auto* raw = static_cast<std::uint8_t*>(av_malloc(guard_size + payload_size + guard_size));
+    std::fill(raw, raw + guard_size + payload_size + guard_size, guard);
+    return raw;
+  };
+  auto* luma = make_plane(width * height);
+  auto* chroma = make_plane(width * (height / 2));
+  AVFrame* frame = av_frame_alloc();
+  ASSERT_NE(frame, nullptr);
+  frame->format = AV_PIX_FMT_NV12;
+  frame->width = width;
+  frame->height = height;
+  frame->data[0] = luma + guard_size;
+  frame->data[1] = chroma + guard_size;
+  frame->linesize[0] = width;
+  frame->linesize[1] = width;
+  frame->buf[0] = av_buffer_create(
+      luma, guard_size + width * height + guard_size,
+      [](void*, std::uint8_t* data) { av_free(data); }, nullptr, 0);
+  frame->buf[1] = av_buffer_create(
+      chroma, guard_size + width * (height / 2) + guard_size,
+      [](void*, std::uint8_t* data) { av_free(data); }, nullptr, 0);
+  ASSERT_NE(frame->buf[0], nullptr);
+  ASSERT_NE(frame->buf[1], nullptr);
+  auto source = std::make_shared<render::CpuFrame>(width, height);
+  source->clear(0.0F, 0.0F, 0.0F);
+  render::VideoFrame input{.width = width,
+                           .height = height,
+                           .layout = render::PixelLayout::RgbaFloat32,
+                           .storage = std::shared_ptr<const render::CpuFrame>(source)};
+  std::string message;
+  ASSERT_TRUE(testing::convert_frame_for_testing(input, *frame, message)) << message;
+  for (int index = 0; index < width * height; ++index) {
+    EXPECT_EQ(frame->data[0][index], 16U);
+  }
+  for (int index = 0; index < width * (height / 2); index += 2) {
+    EXPECT_EQ(frame->data[1][index], 128U);
+    EXPECT_EQ(frame->data[1][index + 1], 128U);
+  }
+  for (std::size_t index = 0; index < guard_size; ++index) {
+    EXPECT_EQ(luma[index], guard);
+    EXPECT_EQ(luma[guard_size + width * height + index], guard);
+    EXPECT_EQ(chroma[index], guard);
+    EXPECT_EQ(chroma[guard_size + width * (height / 2) + index], guard);
+  }
+  av_frame_free(&frame);
+}
+
+TEST(ExportService, InjectedHardwareFailureRetriesOnceWithSoftwareAndResetsProgress) {
+  TestDirectory directory;
+  const auto original = directory.path() / "retry-original.wav";
+  write_constant_pcm_wav(original, 5'600U);
+  auto timeline = make_timeline(original);
+  const auto destination = directory.path() / "retry.webm";
+  bool restarted = false;
+  testing::set_hardware_failure_injection(testing::HardwareFailureInjection::HardwareEncode);
+  const auto outcome = export_video({.snapshot = timeline.snapshot,
+                                     .renderer = timeline.renderer,
+                                     .audio_renderer = timeline.audio_renderer,
+                                     .destination = destination,
+                                     .preset = VideoPreset::Vp9OpusWebm,
+                                     .include_audio = true,
+                                     .prefer_hardware_encoder = true,
+                                     .progress =
+                                         [&restarted](const ExportProgress& progress) {
+                                           restarted |= progress.restarted_after_hardware_fallback;
+                                         },
+                                     .platform_preset = PlatformPreset::YouTube1080p});
+  testing::set_hardware_failure_injection(testing::HardwareFailureInjection::None);
+  ASSERT_TRUE(outcome) << outcome.error().message;
+  EXPECT_TRUE(restarted);
+  EXPECT_EQ(outcome.value().video_encoder, "libvpx-vp9");
+  EXPECT_TRUE(std::filesystem::exists(destination));
+}
+
+TEST(ExportService, InjectedHardwareRenderFailureDoesNotRetry) {
+  TestDirectory directory;
+  const auto original = directory.path() / "render-original.wav";
+  write_constant_pcm_wav(original, 5'600U);
+  auto timeline = make_timeline(original);
+  testing::set_hardware_failure_injection(testing::HardwareFailureInjection::HardwareRender);
+  const auto outcome = export_video({.snapshot = timeline.snapshot,
+                                     .renderer = timeline.renderer,
+                                     .audio_renderer = timeline.audio_renderer,
+                                     .destination = directory.path() / "render.webm",
+                                     .preset = VideoPreset::Vp9OpusWebm,
+                                     .include_audio = true,
+                                     .prefer_hardware_encoder = true,
+                                     .platform_preset = PlatformPreset::YouTube1080p});
+  testing::set_hardware_failure_injection(testing::HardwareFailureInjection::None);
+  ASSERT_FALSE(outcome);
+  EXPECT_EQ(outcome.error().code, ExportErrorCode::RenderFailed);
+}
+
+TEST(ExportService, FailedHardwareAndSoftwareAttemptsPreserveExistingDestination) {
+  TestDirectory directory;
+  const auto original = directory.path() / "preserve-original.wav";
+  write_constant_pcm_wav(original, 5'600U);
+  auto timeline = make_timeline(original);
+  const auto destination = directory.path() / "preserve.webm";
+  const std::string sentinel = "existing destination must remain intact";
+  {
+    std::ofstream output(destination, std::ios::binary);
+    ASSERT_TRUE(output);
+    output << sentinel;
+  }
+
+  testing::set_hardware_failure_injection(
+      testing::HardwareFailureInjection::HardwareThenSoftwareEncode);
+  const auto outcome = export_video({.snapshot = timeline.snapshot,
+                                     .renderer = timeline.renderer,
+                                     .audio_renderer = timeline.audio_renderer,
+                                     .destination = destination,
+                                     .preset = VideoPreset::Vp9OpusWebm,
+                                     .overwrite_existing = true,
+                                     .include_audio = true,
+                                     .prefer_hardware_encoder = true,
+                                     .platform_preset = PlatformPreset::YouTube1080p});
+  testing::set_hardware_failure_injection(testing::HardwareFailureInjection::None);
+
+  ASSERT_FALSE(outcome);
+  EXPECT_EQ(outcome.error().code, ExportErrorCode::EncodingFailed);
+  std::ifstream input(destination, std::ios::binary);
+  ASSERT_TRUE(input);
+  EXPECT_EQ(std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()),
+            sentinel);
+}
+
+TEST(ExportService, CancellationDoesNotRetryHardwareFailure) {
+  TestDirectory directory;
+  const auto original = directory.path() / "cancel-original.wav";
+  write_constant_pcm_wav(original, 5'600U);
+  auto timeline = make_timeline(original);
+  std::stop_source cancellation;
+  cancellation.request_stop();
+  testing::set_hardware_failure_injection(testing::HardwareFailureInjection::HardwareEncode);
+  const auto outcome = export_video({.snapshot = timeline.snapshot,
+                                     .renderer = timeline.renderer,
+                                     .destination = directory.path() / "cancel.webm",
+                                     .preset = VideoPreset::Vp9OpusWebm,
+                                     .cancellation = cancellation.get_token(),
+                                     .platform_preset = PlatformPreset::YouTube1080p});
+  testing::set_hardware_failure_injection(testing::HardwareFailureInjection::None);
+  ASSERT_FALSE(outcome);
+  EXPECT_EQ(outcome.error().code, ExportErrorCode::Cancelled);
+}
+
+TEST(ExportService, SoftwareFailureDoesNotRetryRecursively) {
+  TestDirectory directory;
+  const auto original = directory.path() / "software-original.wav";
+  write_constant_pcm_wav(original, 5'600U);
+  auto timeline = make_timeline(original);
+  testing::set_hardware_failure_injection(testing::HardwareFailureInjection::SoftwareEncode);
+  const auto outcome = export_video({.snapshot = timeline.snapshot,
+                                     .renderer = timeline.renderer,
+                                     .destination = directory.path() / "software.webm",
+                                     .preset = VideoPreset::Vp9OpusWebm,
+                                     .prefer_hardware_encoder = false,
+                                     .platform_preset = PlatformPreset::YouTube1080p});
+  testing::set_hardware_failure_injection(testing::HardwareFailureInjection::None);
+  ASSERT_FALSE(outcome);
+  EXPECT_EQ(outcome.error().code, ExportErrorCode::EncodingFailed);
+}
+
+TEST(ExportService, FossCreatorPresetExportsVp9OpusWebmWithExactOverrides) {
+  const PresetInfo info = preset_info(VideoPreset::Vp9OpusWebm);
+  ASSERT_TRUE(info.available) << "This FFmpeg runtime has no libvpx-vp9 encoder";
+
+  TestDirectory directory;
+  const auto original = directory.path() / "creator-original.wav";
+  write_constant_pcm_wav(original, 5'600U);
+  auto timeline = make_timeline(original);
+  const auto destination = directory.path() / "creator.webm";
+  bool saw_hardware_fallback = false;
+  const auto outcome = export_video({.snapshot = timeline.snapshot,
+                                     .renderer = timeline.renderer,
+                                     .audio_renderer = timeline.audio_renderer,
+                                     .destination = destination,
+                                     .preset = VideoPreset::Vp9OpusWebm,
+                                     .overwrite_existing = false,
+                                     .include_audio = true,
+                                     .cancellation = {},
+                                     .progress =
+                                         [&saw_hardware_fallback](const ExportProgress& progress) {
+                                           saw_hardware_fallback |=
+                                               progress.restarted_after_hardware_fallback;
+                                         },
+                                     .platform_preset = PlatformPreset::YouTube1080p,
+                                     .override_width = 8,
+                                     .override_height = 4,
+                                     .override_frame_rate_num = 60,
+                                     .override_frame_rate_den = 1,
+                                     .override_audio_bitrate = 96'000,
+                                     .override_video_bitrate = 500'000});
+  ASSERT_TRUE(outcome) << outcome.error().message;
+  EXPECT_EQ(outcome.value().video_codec, "VP9");
+  EXPECT_EQ(outcome.value().audio_codec, "Opus");
+  const std::string selected_encoder = outcome.value().video_encoder;
+  EXPECT_TRUE(selected_encoder == "libvpx-vp9" || selected_encoder == "vp9_vaapi" ||
+              selected_encoder == "vp9_qsv");
+  if (outcome.value().hardware_encoder_used) {
+    EXPECT_NE(selected_encoder, "libvpx-vp9");
+  } else {
+    EXPECT_EQ(selected_encoder, "libvpx-vp9");
+    // On a machine exposing a VP9 hardware encoder, initialization/encode
+    // failure must be observable as an explicit restart event. On machines
+    // without a usable hardware path, software starts directly.
+    if (media::has_hardware_encoder(media::probe_encoder_capabilities(),
+                                    media::DeliveryCodec::Vp9)) {
+      EXPECT_TRUE(saw_hardware_fallback);
+    }
+  }
+  EXPECT_EQ(outcome.value().frame_count, 7U);
+  EXPECT_EQ(outcome.value().audio_sample_count, 5'600U);
+  const auto decoded = decode_video(destination, AVRational{1, 60});
+  EXPECT_EQ(decoded.codec_id, AV_CODEC_ID_VP9);
+  EXPECT_EQ(decoded.frame_ticks, (std::vector<std::int64_t>{0, 1, 2, 3, 4, 5, 6}));
+  const auto decoded_audio = decode_audio(destination);
+  EXPECT_EQ(decoded_audio.codec_id, AV_CODEC_ID_OPUS);
+  EXPECT_EQ(decoded_audio.trimmed_sample_count, 5'600U);
+}
+
+TEST(ExportService, PodcastFossDeliveryIsAudioOnlyAndPreservesExactSamples) {
+  TestDirectory directory;
+  const auto original = directory.path() / "podcast-original.wav";
+  write_constant_pcm_wav(original, 5'600U);
+  auto timeline = make_timeline(original);
+  const auto destination = directory.path() / "podcast.webm";
+  const auto outcome = export_video({.snapshot = timeline.snapshot,
+                                     .renderer = nullptr,
+                                     .audio_renderer = timeline.audio_renderer,
+                                     .destination = destination,
+                                     .preset = VideoPreset::Vp9OpusWebm,
+                                     .overwrite_existing = false,
+                                     .include_audio = true,
+                                     .cancellation = {},
+                                     .progress = {},
+                                     .platform_preset = PlatformPreset::PodcastAudioOnly});
+  ASSERT_TRUE(outcome) << outcome.error().message;
+  EXPECT_FALSE(outcome.value().video_exported);
+  EXPECT_EQ(outcome.value().frame_count, 0U);
+  EXPECT_TRUE(outcome.value().audio_exported);
+  EXPECT_TRUE(outcome.value().video_codec.empty());
+  EXPECT_EQ(outcome.value().audio_codec, "Opus");
+
+  AVFormatContext* raw_format = nullptr;
+  const auto name = path_string(destination);
+  ASSERT_GE(avformat_open_input(&raw_format, name.c_str(), nullptr, nullptr), 0);
+  InputFormatPtr format(raw_format);
+  ASSERT_GE(avformat_find_stream_info(format.get(), nullptr), 0);
+  int video_streams = 0;
+  for (unsigned int index = 0; index < format->nb_streams; ++index) {
+    video_streams += format->streams[index]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO ? 1 : 0;
+  }
+  EXPECT_EQ(video_streams, 0);
+  const auto decoded_audio = decode_audio(destination);
+  EXPECT_EQ(decoded_audio.codec_id, AV_CODEC_ID_OPUS);
+  EXPECT_EQ(decoded_audio.trimmed_sample_count, 5'600U);
 }
 
 TEST(ExportService, CancellationRemovesTemporaryFileAndPreservesExistingDestination) {

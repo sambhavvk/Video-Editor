@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "video_editor/audio_engine/async_realtime_playback.h"
 #include "video_editor/audio_engine/audio_block.h"
+#include "video_editor/audio_engine/audio_device_manager.h"
 #include "video_editor/audio_engine/dsp.h"
 #include "video_editor/audio_engine/loudness_meter.h"
 #include "video_editor/audio_engine/miniaudio_output_device.h"
@@ -333,7 +334,8 @@ public:
   return {.ring_capacity_frames = 16,
           .render_block_frames = 4,
           .prefill_frames = 8,
-          .prefill_timeout = std::chrono::seconds(1)};
+          .prefill_timeout = std::chrono::seconds(1),
+          .device_id = {}};
 }
 
 TEST(AudioBlock, UsesPlanarStorageAndExactStartSample) {
@@ -345,6 +347,166 @@ TEST(AudioBlock, UsesPlanarStorageAndExactStartSample) {
   ASSERT_EQ(interleaved.size(), 6U);
   EXPECT_FLOAT_EQ(interleaved[0], 1.0F);
   EXPECT_FLOAT_EQ(interleaved[1], -1.0F);
+}
+
+TEST(RealtimeLoudnessMeter, SupportsConcurrentPollingWithoutAllocating) {
+  RealtimeLoudnessMeter meter;
+  std::array<float, 2 * 480> samples{};
+  std::fill(samples.begin(), samples.end(), 0.25F);
+  meter.process(samples.data(), 480U, 2U);
+  const auto reading = meter.read();
+  ASSERT_EQ(reading.sample_count, 480U);
+  EXPECT_EQ(reading.channels, 2U);
+  EXPECT_NEAR(reading.sample_peak, 0.25F, 1.0e-6F);
+  EXPECT_NEAR(reading.integrated_lufs, 20.0 * std::log10(0.25) - 0.691, 0.001);
+  EXPECT_EQ(meter.read().sample_count, 0U);
+}
+
+TEST(RealtimeLoudnessAnalyzer, PublishesVersionedEbuR128WindowsOffCallbackQueue) {
+  constexpr AudioFormat format{.sample_rate = 48'000, .channels = 2};
+  RealtimeLoudnessAnalyzer analyzer(format, {.queue_blocks = 8, .maximum_block_frames = 4'800});
+  std::array<float, 4'800U * 2U> samples{};
+  std::fill(samples.begin(), samples.end(), 0.25F);
+
+  for (int block = 0; block < 40; ++block) {
+    ASSERT_TRUE(analyzer.submit(samples.data(), 4'800U, format.channels));
+    for (int attempt = 0; attempt < 100 && analyzer.read().stale; ++attempt) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  }
+  for (int attempt = 0; attempt < 200 && analyzer.read().stale; ++attempt) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+
+  const auto reading = analyzer.read();
+  EXPECT_GT(reading.version, 0U);
+  EXPECT_TRUE(reading.momentary_valid);
+  EXPECT_TRUE(reading.short_term_valid);
+  EXPECT_TRUE(reading.integrated_valid);
+  EXPECT_FALSE(reading.stale);
+  EXPECT_EQ(reading.dropped_blocks, 0U);
+  EXPECT_EQ(reading.channels, format.channels);
+  AudioBlock reference_block(format, 0, 40U * 4'800U);
+  for (std::size_t frame = 0; frame < reference_block.frame_count(); ++frame) {
+    reference_block.channel(0)[frame] = 0.25F;
+    reference_block.channel(1)[frame] = 0.25F;
+  }
+  LoudnessMeter reference_meter(format);
+  ASSERT_TRUE(reference_meter.add(reference_block));
+  const auto reference = reference_meter.reading();
+  ASSERT_TRUE(reference.integrated_lufs.has_value());
+  EXPECT_NEAR(reading.integrated_lufs, *reference.integrated_lufs, 0.001);
+}
+
+TEST(RealtimeLoudnessAnalyzer, DropsWhenBoundedQueueIsOverloadedWithoutBlockingProducer) {
+  RealtimeLoudnessAnalyzer analyzer({.sample_rate = 48'000, .channels = 2},
+                                    {.queue_blocks = 2, .maximum_block_frames = 8});
+  std::array<float, 16> samples{};
+  bool rejected = false;
+  for (int block = 0; block < 100'000; ++block) {
+    rejected = !analyzer.submit(samples.data(), 8U, 2U) || rejected;
+  }
+  EXPECT_TRUE(rejected);
+  for (int attempt = 0; attempt < 100 && analyzer.read().stale; ++attempt) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  EXPECT_GT(analyzer.read().dropped_blocks, 0U);
+}
+
+TEST(RealtimeLoudnessAnalyzer, ResetDiscardsQueuedOldGenerationBeforeNewAudio) {
+  RealtimeLoudnessAnalyzer analyzer({.sample_rate = 48'000, .channels = 2},
+                                    {.queue_blocks = 8, .maximum_block_frames = 480});
+  std::array<float, 960> samples{};
+  std::fill(samples.begin(), samples.end(), 0.25F);
+  ASSERT_TRUE(analyzer.submit(samples.data(), 480U, 2U));
+  analyzer.reset();
+  const auto after_reset = analyzer.read();
+  EXPECT_EQ(after_reset.version, 0U);
+  EXPECT_FALSE(after_reset.integrated_valid);
+  EXPECT_TRUE(after_reset.stale);
+
+  std::fill(samples.begin(), samples.end(), 0.5F);
+  ASSERT_TRUE(analyzer.submit(samples.data(), 480U, 2U));
+  for (int attempt = 0; attempt < 200 && analyzer.read().stale; ++attempt) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  const auto reading = analyzer.read();
+  EXPECT_EQ(reading.dropped_blocks, 0U);
+  EXPECT_GT(reading.version, 0U);
+  EXPECT_EQ(reading.analyzed_frames, 480U);
+  EXPECT_FALSE(reading.stale);
+}
+
+TEST(RealtimeLoudnessAnalyzer, FullQueueShutdownIsBounded) {
+  const auto begin = std::chrono::steady_clock::now();
+  {
+    RealtimeLoudnessAnalyzer analyzer({.sample_rate = 48'000, .channels = 2},
+                                      {.queue_blocks = 2, .maximum_block_frames = 2'048});
+    std::array<float, 4'096> samples{};
+    for (int block = 0; block < 32; ++block) {
+      static_cast<void>(analyzer.submit(samples.data(), 2'048U, 2U));
+    }
+  }
+  const auto elapsed = std::chrono::steady_clock::now() - begin;
+  EXPECT_LT(elapsed, std::chrono::seconds(1));
+}
+
+TEST(AudioDeviceRecovery, ReopensSelectedDeviceAfterHotPlug) {
+  FakeAudioDevice fake;
+  const AudioDeviceConfiguration configuration{
+      .format = kPlaybackAudioFormat,
+      .callback =
+          [](void* user_data, float* destination, std::size_t frames) noexcept {
+            static_cast<void>(user_data);
+            std::fill(destination, destination + (frames * 2U), 0.0F);
+          },
+      .user_data = nullptr,
+      .device_id = "usb"};
+  AudioDeviceRecovery recovery(fake);
+  const std::array<AudioDeviceInfo, 1> connected{
+      AudioDeviceInfo{.id = "usb", .name = "USB", .is_default = true, .connected = true}};
+  ASSERT_EQ(recovery.refresh(connected).code, AudioDeviceRecoveryCode::NoChange);
+  ASSERT_EQ(recovery.select("usb", configuration).code, AudioDeviceRecoveryCode::Reopened);
+  ASSERT_TRUE(fake.is_open());
+  EXPECT_EQ(fake.configuration_.device_id, "usb");
+  ASSERT_TRUE(fake.start());
+  ASSERT_TRUE(fake.is_running());
+
+  const std::array<AudioDeviceInfo, 1> removed{
+      AudioDeviceInfo{.id = "usb", .name = "USB", .is_default = true, .connected = false}};
+  EXPECT_EQ(recovery.refresh(removed).code, AudioDeviceRecoveryCode::Disconnected);
+  EXPECT_FALSE(fake.is_open());
+  EXPECT_FALSE(fake.is_running());
+
+  EXPECT_EQ(recovery.refresh(connected).code, AudioDeviceRecoveryCode::Reopened);
+  EXPECT_TRUE(fake.is_open());
+  // The coordinator remembers that the device was running and restarts it.
+  EXPECT_TRUE(fake.is_running());
+}
+
+TEST(AudioDeviceRecovery, ReopensWhenBackendDefaultChanges) {
+  FakeAudioDevice fake;
+  const AudioDeviceConfiguration configuration{
+      .format = kPlaybackAudioFormat,
+      .callback =
+          [](void*, float* destination, std::size_t frames) noexcept {
+            std::fill(destination, destination + (frames * 2U), 0.0F);
+          },
+      .user_data = nullptr,
+      .device_id = {}};
+  AudioDeviceRecovery recovery(fake);
+  const std::array<AudioDeviceInfo, 2> first{
+      AudioDeviceInfo{.id = "a", .name = "A", .is_default = true, .connected = true},
+      AudioDeviceInfo{.id = "b", .name = "B", .is_default = false, .connected = true}};
+  ASSERT_EQ(recovery.refresh(first).code, AudioDeviceRecoveryCode::NoChange);
+  ASSERT_EQ(recovery.select({}, configuration).code, AudioDeviceRecoveryCode::Reopened);
+  ASSERT_TRUE(fake.start());
+  const std::array<AudioDeviceInfo, 2> changed{
+      AudioDeviceInfo{.id = "a", .name = "A", .is_default = false, .connected = true},
+      AudioDeviceInfo{.id = "b", .name = "B", .is_default = true, .connected = true}};
+  EXPECT_EQ(recovery.refresh(changed).code, AudioDeviceRecoveryCode::Reopened);
+  EXPECT_TRUE(fake.is_running());
+  EXPECT_EQ(fake.configuration_.device_id, "");
 }
 
 TEST(SpscAudioRing, PreservesOrderAcrossWrapWithoutAllocation) {
@@ -370,7 +532,8 @@ TEST(RealtimeAudioPlayback, DeviceFramesDriveTheExactFortyEightKilohertzMasterCl
                                  {.ring_capacity_frames = 1'920,
                                   .render_block_frames = 480,
                                   .prefill_frames = 960,
-                                  .prefill_timeout = std::chrono::seconds(1)},
+                                  .prefill_timeout = std::chrono::seconds(1),
+                                  .device_id = {}},
                                  std::move(device));
 
   ASSERT_TRUE(playback.start(48'001));
@@ -493,7 +656,8 @@ TEST(RealtimeAudioPlayback, CallbackDoesNotWaitForProviderAndAccountsExactUnderr
                                  {.ring_capacity_frames = 8,
                                   .render_block_frames = 4,
                                   .prefill_frames = 4,
-                                  .prefill_timeout = std::chrono::seconds(1)},
+                                  .prefill_timeout = std::chrono::seconds(1),
+                                  .device_id = {}},
                                  std::move(device));
   ASSERT_TRUE(playback.start(0));
   ASSERT_TRUE(provider->wait_until_blocked());
@@ -554,7 +718,8 @@ TEST(RealtimeAudioPlayback, ConcurrentManualConsumersCannotRaceSeekRingReset) {
   RealtimeAudioPlayback playback(provider, {.ring_capacity_frames = ring_capacity,
                                             .render_block_frames = 8,
                                             .prefill_frames = 16,
-                                            .prefill_timeout = std::chrono::seconds(1)});
+                                            .prefill_timeout = std::chrono::seconds(1),
+                                            .device_id = {}});
   ASSERT_TRUE(playback.start(0));
 
   const auto consume = [&playback](const std::stop_token stop) {
@@ -587,7 +752,8 @@ TEST(RealtimeAudioPlayback, ConfigurationSupportsBoundedLargeDecodeAheadBlocks) 
     RealtimeAudioPlayback playback(provider, {.ring_capacity_frames = 192'000,
                                               .render_block_frames = 24'000,
                                               .prefill_frames = 48'000,
-                                              .prefill_timeout = std::chrono::seconds(5)});
+                                              .prefill_timeout = std::chrono::seconds(5),
+                                              .device_id = {}});
   });
 }
 
@@ -906,7 +1072,8 @@ TEST(MiniaudioOutputDevice, UnavailableBuildReportsTypedFallbackWithoutOpeningHa
   const AudioDeviceResult result =
       device.open({.format = kPlaybackAudioFormat,
                    .callback = [](void*, float*, std::size_t) noexcept {},
-                   .user_data = nullptr});
+                   .user_data = nullptr,
+                   .device_id = {}});
   ASSERT_FALSE(result);
   EXPECT_EQ(result.error->code, AudioDeviceErrorCode::Unavailable);
   EXPECT_FALSE(device.is_open());

@@ -26,7 +26,10 @@ TEST(export_presets, YouTube1080pHasExpectedDeliverySettings) {
   EXPECT_EQ(info.target_width, 1920U);
   EXPECT_EQ(info.target_height, 1080U);
   EXPECT_EQ(info.target_video_bitrate, 8'000'000U);
-  EXPECT_EQ(info.delivery_codec_approved, false);
+  EXPECT_EQ(info.intended_container, "webm");
+  EXPECT_EQ(info.intended_video_codec, "vp9");
+  EXPECT_EQ(info.intended_audio_codec, "opus");
+  EXPECT_TRUE(info.delivery_codec_approved);
 }
 
 TEST(export_presets, ReferenceFfv1IsApprovedAndMapsToReferencePreset) {
@@ -34,12 +37,12 @@ TEST(export_presets, ReferenceFfv1IsApprovedAndMapsToReferencePreset) {
 
   EXPECT_TRUE(info.delivery_codec_approved);
   ASSERT_TRUE(reference_video_preset_for(PlatformPreset::ReferenceFfv1).has_value());
-  EXPECT_EQ(*reference_video_preset_for(PlatformPreset::ReferenceFfv1),
-            VideoPreset::Ffv1Matroska);
+  EXPECT_EQ(*reference_video_preset_for(PlatformPreset::ReferenceFfv1), VideoPreset::Ffv1Matroska);
 }
 
 TEST(export_presets, DeliveryPresetDoesNotMapToReferencePreset) {
-  EXPECT_FALSE(reference_video_preset_for(PlatformPreset::YouTube1080p).has_value());
+  ASSERT_TRUE(reference_video_preset_for(PlatformPreset::YouTube1080p).has_value());
+  EXPECT_EQ(*reference_video_preset_for(PlatformPreset::YouTube1080p), VideoPreset::Vp9OpusWebm);
 }
 
 TEST(export_presets, PodcastPresetIsAudioOnly) {
@@ -49,11 +52,16 @@ TEST(export_presets, PodcastPresetIsAudioOnly) {
   EXPECT_TRUE(info.intended_video_codec.empty());
 }
 
+TEST(export_presets, FossDeliveryAvailabilityRequiresRuntimeVideoAndAudioEncoders) {
+  EXPECT_TRUE(platform_preset_available(PlatformPreset::YouTube1080p));
+  EXPECT_TRUE(platform_preset_available(PlatformPreset::PodcastAudioOnly));
+}
+
 TEST(export_presets, AllDisplayNamesAreNonEmpty) {
   for (const auto& info : available_platform_presets()) {
     EXPECT_FALSE(info.display_name.empty());
   }
 }
 
-}  // namespace
-}  // namespace video_editor::export_service
+} // namespace
+} // namespace video_editor::export_service

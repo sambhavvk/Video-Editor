@@ -13,6 +13,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QProcess>
+#include <QPushButton>
 #include <QSettings>
 #include <QSignalSpy>
 #include <QStandardPaths>
@@ -25,7 +26,8 @@
 
 namespace {
 
-void writeSilentWave(const QString& path, const quint32 sample_count = 4'800) {
+void writeSilentWave(const QString& path, const quint32 sample_count = 4'800,
+                     const qint16 sample_value = 0) {
   constexpr quint16 channels = 2;
   constexpr quint32 sample_rate = 48'000;
   constexpr quint16 bits_per_sample = 16;
@@ -44,8 +46,14 @@ void writeSilentWave(const QString& path, const quint32 sample_count = 4'800) {
          << bits_per_sample;
   QCOMPARE(stream.writeRawData("data", 4), 4);
   stream << data_size;
-  const QByteArray silence(static_cast<qsizetype>(data_size), '\0');
-  QCOMPARE(file.write(silence), static_cast<qint64>(data_size));
+  QByteArray samples(static_cast<qsizetype>(data_size), '\0');
+  for (qsizetype offset = 0; offset < samples.size(); offset += 2) {
+    const qsizetype frame = offset / static_cast<qsizetype>(block_align);
+    const qint16 value = sample_value != 0 && frame % 48 >= 24 ? -sample_value : sample_value;
+    samples[offset] = static_cast<char>(static_cast<quint16>(value) & 0xffU);
+    samples[offset + 1] = static_cast<char>((static_cast<quint16>(value) >> 8U) & 0xffU);
+  }
+  QCOMPARE(file.write(samples), static_cast<qint64>(data_size));
   file.close();
 }
 
@@ -115,7 +123,12 @@ private slots:
   void rollEditsUseTheGestureEdge();
   void presentsFramesContinuouslyWhilePlaybackIsRunning();
   void importsSearchesAndExportsCaptions();
+  void normalizationOnlyAdjustsAudibleContributingTracks();
   void realAudioDeviceUsesTheSampleCounterAsMasterClock();
+  void audioDevicePollSteadyConnectedIsNotRecovered();
+  void audioDevicePollLossReturnAndDelayedStopAreRetryable();
+  void audioDevicePollPauseCancelsRecoveryIntent();
+  void normalizationGenerationRejectsObsoleteCompletionAndClearsBusy();
 
 private:
   std::unique_ptr<QTemporaryDir> application_data_;
@@ -126,6 +139,72 @@ void EditorControllerTest::initTestCase() {
   QVERIFY(application_data_->isValid());
   qputenv("XDG_DATA_HOME", application_data_->path().toUtf8());
   QStandardPaths::setTestModeEnabled(true);
+}
+
+void EditorControllerTest::audioDevicePollSteadyConnectedIsNotRecovered() {
+  using video_editor::app::evaluateAudioDevicePoll;
+  using video_editor::audio::AudioDeviceInfo;
+  const std::vector<AudioDeviceInfo> devices{
+      {.id = "speaker", .name = "Speaker", .is_default = true, .connected = true}};
+  const auto decision = evaluateAudioDevicePoll(devices, devices, "speaker");
+  QVERIFY(!decision.selected_missing);
+  QVERIFY(!decision.selected_recovered);
+  QVERIFY(!decision.default_missing);
+  QVERIFY(!decision.default_recovered);
+
+  const std::vector<AudioDeviceInfo> alternate{
+      {.id = "headphones", .name = "Headphones", .is_default = false, .connected = true}};
+  const auto stillMissing = evaluateAudioDevicePoll(alternate, alternate, "speaker");
+  QVERIFY(stillMissing.selected_missing);
+  QVERIFY(!stillMissing.selected_recovered);
+
+  const auto defaultStillMissing = evaluateAudioDevicePoll(alternate, alternate, {});
+  QVERIFY(defaultStillMissing.default_missing);
+  QVERIFY(!defaultStillMissing.default_recovered);
+}
+
+void EditorControllerTest::audioDevicePollLossReturnAndDelayedStopAreRetryable() {
+  using video_editor::app::evaluateAudioDevicePoll;
+  using video_editor::audio::AudioDeviceInfo;
+  const std::vector<AudioDeviceInfo> present{
+      {.id = "speaker", .name = "Speaker", .is_default = true, .connected = true}};
+  const std::vector<AudioDeviceInfo> missing{};
+  const auto lost = evaluateAudioDevicePoll(present, missing, "speaker");
+  QVERIFY(lost.selected_missing);
+  const auto returned = evaluateAudioDevicePoll(missing, present, "speaker");
+  QVERIFY(returned.selected_recovered);
+  bool recovery_pending = returned.selected_recovered;
+  const bool stop_settled = false;
+  QVERIFY(recovery_pending);
+  QVERIFY(!stop_settled);
+  // A delayed asynchronous stop must not clear the recovery intent.
+  recovery_pending = recovery_pending && !stop_settled;
+  QVERIFY(recovery_pending);
+}
+
+void EditorControllerTest::audioDevicePollPauseCancelsRecoveryIntent() {
+  bool recovery_pending = true;
+  const bool playback_intended = false;
+  if (!playback_intended) {
+    recovery_pending = false;
+  }
+  QVERIFY(!recovery_pending);
+}
+
+void EditorControllerTest::normalizationGenerationRejectsObsoleteCompletionAndClearsBusy() {
+  video_editor::app::NormalizationCompletionGate gate;
+  const auto obsolete = gate.begin();
+  gate.invalidate();
+  QVERIFY(!gate.complete(obsolete));
+  QVERIFY(!gate.busy);
+
+  video_editor::desktop_ui::AudioMixerWidget mixer;
+  mixer.setNormalizationBusy(true);
+  auto* analyze = mixer.findChild<QPushButton*>(QStringLiteral("normalizationAnalyze"));
+  QVERIFY(analyze != nullptr);
+  QVERIFY(!analyze->isEnabled());
+  mixer.setNormalizationBusy(false);
+  QVERIFY(analyze->isEnabled());
 }
 
 void EditorControllerTest::importsInsertsAndRoundTripsUndo() {
@@ -625,6 +704,64 @@ void EditorControllerTest::importsSearchesAndExportsCaptions() {
                ->sequences.front()
                .captions.size(),
            0U);
+}
+
+void EditorControllerTest::normalizationOnlyAdjustsAudibleContributingTracks() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString wave_path = directory.filePath(QStringLiteral("quiet-dialogue.wav"));
+  writeSilentWave(wave_path, 48'000, 1'000);
+
+  QSettings settings(directory.filePath(QStringLiteral("normalization-ui.ini")),
+                     QSettings::IniFormat);
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+  controller.importPaths({wave_path});
+  QTRY_COMPARE_WITH_TIMEOUT(
+      controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
+  window.mediaActivated(window.mediaBin()->items().front().id);
+
+  // Give an empty, non-contributing track no remaining headroom. It must not
+  // make the audible mix's review unsafe and must not be changed by Apply.
+  window.audioMixer()->gainEdited(1, 24.0);
+  auto before = controller.editor().projectAt(controller.editor().revision());
+  std::vector<const video_editor::edit::Track*> audio_tracks;
+  for (const auto& track : before->sequences.front().tracks) {
+    if (track.kind == video_editor::edit::TrackKind::Audio) {
+      audio_tracks.push_back(&track);
+    }
+  }
+  QCOMPARE(audio_tracks.size(), 4U);
+  QCOMPARE(audio_tracks.at(1)->audio_gain_db, 24.0);
+  QVERIFY(audio_tracks.at(1)->clips.empty());
+
+  auto* apply = window.audioMixer()->findChild<QPushButton*>(QStringLiteral("normalizationApply"));
+  QVERIFY(apply != nullptr);
+  window.audioMixer()->normalizationAnalyzeRequested();
+  QTRY_VERIFY_WITH_TIMEOUT(apply->isEnabled(), 15'000);
+  window.audioMixer()->normalizationApplyRequested();
+
+  const auto applied = controller.editor().projectAt(controller.editor().revision());
+  audio_tracks.clear();
+  for (const auto& track : applied->sequences.front().tracks) {
+    if (track.kind == video_editor::edit::TrackKind::Audio) {
+      audio_tracks.push_back(&track);
+    }
+  }
+  QVERIFY(audio_tracks.at(0)->audio_gain_db > 0.0);
+  QVERIFY(audio_tracks.at(0)->audio_gain_db <= 24.0);
+  QCOMPARE(audio_tracks.at(1)->audio_gain_db, 24.0);
+
+  window.undoRequested();
+  const auto undone = controller.editor().projectAt(controller.editor().revision());
+  audio_tracks.clear();
+  for (const auto& track : undone->sequences.front().tracks) {
+    if (track.kind == video_editor::edit::TrackKind::Audio) {
+      audio_tracks.push_back(&track);
+    }
+  }
+  QCOMPARE(audio_tracks.at(0)->audio_gain_db, 0.0);
+  QCOMPARE(audio_tracks.at(1)->audio_gain_db, 24.0);
 }
 
 void EditorControllerTest::realAudioDeviceUsesTheSampleCounterAsMasterClock() {

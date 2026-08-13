@@ -10,5 +10,8 @@ the application controller owns conversion to exact edit-model commands.
 - [EditorWindow](EditorWindow.md) — workspace shell, public panel access, actions, and controller
   signals.
 - [Presentation types](ui_types.md) — Qt-only media, timeline, snap, mixer, and effect view values.
+- [Panel widgets](PanelWidgets.md) — Inspector/effect authoring, professional mixer, and creator
+  delivery presentation contracts.
+- [KeyframeCurveWidget](KeyframeCurveWidget.md) — clip-local curve interaction and commit boundary.
 
 AI assistance has been used to create this output.

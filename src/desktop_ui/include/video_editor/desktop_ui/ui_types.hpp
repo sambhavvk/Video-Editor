@@ -6,9 +6,13 @@
 
 #include <QColor>
 #include <QMetaType>
+#include <QPointF>
 #include <QString>
 #include <QStringList>
+#include <QVariant>
 #include <QVector>
+
+#include <array>
 
 namespace video_editor::desktop_ui {
 
@@ -97,11 +101,37 @@ struct TimelineSnapResult {
 };
 
 struct AudioTrackView {
+  // Stable edit-model track identity; UI telemetry must not be indexed by
+  // presentation order because tracks can be reordered or removed.
+  QString id;
   QString displayName;
   bool muted{false};
   bool soloed{false};
   double gain_db{0.0};
   double pan{0.0};
+  std::array<float, 2> peak_dbfs{-60.0F, -60.0F};
+  std::array<float, 2> rms_dbfs{-60.0F, -60.0F};
+  bool meter_active{false};
+  bool meter_stale{true};
+  struct Effect {
+    struct Parameter {
+      QString id;
+      QVariant value;
+    };
+    QString id;
+    QString type;
+    QString displayName;
+    QVector<Parameter> parameters;
+  };
+  QVector<Effect> effects;
+};
+
+struct AudioTrackMeterView {
+  QString id;
+  std::array<float, 2> peak_dbfs{-60.0F, -60.0F};
+  std::array<float, 2> rms_dbfs{-60.0F, -60.0F};
+  bool active{false};
+  bool stale{true};
 };
 
 // Times are expressed in the TimelineWidget time scale supplied by the caller.
@@ -126,8 +156,34 @@ struct EffectView {
   bool accelerated{false};
 };
 
+enum class KeyframeInterpolationView {
+  Hold,
+  Linear,
+  Bezier,
+};
+
+struct KeyframeView {
+  QString id;
+  qint64 time{0};
+  double value{0.0};
+  KeyframeInterpolationView interpolation{KeyframeInterpolationView::Linear};
+  QPointF incomingControl{};
+  QPointF outgoingControl{};
+};
+
+struct EffectParameterView {
+  QString effectId;
+  QString effectName;
+  QString parameterId;
+  QString displayName;
+  QVariant value;
+  qint64 duration{1};
+  QVector<KeyframeView> keyframes;
+};
+
 } // namespace video_editor::desktop_ui
 
 Q_DECLARE_METATYPE(video_editor::desktop_ui::Workspace)
 Q_DECLARE_METATYPE(video_editor::desktop_ui::TrackKind)
 Q_DECLARE_METATYPE(video_editor::desktop_ui::TimelineSnapKind)
+Q_DECLARE_METATYPE(video_editor::desktop_ui::KeyframeInterpolationView)

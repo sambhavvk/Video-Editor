@@ -17,6 +17,7 @@ target_link_libraries(
     VideoEditor::DesktopUi
     video_editor_edit_model
     video_editor::asset_service
+    video_editor::audio_engine
     VideoEditor::CaptionService
   PRIVATE
     video_editor::project_warnings

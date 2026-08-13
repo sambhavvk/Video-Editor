@@ -215,6 +215,22 @@ struct SetTrackAudioMixCommand final {
   double gain_db{0.0};
   double pan{0.0};
 };
+struct AddTrackEffectCommand final {
+  EntityId sequence_id;
+  EntityId track_id;
+  Effect effect;
+};
+struct RemoveTrackEffectCommand final {
+  EntityId sequence_id;
+  EntityId track_id;
+  EntityId effect_id;
+};
+struct SetTrackEffectParameterCommand final {
+  EntityId sequence_id;
+  EntityId track_id;
+  EntityId effect_id;
+  EffectParameter parameter;
+};
 struct AddTransitionCommand final {
   EntityId sequence_id;
   Transition transition;
@@ -228,19 +244,18 @@ struct RemoveTransitionCommand final {
   EntityId transition_id;
 };
 
-using EditOperation =
-    std::variant<AddAssetCommand, RemoveAssetCommand, AddSequenceCommand, RemoveSequenceCommand,
-                 AddTrackCommand, RemoveTrackCommand, InsertClipCommand, MoveClipCommand,
-                 TrimClipCommand, SplitClipCommand, RemoveClipCommand, RollEditCommand,
-                 SlipClipCommand, SlideClipCommand, AddMarkerCommand, UpdateMarkerCommand,
-                 RemoveMarkerCommand, AddCaptionCommand, UpdateCaptionCommand, RemoveCaptionCommand,
-                 AddClipEffectCommand, RemoveClipEffectCommand, SetClipEffectParameterCommand,
-                 SetSequenceFormatCommand, SetClipTransformCommand, SetClipBlendModeCommand,
-                 SetClipAudioPropertiesCommand, SetTrackAudioStateCommand, SetClipTitleCommand,
-                 SetClipSpeedCommand, AddTransitionCommand, UpdateTransitionCommand,
-                 RemoveTransitionCommand, RenameTrackCommand, ReorderTrackCommand,
-                 SetTrackLockedCommand, SetTrackVisibilityCommand, SetTrackTargetedCommand,
-                 CloseGapCommand, SetTrackAudioMixCommand>;
+using EditOperation = std::variant<
+    AddAssetCommand, RemoveAssetCommand, AddSequenceCommand, RemoveSequenceCommand, AddTrackCommand,
+    RemoveTrackCommand, InsertClipCommand, MoveClipCommand, TrimClipCommand, SplitClipCommand,
+    RemoveClipCommand, RollEditCommand, SlipClipCommand, SlideClipCommand, AddMarkerCommand,
+    UpdateMarkerCommand, RemoveMarkerCommand, AddCaptionCommand, UpdateCaptionCommand,
+    RemoveCaptionCommand, AddClipEffectCommand, RemoveClipEffectCommand,
+    SetClipEffectParameterCommand, SetSequenceFormatCommand, SetClipTransformCommand,
+    SetClipBlendModeCommand, SetClipAudioPropertiesCommand, SetTrackAudioStateCommand,
+    SetClipTitleCommand, SetClipSpeedCommand, AddTransitionCommand, UpdateTransitionCommand,
+    RemoveTransitionCommand, RenameTrackCommand, ReorderTrackCommand, SetTrackLockedCommand,
+    SetTrackVisibilityCommand, SetTrackTargetedCommand, CloseGapCommand, SetTrackAudioMixCommand,
+    AddTrackEffectCommand, RemoveTrackEffectCommand, SetTrackEffectParameterCommand>;
 
 struct EditCommand final {
   EditOperation operation;

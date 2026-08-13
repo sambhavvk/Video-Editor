@@ -2,10 +2,13 @@
 #pragma once
 
 #include "video_editor/asset_service/asset_service.h"
+#include "video_editor/audio_engine/audio_device_manager.h"
+#include "video_editor/desktop_ui/ui_types.hpp"
 #include "video_editor/edit_model/edit_model.h"
 
 #include <QElapsedTimer>
 #include <QFuture>
+#include <QFutureWatcher>
 #include <QImage>
 #include <QObject>
 #include <QString>
@@ -17,7 +20,9 @@
 #include <memory>
 #include <numeric>
 #include <optional>
+#include <span>
 #include <stop_token>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -47,13 +52,48 @@ class GpuTimelineRenderer;
 
 namespace video_editor::audio_render {
 class OriginalAudioRegistry;
-}
+class TimelineAudioRenderer;
+} // namespace video_editor::audio_render
 
 namespace video_editor::audio {
 class AsyncRealtimeAudioPlayback;
 }
 
 namespace video_editor::app {
+
+struct AudioDevicePollDecision final {
+  bool selected_missing{false};
+  bool default_missing{false};
+  bool selected_recovered{false};
+  bool default_recovered{false};
+};
+
+[[nodiscard]] AudioDevicePollDecision
+evaluateAudioDevicePoll(std::span<const audio::AudioDeviceInfo> previous,
+                        std::span<const audio::AudioDeviceInfo> current,
+                        std::string_view selected_id) noexcept;
+
+struct NormalizationCompletionGate final {
+  std::uint64_t generation{0};
+  bool busy{false};
+
+  [[nodiscard]] std::uint64_t begin() noexcept {
+    busy = true;
+    return ++generation;
+  }
+  void invalidate() noexcept {
+    ++generation;
+    busy = false;
+  }
+  [[nodiscard]] bool complete(const std::uint64_t completion_generation) noexcept {
+    if (completion_generation != generation) {
+      busy = false;
+      return false;
+    }
+    busy = false;
+    return true;
+  }
+};
 
 class EditorController final : public QObject {
   Q_OBJECT
@@ -122,6 +162,21 @@ private slots:
   void searchTranscript(const QString& query);
   void updateSelectedClipProperty(const QString& parameterId, const QVariant& value);
   void toggleSelectedClipKeyframe(const QString& parameterId);
+  void addEffect(const QString& effectId);
+  void updateSelectedEffectParameter(const QString& effectId, const QString& parameterId,
+                                     const QVariant& value);
+  void toggleSelectedEffectKeyframe(const QString& effectId, const QString& parameterId);
+  void selectEffectKeyframe(const QString& effectId, const QString& parameterId, qint64 time);
+  void updateSelectedEffectKeyframe(const QString& effectId, const QString& parameterId,
+                                    const QString& keyframeId, qint64 time, double value);
+  void updateSelectedEffectInterpolation(const QString& effectId, const QString& parameterId,
+                                         const QString& keyframeId,
+                                         desktop_ui::KeyframeInterpolationView interpolation);
+  void removeSelectedEffectKeyframe(const QString& effectId, const QString& parameterId,
+                                    const QString& keyframeId);
+  void updateSelectedEffectControlPoints(const QString& effectId, const QString& parameterId,
+                                         const QString& keyframeId, const QPointF& incoming,
+                                         const QPointF& outgoing);
   void addTitleClip();
   void setTransitionSelection(const QString& transitionId);
   void updateTransitionDuration(const QString& transitionId, qint64 duration);
@@ -131,6 +186,14 @@ private slots:
   void setAudioTrackSolo(int trackIndex, bool soloed);
   void setAudioTrackGain(int trackIndex, double gainDb);
   void setAudioTrackPan(int trackIndex, double pan);
+  void addAudioTrackEffect(int trackIndex, const QString& effectType);
+  void removeAudioTrackEffect(int trackIndex, const QString& effectId);
+  void updateAudioTrackEffectParameter(int trackIndex, const QString& effectId,
+                                       const QString& parameterId, const QVariant& value);
+  void analyzeLoudnessNormalization();
+  void applyLoudnessNormalization();
+  void selectAudioOutputDevice(const QString& deviceId);
+  void setNormalizationTarget(double targetLufs);
   void chooseVideoExport(const QString& presetId);
 
 private:
@@ -234,6 +297,7 @@ private:
   [[nodiscard]] edit::Time playheadTime() const;
   void setDirty(bool dirty);
   void showError(const QString& title, const QString& message);
+  void refreshAudioDevices();
 
   desktop_ui::EditorWindow& window_;
   std::unique_ptr<edit::TimelineEditor> editor_;
@@ -245,6 +309,7 @@ private:
   std::shared_ptr<render::GpuRenderer> gpu_renderer_;
   std::shared_ptr<render::GpuTimelineRenderer> gpu_timeline_renderer_;
   std::unique_ptr<audio::AsyncRealtimeAudioPlayback> audio_playback_;
+  std::shared_ptr<audio_render::TimelineAudioRenderer> playback_audio_renderer_;
   std::vector<edit::EntityId> registered_playback_assets_;
   std::vector<edit::EntityId> registered_audio_assets_;
   std::optional<std::filesystem::path> checkpoint_path_;
@@ -285,6 +350,25 @@ private:
   std::uint64_t last_audio_xrun_count_{0};
   std::stop_source export_stop_source_;
   QFuture<VideoExportOutcome> export_future_;
+  struct NormalizationReview {
+    bool valid{false};
+    edit::Revision revision{};
+    double measured_lufs{0.0};
+    double gain_db{0.0};
+    double target_lufs{-14.0};
+    QString error;
+  } normalization_review_;
+  QFuture<NormalizationReview> normalization_future_;
+  QFuture<std::vector<audio::AudioDeviceInfo>> audio_devices_future_;
+  QFutureWatcher<NormalizationReview> normalization_watcher_;
+  QFutureWatcher<std::vector<audio::AudioDeviceInfo>> audio_devices_watcher_;
+  QString selected_audio_device_id_;
+  double normalization_target_lufs_{-14.0};
+  std::vector<audio::AudioDeviceInfo> known_audio_devices_;
+  QTimer audio_device_poll_timer_;
+  bool audio_recovery_pending_{false};
+  NormalizationCompletionGate normalization_completion_gate_;
+  std::uint64_t active_normalization_generation_{0};
   bool export_in_flight_{false};
   bool dirty_{false};
   bool closing_after_confirmation_{false};

@@ -57,6 +57,27 @@ TEST(EncoderCapabilities, SummaryContainsFfv1) {
   EXPECT_NE(summary.find("FFV1"), std::string::npos);
 }
 
+TEST(EncoderCapabilities, FOSSDeliveryEncodersAreProbed) {
+  const EncoderCapabilityMatrix matrix = probe_encoder_capabilities();
+  const auto vp9 =
+      std::find_if(matrix.encoders.begin(), matrix.encoders.end(), [](const auto& item) {
+        return item.encoder_name == "libvpx-vp9" && item.available;
+      });
+  const auto opus =
+      std::find_if(matrix.encoders.begin(), matrix.encoders.end(), [](const auto& item) {
+        return (item.encoder_name == "libopus" || item.encoder_name == "opus") && item.available;
+      });
+  EXPECT_NE(vp9, matrix.encoders.end()) << "libvpx-vp9 is required by the FOSS delivery build";
+  EXPECT_NE(opus, matrix.encoders.end())
+      << "libopus or native opus is required by the FOSS delivery build";
+  if (vp9 != matrix.encoders.end()) {
+    EXPECT_EQ(vp9->category, EncoderCategory::Software);
+    EXPECT_NE(std::find(vp9->supported_pixel_formats.begin(), vp9->supported_pixel_formats.end(),
+                        "yuv420p"),
+              vp9->supported_pixel_formats.end());
+  }
+}
+
 TEST(EncoderCapabilities, MissingSoftwareEncoderIsRepresentedSafely) {
   const EncoderCapabilityMatrix matrix = probe_encoder_capabilities();
   const auto libx264 =
@@ -65,6 +86,19 @@ TEST(EncoderCapabilities, MissingSoftwareEncoderIsRepresentedSafely) {
 
   ASSERT_NE(libx264, matrix.encoders.end());
   EXPECT_EQ(libx264->category, EncoderCategory::Software);
+}
+
+TEST(EncoderCapabilities, LightweightProbeNeverClaimsHardwareReady) {
+  const EncoderCapabilityMatrix matrix = probe_encoder_capabilities(false);
+  for (const auto& capability : matrix.encoders) {
+    if (capability.hardware) {
+      EXPECT_FALSE(capability.hardware_device_usable);
+    }
+  }
+  const auto vp9 = best_encoder_for(matrix, DeliveryCodec::Vp9);
+  if (vp9.has_value()) {
+    EXPECT_FALSE(vp9->hardware);
+  }
 }
 
 } // namespace

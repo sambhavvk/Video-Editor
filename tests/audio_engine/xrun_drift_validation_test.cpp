@@ -133,7 +133,8 @@ TEST(XrunValidation, OneHourPlaybackHasZeroXrunsWithBoundedJitter) {
                                  {.ring_capacity_frames = 96'000,
                                   .render_block_frames = 960,
                                   .prefill_frames = 4'800,
-                                  .prefill_timeout = std::chrono::seconds(5)},
+                                  .prefill_timeout = std::chrono::seconds(5),
+                                  .device_id = {}},
                                  std::move(device));
   ASSERT_TRUE(playback.start(0));
 
@@ -164,7 +165,8 @@ TEST(DriftValidation, TwoHourPlaybackDriftsLessThanOneFrame) {
                                  {.ring_capacity_frames = 96'000,
                                   .render_block_frames = frame_count,
                                   .prefill_frames = 4'800,
-                                  .prefill_timeout = std::chrono::seconds(5)},
+                                  .prefill_timeout = std::chrono::seconds(5),
+                                  .device_id = {}},
                                  std::move(device));
   ASSERT_TRUE(playback.start(0));
 

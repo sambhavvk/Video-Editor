@@ -4,6 +4,7 @@
 
 #include "video_editor/audio_engine/async_realtime_playback.h"
 #include "video_editor/audio_engine/miniaudio_output_device.h"
+#include "video_editor/audio_render/loudness_normalize.h"
 #include "video_editor/audio_render/original_audio_registry.h"
 #include "video_editor/audio_render/timeline_audio_renderer.h"
 #include "video_editor/caption_service/caption_service.h"
@@ -36,6 +37,7 @@
 #include <QMessageBox>
 #include <QPointer>
 #include <QSaveFile>
+#include <QSettings>
 #include <QStandardPaths>
 #include <QTimeZone>
 
@@ -51,6 +53,33 @@
 #include <utility>
 
 namespace video_editor::app {
+
+AudioDevicePollDecision
+evaluateAudioDevicePoll(const std::span<const audio::AudioDeviceInfo> previous,
+                        const std::span<const audio::AudioDeviceInfo> current,
+                        const std::string_view selected_id) noexcept {
+  const auto contains = [](const std::span<const audio::AudioDeviceInfo> devices,
+                           const std::string_view id) {
+    return std::any_of(devices.begin(), devices.end(),
+                       [id](const auto& device) { return device.connected && device.id == id; });
+  };
+  const auto has_default = [](const std::span<const audio::AudioDeviceInfo> devices) {
+    return std::any_of(devices.begin(), devices.end(),
+                       [](const auto& device) { return device.connected && device.is_default; });
+  };
+  if (!selected_id.empty()) {
+    return {.selected_missing = !contains(current, selected_id),
+            .default_missing = false,
+            .selected_recovered =
+                contains(current, selected_id) && !contains(previous, selected_id),
+            .default_recovered = false};
+  }
+  return {.selected_missing = false,
+          .default_missing = !has_default(current),
+          .selected_recovered = false,
+          .default_recovered = has_default(current) && !has_default(previous)};
+}
+
 namespace {
 
 constexpr qint64 kUiTimescale = 48'000;
@@ -142,6 +171,127 @@ QString gpuBackendName(const render::GpuBackendKind backend) {
   default:
     return QStringLiteral("GPU");
   }
+}
+
+bool isKnownPlatformPreset(const int value) noexcept {
+  return value >= static_cast<int>(export_service::PlatformPreset::ReferenceFfv1) &&
+         value <= static_cast<int>(export_service::PlatformPreset::PodcastAudioOnly);
+}
+
+QVariant effectValueForUi(const edit::EffectValue& value) {
+  if (const auto* integer = std::get_if<std::int64_t>(&value)) {
+    return QVariant::fromValue<qlonglong>(*integer);
+  }
+  if (const auto* number = std::get_if<double>(&value)) {
+    return *number;
+  }
+  if (const auto* boolean = std::get_if<bool>(&value)) {
+    return *boolean;
+  }
+  if (const auto* text = std::get_if<std::string>(&value)) {
+    return QString::fromStdString(*text);
+  }
+  if (const auto* time = std::get_if<edit::Time>(&value)) {
+    return QString::fromStdString(time->toString());
+  }
+  if (const auto* vector = std::get_if<edit::Vec2>(&value)) {
+    return QStringLiteral("%1, %2").arg(vector->x).arg(vector->y);
+  }
+  const auto& color = std::get<edit::ColorRgba>(value);
+  return QStringLiteral("%1, %2, %3, %4")
+      .arg(color.red)
+      .arg(color.green)
+      .arg(color.blue)
+      .arg(color.alpha);
+}
+
+edit::EffectValue effectValueFromUi(const edit::EffectValue& original, const QVariant& value) {
+  if (std::holds_alternative<std::int64_t>(original)) {
+    return static_cast<std::int64_t>(value.toLongLong());
+  }
+  if (std::holds_alternative<double>(original)) {
+    return value.toDouble();
+  }
+  if (std::holds_alternative<bool>(original)) {
+    return value.toBool();
+  }
+  if (std::holds_alternative<std::string>(original)) {
+    return value.toString().toStdString();
+  }
+  return original;
+}
+
+edit::EffectValue effectValueFromDouble(const edit::EffectValue& original, const double value) {
+  if (std::holds_alternative<std::int64_t>(original)) {
+    return static_cast<std::int64_t>(std::llround(value));
+  }
+  if (std::holds_alternative<double>(original)) {
+    return value;
+  }
+  return original;
+}
+
+QString effectDisplayName(const std::string& type) {
+  const QString id = QString::fromStdString(type);
+  if (id == QStringLiteral("video.color")) {
+    return QObject::tr("Color Adjustments");
+  }
+  if (id == QStringLiteral("video.crop")) {
+    return QObject::tr("Crop");
+  }
+  if (id == QStringLiteral("video.gaussian_blur")) {
+    return QObject::tr("Gaussian Blur");
+  }
+  if (id == QStringLiteral("audio.eq")) {
+    return QObject::tr("Parametric Equalizer");
+  }
+  if (id == QStringLiteral("audio.compressor")) {
+    return QObject::tr("Compressor");
+  }
+  if (id == QStringLiteral("audio.dialogue_denoise")) {
+    return QObject::tr("Dialogue Noise Reduction");
+  }
+  if (id == QStringLiteral("audio.limiter")) {
+    return QObject::tr("Limiter");
+  }
+  return id;
+}
+
+edit::Effect effectPreset(const QString& effectId) {
+  edit::Effect effect;
+  effect.type = effectId.toStdString();
+  const auto add = [&effect](const char* id, edit::EffectValue value) {
+    effect.parameters.emplace(
+        id, edit::EffectParameter{.id = id, .value = std::move(value), .keyframes = {}});
+  };
+  if (effectId == QStringLiteral("video.color")) {
+    add("exposure", 0.0);
+    add("contrast", 1.0);
+    add("saturation", 1.0);
+    add("temperature", 0.0);
+    add("tint", 0.0);
+  } else if (effectId == QStringLiteral("video.crop")) {
+    add("left", 0.0);
+    add("top", 0.0);
+    add("right", 0.0);
+    add("bottom", 0.0);
+  } else if (effectId == QStringLiteral("video.gaussian_blur")) {
+    add("radius", 0.0);
+  } else if (effectId == QStringLiteral("audio.eq")) {
+    add("frequency", 1000.0);
+    add("gain", 0.0);
+    add("q", 1.0);
+  } else if (effectId == QStringLiteral("audio.compressor")) {
+    add("threshold", -18.0);
+    add("ratio", 4.0);
+    add("attack", 10.0);
+    add("release", 100.0);
+  } else if (effectId == QStringLiteral("audio.dialogue_denoise")) {
+    add("strength", 0.5);
+  } else {
+    add("amount", 0.0);
+  }
+  return effect;
 }
 
 std::vector<std::byte> binaryPayload(const store::JournalEntry& entry) {
@@ -320,10 +470,48 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           });
   connect(&window_, &desktop_ui::EditorWindow::exportRequested, this,
           &EditorController::chooseVideoExport);
+  connect(window_.deliverPanel(), &desktop_ui::DeliverPanelWidget::destinationBrowseRequested, this,
+          [this] {
+            bool numeric = false;
+            const int value = window_.deliverPanel()->selectedPresetId().toInt(&numeric);
+            const auto platform = numeric && isKnownPlatformPreset(value)
+                                      ? static_cast<export_service::PlatformPreset>(value)
+                                      : export_service::PlatformPreset::ReferenceFfv1;
+            const auto video = export_service::reference_video_preset_for(platform).value_or(
+                export_service::VideoPreset::Ffv1Matroska);
+            const QString extension = video == export_service::VideoPreset::Vp9OpusWebm
+                                          ? QStringLiteral("webm")
+                                          : (video == export_service::VideoPreset::ProRes422HqMov
+                                                 ? QStringLiteral("mov")
+                                                 : QStringLiteral("mkv"));
+            const QString destination =
+                QFileDialog::getSaveFileName(&window_, tr("Choose export destination"),
+                                             QStringLiteral("export.%1").arg(extension),
+                                             tr("Export files (*.%1)").arg(extension));
+            if (!destination.isEmpty()) {
+              window_.deliverPanel()->setDestinationPath(destination);
+            }
+          });
   connect(&window_, &desktop_ui::EditorWindow::parameterEdited, this,
           &EditorController::updateSelectedClipProperty);
   connect(&window_, &desktop_ui::EditorWindow::keyframeToggleRequested, this,
           &EditorController::toggleSelectedClipKeyframe);
+  connect(&window_, &desktop_ui::EditorWindow::effectAddRequested, this,
+          &EditorController::addEffect);
+  connect(&window_, &desktop_ui::EditorWindow::effectParameterEdited, this,
+          &EditorController::updateSelectedEffectParameter);
+  connect(&window_, &desktop_ui::EditorWindow::effectKeyframeToggleRequested, this,
+          &EditorController::toggleSelectedEffectKeyframe);
+  connect(&window_, &desktop_ui::EditorWindow::effectKeyframeSelected, this,
+          &EditorController::selectEffectKeyframe);
+  connect(&window_, &desktop_ui::EditorWindow::effectKeyframeValueEdited, this,
+          &EditorController::updateSelectedEffectKeyframe);
+  connect(&window_, &desktop_ui::EditorWindow::effectKeyframeInterpolationEdited, this,
+          &EditorController::updateSelectedEffectInterpolation);
+  connect(&window_, &desktop_ui::EditorWindow::effectKeyframeRemoved, this,
+          &EditorController::removeSelectedEffectKeyframe);
+  connect(&window_, &desktop_ui::EditorWindow::effectKeyframeControlPointsEdited, this,
+          &EditorController::updateSelectedEffectControlPoints);
   connect(&window_, &desktop_ui::EditorWindow::addTitleRequested, this,
           &EditorController::addTitleClip);
   connect(&window_, &desktop_ui::EditorWindow::transitionActivated, this,
@@ -342,6 +530,20 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::setAudioTrackGain);
   connect(window_.audioMixer(), &desktop_ui::AudioMixerWidget::panEdited, this,
           &EditorController::setAudioTrackPan);
+  connect(window_.audioMixer(), &desktop_ui::AudioMixerWidget::trackEffectAddRequested, this,
+          &EditorController::addAudioTrackEffect);
+  connect(window_.audioMixer(), &desktop_ui::AudioMixerWidget::trackEffectRemoveRequested, this,
+          &EditorController::removeAudioTrackEffect);
+  connect(window_.audioMixer(), &desktop_ui::AudioMixerWidget::trackEffectParameterEdited, this,
+          &EditorController::updateAudioTrackEffectParameter);
+  connect(window_.audioMixer(), &desktop_ui::AudioMixerWidget::normalizationAnalyzeRequested, this,
+          &EditorController::analyzeLoudnessNormalization);
+  connect(window_.audioMixer(), &desktop_ui::AudioMixerWidget::normalizationApplyRequested, this,
+          &EditorController::applyLoudnessNormalization);
+  connect(window_.audioMixer(), &desktop_ui::AudioMixerWidget::outputDeviceSelected, this,
+          &EditorController::selectAudioOutputDevice);
+  connect(window_.audioMixer(), &desktop_ui::AudioMixerWidget::normalizationTargetChanged, this,
+          &EditorController::setNormalizationTarget);
   connect(window_.timeline(), &desktop_ui::TimelineWidget::clipActivated, this,
           [this](const QString& clipId) { setClipSelection({clipId}, clipId); });
   connect(window_.timeline(), &desktop_ui::TimelineWidget::clipSelectionChanged, this,
@@ -398,6 +600,90 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
   playback_timer_.setTimerType(Qt::PreciseTimer);
   playback_timer_.setInterval(16);
   connect(&playback_timer_, &QTimer::timeout, this, &EditorController::advancePlayback);
+  connect(&normalization_watcher_, &QFutureWatcher<NormalizationReview>::finished, this, [this] {
+    if (!normalization_completion_gate_.complete(active_normalization_generation_)) {
+      normalization_review_.valid = false;
+      window_.audioMixer()->setNormalizationBusy(false);
+      window_.audioMixer()->setNormalizationStatus(tr("Target changed; analyze again."));
+      return;
+    }
+    normalization_review_ = normalization_watcher_.result();
+    window_.audioMixer()->setNormalizationBusy(false);
+    if (!normalization_review_.valid) {
+      window_.audioMixer()->setNormalizationStatus(
+          tr("Normalization failed: %1").arg(normalization_review_.error));
+    } else {
+      window_.audioMixer()->setNormalizationReview(normalization_review_.measured_lufs,
+                                                   normalization_review_.gain_db,
+                                                   normalization_review_.target_lufs);
+    }
+  });
+  connect(
+      &audio_devices_watcher_, &QFutureWatcher<std::vector<audio::AudioDeviceInfo>>::finished, this,
+      [this] {
+        const auto devices = audio_devices_watcher_.result();
+        const auto transition = evaluateAudioDevicePoll(known_audio_devices_, devices,
+                                                        selected_audio_device_id_.toStdString());
+        const bool selectedLost = transition.selected_missing;
+        const bool defaultLost = transition.default_missing;
+        if ((selectedLost || defaultLost) &&
+            (audio_master_active_ || (audio_playback_ != nullptr && playback_rate_ != 0.0))) {
+          stopAudioPlayback();
+          audio_master_active_ = false;
+          window_.audioMixer()->setMasterMeter(0.0F, 0.0F, 0.0, false);
+          window_.showTransientMessage(
+              selectedLost
+                  ? tr("Selected audio device disconnected; playback paused until it returns.")
+                  : tr("Default audio device disconnected; playback paused until a default "
+                       "returns."),
+              8'000);
+        }
+        known_audio_devices_ = devices;
+        if ((transition.selected_recovered || transition.default_recovered) &&
+            playback_rate_ > 0.0) {
+          audio_recovery_pending_ = true;
+        }
+        if (audio_recovery_pending_ && playback_rate_ > 0.0 && !selectedLost && !defaultLost) {
+          if (audio_playback_ != nullptr) {
+            const auto diagnostics = audio_playback_->diagnostics();
+            if (diagnostics.requested_state == audio::PlaybackState::Stopped &&
+                diagnostics.playback.state == audio::PlaybackState::Stopped) {
+              audio_playback_.reset();
+            }
+          }
+          if (audio_playback_ == nullptr && startAudioMasterPlayback()) {
+            audio_recovery_pending_ = false;
+            playback_timer_.start();
+            window_.showTransientMessage(tr("Audio device recovered; realtime playback resumed."));
+          }
+        }
+        QStringList ids;
+        QStringList names;
+        for (const auto& device : devices) {
+          if (device.connected) {
+            ids.push_back(QString::fromStdString(device.id));
+            names.push_back(QString::fromStdString(device.name));
+          }
+        }
+        const bool available = audio::MiniaudioOutputDevice::available() && !ids.isEmpty();
+        const QString status =
+            available ? (selectedLost ? tr("Selected device unavailable") : tr("Ready"))
+                      : tr("No output device available");
+        window_.audioMixer()->setOutputDevices(ids, names, selected_audio_device_id_, available,
+                                               status);
+      });
+  QSettings audioSettings;
+  selected_audio_device_id_ =
+      audioSettings.value(QStringLiteral("audio/outputDeviceId")).toString();
+  normalization_target_lufs_ = std::clamp(
+      audioSettings.value(QStringLiteral("audio/normalizationTargetLufs"), -14.0).toDouble(), -24.0,
+      -9.0);
+  window_.audioMixer()->setNormalizationTargetLufs(normalization_target_lufs_);
+  audio_device_poll_timer_.setInterval(1'000);
+  connect(&audio_device_poll_timer_, &QTimer::timeout, this,
+          &EditorController::refreshAudioDevices);
+  audio_device_poll_timer_.start();
+  refreshAudioDevices();
   newProject();
 }
 
@@ -845,18 +1131,35 @@ void EditorController::chooseVideoExport(const QString& presetId) {
     window_.showTransientMessage(tr("Cancelling export after the current frame…"));
     return;
   }
-  const auto preset = presetId == QStringLiteral("master.prores")
-                          ? export_service::VideoPreset::ProRes422HqMov
-                          : export_service::VideoPreset::Ffv1Matroska;
-  const QString extension = preset == export_service::VideoPreset::Ffv1Matroska
-                                ? QStringLiteral("mkv")
-                                : QStringLiteral("mov");
-  const QString filter = preset == export_service::VideoPreset::Ffv1Matroska
-                             ? tr("Matroska video (*.mkv)")
-                             : tr("QuickTime movie (*.mov)");
-  const QString destination = QFileDialog::getSaveFileName(
-      &window_, tr("Export video master"), QStringLiteral("export.%1").arg(extension), filter);
+  bool numeric_preset = false;
+  const auto parsed_preset = presetId.toInt(&numeric_preset);
+  const bool legacy_prores = presetId == QStringLiteral("master.prores");
+  const auto platform = numeric_preset && isKnownPlatformPreset(parsed_preset)
+                            ? static_cast<export_service::PlatformPreset>(parsed_preset)
+                            : (legacy_prores ? export_service::PlatformPreset::ReferenceProRes
+                                             : export_service::PlatformPreset::ReferenceFfv1);
+  const auto preset = export_service::reference_video_preset_for(platform).value_or(
+      export_service::VideoPreset::Ffv1Matroska);
+  const bool webm = preset == export_service::VideoPreset::Vp9OpusWebm;
+  const QString extension =
+      webm ? QStringLiteral("webm")
+           : (preset == export_service::VideoPreset::Ffv1Matroska ? QStringLiteral("mkv")
+                                                                  : QStringLiteral("mov"));
+  const QString filter =
+      webm ? tr("WebM video (*.webm)")
+           : (preset == export_service::VideoPreset::Ffv1Matroska ? tr("Matroska video (*.mkv)")
+                                                                  : tr("QuickTime movie (*.mov)"));
+  const QString default_name = platform == export_service::PlatformPreset::PodcastAudioOnly
+                                   ? QStringLiteral("podcast.webm")
+                                   : QStringLiteral("export.%1").arg(extension);
+  QString destination = window_.deliverPanel()->destinationPath();
+  if (destination.isEmpty() ||
+      !destination.endsWith(QStringLiteral(".%1").arg(extension), Qt::CaseInsensitive)) {
+    destination =
+        QFileDialog::getSaveFileName(&window_, tr("Export creator delivery"), default_name, filter);
+  }
   if (!destination.isEmpty()) {
+    window_.deliverPanel()->setDestinationPath(destination);
     (void)startVideoExport(pathFromQString(destination), presetId, true);
   }
 }
@@ -873,11 +1176,22 @@ bool EditorController::startVideoExport(const std::filesystem::path& destination
     return false;
   }
 
-  const auto preset = presetId == QStringLiteral("master.prores")
-                          ? export_service::VideoPreset::ProRes422HqMov
-                          : export_service::VideoPreset::Ffv1Matroska;
+  bool numeric_preset = false;
+  const auto parsed_preset = presetId.toInt(&numeric_preset);
+  const bool legacy_prores = presetId == QStringLiteral("master.prores");
+  if (numeric_preset && !isKnownPlatformPreset(parsed_preset)) {
+    showError(tr("Could not export"), tr("The selected export preset is not recognized."));
+    return false;
+  }
+  const auto platform = numeric_preset && isKnownPlatformPreset(parsed_preset)
+                            ? static_cast<export_service::PlatformPreset>(parsed_preset)
+                            : (legacy_prores ? export_service::PlatformPreset::ReferenceProRes
+                                             : export_service::PlatformPreset::ReferenceFfv1);
+  const auto preset = export_service::reference_video_preset_for(platform).value_or(
+      export_service::VideoPreset::Ffv1Matroska);
   const export_service::PresetInfo preset_details = export_service::preset_info(preset);
-  if (!preset_details.available) {
+  const bool audio_only = platform == export_service::PlatformPreset::PodcastAudioOnly;
+  if (!audio_only && !preset_details.available) {
     showError(tr("Encoder unavailable"),
               tr("The selected %1 encoder is not available in this build.")
                   .arg(QString::fromStdString(preset_details.display_name)));
@@ -896,6 +1210,27 @@ bool EditorController::startVideoExport(const std::filesystem::path& destination
   auto export_audio_renderer =
       std::make_shared<audio_render::TimelineAudioRenderer>(audio_registry_);
   auto snapshot = std::move(snapshot_result).value();
+  const auto panel = window_.deliverPanel();
+  const auto caption_mode_key = panel->captionModeKey();
+  const auto caption_mode = caption_mode_key == QStringLiteral("burn_in")
+                                ? export_service::CaptionExportMode::BurnIn
+                                : (caption_mode_key == QStringLiteral("sidecar")
+                                       ? export_service::CaptionExportMode::Sidecar
+                                       : (caption_mode_key == QStringLiteral("burn_in_and_sidecar")
+                                              ? export_service::CaptionExportMode::BurnInAndSidecar
+                                              : export_service::CaptionExportMode::None));
+  const auto sidecar_format = panel->sidecarFormatKey() == QStringLiteral("vtt")
+                                  ? export_service::SidecarFormat::WebVtt
+                                  : export_service::SidecarFormat::Srt;
+  const auto override_width = static_cast<std::uint32_t>(std::max(panel->overrideWidth(), 0));
+  const auto override_height = static_cast<std::uint32_t>(std::max(panel->overrideHeight(), 0));
+  const auto override_frame_rate_num = panel->overrideFrameRateNum();
+  const auto override_frame_rate_den = panel->overrideFrameRateDen();
+  const auto override_audio_bitrate = panel->overrideAudioBitrate();
+  const auto override_video_bitrate = panel->overrideVideoBitrate();
+  const auto video_quality = panel->overrideVideoQuality();
+  const bool prefer_hardware_encoder = panel->preferHardwareEncoder();
+  const auto captions = snapshot.sequence().captions;
   const auto output_path = destination;
   const QString output_display = qStringFromPath(destination);
   export_stop_source_ = std::stop_source{};
@@ -928,53 +1263,86 @@ bool EditorController::startVideoExport(const std::filesystem::path& destination
               emit videoExportFinished(false, output_display, outcome.error);
             }
           });
-  auto future = QtConcurrent::run([snapshot = std::move(snapshot),
-                                   export_renderer = std::move(export_renderer), output_path,
-                                   export_audio_renderer = std::move(export_audio_renderer), preset,
-                                   stop_token, guard, overwriteExisting]() mutable {
-    int last_percent = -1;
-    export_service::ExportRequest request{
-        .snapshot = std::move(snapshot),
-        .renderer = std::move(export_renderer),
-        .audio_renderer = std::move(export_audio_renderer),
-        .destination = output_path,
-        .preset = preset,
-        .overwrite_existing = overwriteExisting,
-        .include_audio = true,
-        .cancellation = stop_token,
-        .progress = [guard, &last_percent](const export_service::ExportProgress& progress) {
-          const int percent =
-              std::clamp(static_cast<int>(std::lround(progress.fraction * 100.0)), 0, 100);
-          if (percent == last_percent || (percent != 100 && percent % 2 != 0)) {
-            return;
-          }
-          last_percent = percent;
-          if (guard) {
-            QMetaObject::invokeMethod(
-                guard.data(),
-                [guard, percent] {
+  auto future = QtConcurrent::run(
+      [snapshot = std::move(snapshot), export_renderer = std::move(export_renderer), output_path,
+       export_audio_renderer = std::move(export_audio_renderer), preset, platform, caption_mode,
+       sidecar_format, override_width, override_height, override_frame_rate_num,
+       override_frame_rate_den, override_audio_bitrate, override_video_bitrate, video_quality,
+       prefer_hardware_encoder, captions, stop_token, guard, overwriteExisting]() mutable {
+        int last_percent = -1;
+        export_service::ExportRequest request{
+            .snapshot = std::move(snapshot),
+            .renderer = std::move(export_renderer),
+            .audio_renderer = std::move(export_audio_renderer),
+            .destination = output_path,
+            .preset = preset,
+            .overwrite_existing = overwriteExisting,
+            .include_audio = true,
+            .prefer_hardware_encoder = prefer_hardware_encoder,
+            .cancellation = stop_token,
+            .progress =
+                [guard, &last_percent](const export_service::ExportProgress& progress) {
+                  if (progress.restarted_after_hardware_fallback) {
+                    last_percent = -1;
+                    if (guard) {
+                      QMetaObject::invokeMethod(
+                          guard.data(),
+                          [guard] {
+                            if (guard) {
+                              guard->window_.deliverPanel()->setExportRunning(true, 0);
+                              guard->window_.showTransientMessage(
+                                  QObject::tr(
+                                      "Hardware VP9 failed; restarting export in software…"),
+                                  0);
+                            }
+                          },
+                          Qt::QueuedConnection);
+                    }
+                    return;
+                  }
+                  const int percent =
+                      std::clamp(static_cast<int>(std::lround(progress.fraction * 100.0)), 0, 100);
+                  if (percent == last_percent || (percent != 100 && percent % 2 != 0)) {
+                    return;
+                  }
+                  last_percent = percent;
                   if (guard) {
-                    guard->window_.deliverPanel()->setExportRunning(true, percent);
+                    QMetaObject::invokeMethod(
+                        guard.data(),
+                        [guard, percent] {
+                          if (guard) {
+                            guard->window_.deliverPanel()->setExportRunning(true, percent);
+                          }
+                        },
+                        Qt::QueuedConnection);
                   }
                 },
-                Qt::QueuedConnection);
-          }
-        }};
-    auto outcome = export_service::export_video(request);
-    if (!outcome) {
-      return VideoExportOutcome{.succeeded = false,
-                                .cancelled = outcome.error().code ==
-                                             export_service::ExportErrorCode::Cancelled,
-                                .frame_count = 0,
-                                .audio_sample_count = 0,
-                                .error = QString::fromStdString(outcome.error().message)};
-    }
-    return VideoExportOutcome{.succeeded = true,
-                              .cancelled = false,
-                              .frame_count = outcome.value().frame_count,
-                              .audio_sample_count = outcome.value().audio_sample_count,
-                              .error = {}};
-  });
+            .platform_preset = platform,
+            .caption_mode = caption_mode,
+            .sidecar_format = sidecar_format,
+            .override_width = override_width,
+            .override_height = override_height,
+            .override_frame_rate_num = override_frame_rate_num,
+            .override_frame_rate_den = override_frame_rate_den,
+            .override_audio_bitrate = override_audio_bitrate,
+            .override_video_bitrate = override_video_bitrate,
+            .video_quality = video_quality,
+            .captions = captions};
+        auto outcome = export_service::export_video(request);
+        if (!outcome) {
+          return VideoExportOutcome{.succeeded = false,
+                                    .cancelled = outcome.error().code ==
+                                                 export_service::ExportErrorCode::Cancelled,
+                                    .frame_count = 0,
+                                    .audio_sample_count = 0,
+                                    .error = QString::fromStdString(outcome.error().message)};
+        }
+        return VideoExportOutcome{.succeeded = true,
+                                  .cancelled = false,
+                                  .frame_count = outcome.value().frame_count,
+                                  .audio_sample_count = outcome.value().audio_sample_count,
+                                  .error = {}};
+      });
   export_future_ = future;
   watcher->setFuture(future);
   return true;
@@ -1623,6 +1991,7 @@ void EditorController::seek(const qint64 position) {
 void EditorController::setPlaybackRate(const double rate) {
   playback_rate_ = rate;
   if (std::abs(playback_rate_) < std::numeric_limits<double>::epsilon()) {
+    audio_recovery_pending_ = false;
     audio_start_pending_ = false;
     if (audio_playback_ != nullptr && !audio_session_stale_ &&
         audio_playback_->requested_state() != audio::PlaybackState::Stopped) {
@@ -1812,8 +2181,36 @@ void EditorController::advancePlayback() {
           const float linear = std::max(c == 0 ? meter.peak[c] : meter.peak[c], 1.0e-12F);
           peak_dbfs.push_back(20.0F * std::log10(linear));
         }
-        // Push to the first audio strip (master bus meter for now).
-        window_.audioMixer()->setMeterLevels(0, peak_dbfs);
+        const float peak = std::max(meter.peak[0], meter.peak[1]);
+        const float rms = std::max(meter.rms[0], meter.rms[1]);
+        const auto loudness = audio_playback_->read_loudness();
+        const auto toDb = [](const float value) {
+          return 20.0F * std::log10(std::max(value, 1.0e-12F));
+        };
+        window_.audioMixer()->setMasterMeter(toDb(peak), toDb(rms), loudness.integrated_lufs,
+                                             meter.sample_count != 0U, loudness.integrated_valid,
+                                             loudness.stale);
+        if (playback_audio_renderer_ != nullptr) {
+          // The renderer may be several blocks ahead in the pre-render ring.
+          // Select telemetry using the latency-compensated device master clock,
+          // never the most recently completed future block.
+          const auto track_meters =
+              playback_audio_renderer_->trackMetersAt(playback.sample_counter);
+          QVector<desktop_ui::AudioTrackMeterView> meter_views;
+          meter_views.reserve(static_cast<qsizetype>(track_meters.tracks.size()));
+          for (const auto& track_meter : track_meters.tracks) {
+            desktop_ui::AudioTrackMeterView view;
+            view.id = QString::fromStdString(track_meter.track_id.toString());
+            view.active = track_meter.active;
+            view.stale = track_meters.stale;
+            for (std::size_t channel = 0; channel < 2U; ++channel) {
+              view.peak_dbfs[channel] = toDb(track_meter.peak[channel]);
+              view.rms_dbfs[channel] = toDb(track_meter.rms[channel]);
+            }
+            meter_views.push_back(std::move(view));
+          }
+          window_.audioMixer()->setTrackMeters(meter_views);
+        }
       }
     }
   }
@@ -2036,17 +2433,15 @@ void EditorController::updateSelectedClipProperty(const QString& parameterId,
 
   if (parameterId == QStringLiteral("speed") || parameterId == QStringLiteral("reverse")) {
     // Speed is expressed as a percentage of normal in the UI (100 = 1x).
-    const double speed_percent = (parameterId == QStringLiteral("speed"))
-                                     ? value.toDouble()
-                                     : selected_speed_percent_;
-    const bool reversed = (parameterId == QStringLiteral("reverse"))
-                               ? value.toBool()
-                               : selected->reversed;
+    const double speed_percent =
+        (parameterId == QStringLiteral("speed")) ? value.toDouble() : selected_speed_percent_;
+    const bool reversed =
+        (parameterId == QStringLiteral("reverse")) ? value.toBool() : selected->reversed;
     selected_speed_percent_ = speed_percent;
     // Convert percentage to an exact rational rate. 100% = 1/1, 200% = 2/1,
     // 50% = 1/2. Use a reduced fraction of (percent, 100).
-    const auto percent = static_cast<std::uint32_t>(std::clamp<std::int64_t>(
-        std::llround(speed_percent), 1, 100'000));
+    const auto percent = static_cast<std::uint32_t>(
+        std::clamp<std::int64_t>(std::llround(speed_percent), 1, 100'000));
     std::uint32_t num = percent;
     std::uint32_t den = 100U;
     const auto g = static_cast<std::uint32_t>(std::gcd(num, den));
@@ -2057,9 +2452,9 @@ void EditorController::updateSelectedClipProperty(const QString& parameterId,
     const edit::Rate rate{num, den};
     (void)apply(
         edit::EditCommand{.operation = edit::SetClipSpeedCommand{.sequence_id = sequence->id,
-                                                                   .clip_id = selected->id,
-                                                                   .playback_rate = rate,
-                                                                   .reversed = reversed},
+                                                                 .clip_id = selected->id,
+                                                                 .playback_rate = rate,
+                                                                 .reversed = reversed},
                           .coalescing_key = coalescing_key},
         tr("Could not update the selected clip speed"));
     return;
@@ -2067,8 +2462,7 @@ void EditorController::updateSelectedClipProperty(const QString& parameterId,
 
   if (parameterId == QStringLiteral("titleText") || parameterId == QStringLiteral("titleFont") ||
       parameterId == QStringLiteral("titleSize") || parameterId == QStringLiteral("titleAlign") ||
-      parameterId == QStringLiteral("titleBold") ||
-      parameterId == QStringLiteral("titleItalic")) {
+      parameterId == QStringLiteral("titleBold") || parameterId == QStringLiteral("titleItalic")) {
     if (selected->kind != edit::ClipKind::Title || !selected->title.has_value()) {
       return;
     }
@@ -2084,7 +2478,7 @@ void EditorController::updateSelectedClipProperty(const QString& parameterId,
       title.horizontal_alignment =
           align == QStringLiteral("left")    ? edit::TitleHorizontalAlignment::Left
           : align == QStringLiteral("right") ? edit::TitleHorizontalAlignment::Right
-                                              : edit::TitleHorizontalAlignment::Center;
+                                             : edit::TitleHorizontalAlignment::Center;
     } else if (parameterId == QStringLiteral("titleBold")) {
       title.bold = value.toBool();
     } else if (parameterId == QStringLiteral("titleItalic")) {
@@ -2092,8 +2486,8 @@ void EditorController::updateSelectedClipProperty(const QString& parameterId,
     }
     (void)apply(
         edit::EditCommand{.operation = edit::SetClipTitleCommand{.sequence_id = sequence->id,
-                                                                    .clip_id = selected->id,
-                                                                    .title = title},
+                                                                 .clip_id = selected->id,
+                                                                 .title = title},
                           .coalescing_key = coalescing_key},
         tr("Could not update the title"));
   }
@@ -2113,7 +2507,15 @@ void EditorController::toggleSelectedClipKeyframe(const QString& parameterId) {
   // for now keyframing is wired only for effect parameters that carry the
   // same id. A full keyframe-curve editor is a follow-up; this toggles a
   // keyframe at the current playhead for the named parameter.
-  const edit::Time key_time = playheadTime();
+  // Effect keyframes are clip-local offsets.  Moving a clip therefore moves its
+  // animation with it; the playhead is converted to that local coordinate here.
+  const edit::Time playhead = playheadTime();
+  const edit::Time clip_start = clip->timeline_range.start.rescaledTo(
+      playhead.timescale(), edit::RoundingMode::NearestTiesEven);
+  const edit::Time key_time =
+      std::clamp(playhead - clip_start, edit::Time{},
+                 clip->timeline_range.duration.rescaledTo(playhead.timescale(),
+                                                          edit::RoundingMode::NearestTiesEven));
   for (const auto& effect : clip->effects) {
     auto it = effect.parameters.find(parameterId.toStdString());
     if (it == effect.parameters.end()) {
@@ -2122,7 +2524,7 @@ void EditorController::toggleSelectedClipKeyframe(const QString& parameterId) {
     edit::EffectParameter parameter = it->second;
     const auto existing =
         std::find_if(parameter.keyframes.begin(), parameter.keyframes.end(),
-                      [&](const edit::Keyframe& key) { return key.time == key_time; });
+                     [&](const edit::Keyframe& key) { return key.time == key_time; });
     if (existing != parameter.keyframes.end()) {
       parameter.keyframes.erase(existing);
     } else {
@@ -2132,17 +2534,346 @@ void EditorController::toggleSelectedClipKeyframe(const QString& parameterId) {
       key.interpolation = edit::KeyframeInterpolation::Linear;
       parameter.keyframes.push_back(key);
       std::sort(parameter.keyframes.begin(), parameter.keyframes.end(),
-                [](const edit::Keyframe& a, const edit::Keyframe& b) {
-                  return a.time < b.time;
-                });
+                [](const edit::Keyframe& a, const edit::Keyframe& b) { return a.time < b.time; });
     }
     (void)apply(
-        edit::EditCommand{.operation = edit::SetClipEffectParameterCommand{
-                              .sequence_id = sequence->id, .clip_id = clip->id,
-                              .effect_id = effect.id, .parameter = parameter}},
+        edit::EditCommand{.operation =
+                              edit::SetClipEffectParameterCommand{.sequence_id = sequence->id,
+                                                                  .clip_id = clip->id,
+                                                                  .effect_id = effect.id,
+                                                                  .parameter = parameter},
+                          .coalescing_key = {}},
         tr("Could not toggle the keyframe"));
     return;
   }
+}
+
+void EditorController::addEffect(const QString& effectId) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || !active_clip_id_.has_value()) {
+    window_.showTransientMessage(tr("Select a clip before adding an effect"));
+    return;
+  }
+  if (effectId.startsWith(QStringLiteral("transition."))) {
+    window_.showTransientMessage(tr("Transitions are added by dragging them between clips"));
+    return;
+  }
+  const edit::Clip* clip = edit::findClip(*sequence, *active_clip_id_);
+  if (clip == nullptr) {
+    return;
+  }
+  edit::Effect effect = effectPreset(effectId);
+  const bool audio_effect = effectId.startsWith(QStringLiteral("audio."));
+  if (audio_effect && clip->kind != edit::ClipKind::Audio) {
+    window_.showTransientMessage(tr("Select an audio clip for this effect"));
+    return;
+  }
+  if (!audio_effect && clip->kind != edit::ClipKind::Video && clip->kind != edit::ClipKind::Title) {
+    window_.showTransientMessage(tr("Select a video clip for this effect"));
+    return;
+  }
+  (void)apply(
+      edit::EditCommand{.operation = edit::AddClipEffectCommand{.sequence_id = sequence->id,
+                                                                .clip_id = clip->id,
+                                                                .effect = std::move(effect)},
+                        .coalescing_key = {}},
+      tr("Could not add the effect"));
+}
+
+void EditorController::updateSelectedEffectParameter(const QString& effectId,
+                                                     const QString& parameterId,
+                                                     const QVariant& value) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || !active_clip_id_.has_value()) {
+    return;
+  }
+  const auto parsed_effect = parseId(effectId);
+  const edit::Clip* clip = edit::findClip(*sequence, *active_clip_id_);
+  if (clip == nullptr || !parsed_effect.has_value()) {
+    return;
+  }
+  const auto effect = std::find_if(
+      clip->effects.cbegin(), clip->effects.cend(),
+      [&parsed_effect](const auto& candidate) { return candidate.id == *parsed_effect; });
+  if (effect == clip->effects.cend()) {
+    return;
+  }
+  const auto parameter = effect->parameters.find(parameterId.toStdString());
+  if (parameter == effect->parameters.end()) {
+    return;
+  }
+  edit::EffectParameter updated = parameter->second;
+  updated.value = effectValueFromUi(updated.value, value);
+  (void)apply(
+      edit::EditCommand{
+          .operation = edit::SetClipEffectParameterCommand{.sequence_id = sequence->id,
+                                                           .clip_id = clip->id,
+                                                           .effect_id = effect->id,
+                                                           .parameter = std::move(updated)},
+          .coalescing_key = "effect:" + effectId.toStdString() + ":" + parameterId.toStdString()},
+      tr("Could not update the effect parameter"));
+}
+
+void EditorController::toggleSelectedEffectKeyframe(const QString& effectId,
+                                                    const QString& parameterId) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || !active_clip_id_.has_value()) {
+    return;
+  }
+  const auto parsed_effect = parseId(effectId);
+  const edit::Clip* clip = edit::findClip(*sequence, *active_clip_id_);
+  if (clip == nullptr || !parsed_effect.has_value()) {
+    return;
+  }
+  const auto effect = std::find_if(
+      clip->effects.cbegin(), clip->effects.cend(),
+      [&parsed_effect](const auto& candidate) { return candidate.id == *parsed_effect; });
+  if (effect == clip->effects.cend()) {
+    return;
+  }
+  const auto found = effect->parameters.find(parameterId.toStdString());
+  if (found == effect->parameters.end()) {
+    return;
+  }
+  edit::EffectParameter updated = found->second;
+  const edit::Time playhead = playheadTime();
+  const edit::Time clip_start = clip->timeline_range.start.rescaledTo(
+      playhead.timescale(), edit::RoundingMode::NearestTiesEven);
+  const edit::Time clip_duration = clip->timeline_range.duration.rescaledTo(
+      playhead.timescale(), edit::RoundingMode::NearestTiesEven);
+  const edit::Time max_keyframe_time =
+      clip_duration.isZero() ? edit::Time{}
+                             : clip_duration - edit::Time(1, clip_duration.timescale());
+  const edit::Time current_time =
+      std::clamp(playhead - clip_start, edit::Time{}, max_keyframe_time);
+  const auto existing =
+      std::find_if(updated.keyframes.begin(), updated.keyframes.end(),
+                   [&current_time](const auto& keyframe) { return keyframe.time == current_time; });
+  if (existing == updated.keyframes.end()) {
+    updated.keyframes.push_back({.time = current_time,
+                                 .value = updated.value,
+                                 .interpolation = edit::KeyframeInterpolation::Linear});
+  } else {
+    updated.keyframes.erase(existing);
+  }
+  std::sort(updated.keyframes.begin(), updated.keyframes.end(),
+            [](const auto& left, const auto& right) { return left.time < right.time; });
+  (void)apply(
+      edit::EditCommand{.operation =
+                            edit::SetClipEffectParameterCommand{.sequence_id = sequence->id,
+                                                                .clip_id = clip->id,
+                                                                .effect_id = effect->id,
+                                                                .parameter = std::move(updated)},
+                        .coalescing_key = {}},
+      tr("Could not toggle the effect keyframe"));
+}
+
+void EditorController::selectEffectKeyframe(const QString& effectId, const QString& parameterId,
+                                            const qint64 time) {
+  Q_UNUSED(effectId)
+  Q_UNUSED(parameterId)
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || !active_clip_id_.has_value()) {
+    return;
+  }
+  const edit::Clip* clip = edit::findClip(*sequence, *active_clip_id_);
+  if (clip == nullptr) {
+    return;
+  }
+  const edit::Time local_time = timelineTime(std::max<qint64>(0, time));
+  const edit::Time duration = clip->timeline_range.duration;
+  const edit::Time max_local =
+      duration.isZero() ? edit::Time{} : duration - edit::Time(1, duration.timescale());
+  const edit::Time clamped = std::clamp(local_time, edit::Time{}, max_local);
+  seek(timelineValue(clip->timeline_range.start + clamped));
+}
+
+void EditorController::updateSelectedEffectKeyframe(const QString& effectId,
+                                                    const QString& parameterId,
+                                                    const QString& keyframeId, const qint64 time,
+                                                    const double value) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || !active_clip_id_.has_value()) {
+    return;
+  }
+  const auto parsed_effect = parseId(effectId);
+  const auto parsed_keyframe = parseId(keyframeId);
+  const edit::Clip* clip = edit::findClip(*sequence, *active_clip_id_);
+  if (clip == nullptr || !parsed_effect.has_value() || !parsed_keyframe.has_value()) {
+    return;
+  }
+  const auto effect = std::find_if(
+      clip->effects.cbegin(), clip->effects.cend(),
+      [&parsed_effect](const auto& candidate) { return candidate.id == *parsed_effect; });
+  if (effect == clip->effects.cend()) {
+    return;
+  }
+  const auto found = effect->parameters.find(parameterId.toStdString());
+  if (found == effect->parameters.end()) {
+    return;
+  }
+  edit::EffectParameter updated = found->second;
+  const auto keyframe = std::find_if(
+      updated.keyframes.begin(), updated.keyframes.end(),
+      [&parsed_keyframe](const auto& candidate) { return candidate.id == *parsed_keyframe; });
+  if (keyframe == updated.keyframes.end()) {
+    return;
+  }
+  const edit::Time clip_duration = clip->timeline_range.duration.rescaledTo(
+      timeline_time_scale_, edit::RoundingMode::NearestTiesEven);
+  const edit::Time new_time =
+      timelineTime(std::clamp<qint64>(time, 0, timelineValue(clip_duration)));
+  const bool duplicate =
+      std::any_of(updated.keyframes.cbegin(), updated.keyframes.cend(),
+                  [&new_time, &parsed_keyframe](const auto& candidate) {
+                    return candidate.id != *parsed_keyframe && candidate.time == new_time;
+                  });
+  if (duplicate) {
+    window_.showTransientMessage(tr("Two keyframes cannot occupy the same time"));
+    return;
+  }
+  keyframe->time = new_time;
+  keyframe->value = effectValueFromDouble(keyframe->value, value);
+  std::sort(updated.keyframes.begin(), updated.keyframes.end(),
+            [](const auto& left, const auto& right) { return left.time < right.time; });
+  (void)apply(
+      edit::EditCommand{.operation =
+                            edit::SetClipEffectParameterCommand{.sequence_id = sequence->id,
+                                                                .clip_id = clip->id,
+                                                                .effect_id = effect->id,
+                                                                .parameter = std::move(updated)},
+                        .coalescing_key = {}},
+      tr("Could not update the keyframe"));
+}
+
+void EditorController::updateSelectedEffectInterpolation(
+    const QString& effectId, const QString& parameterId, const QString& keyframeId,
+    const desktop_ui::KeyframeInterpolationView interpolation) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || !active_clip_id_.has_value()) {
+    return;
+  }
+  const auto parsed_effect = parseId(effectId);
+  const auto parsed_keyframe = parseId(keyframeId);
+  const edit::Clip* clip = edit::findClip(*sequence, *active_clip_id_);
+  if (clip == nullptr || !parsed_effect.has_value() || !parsed_keyframe.has_value()) {
+    return;
+  }
+  const auto effect = std::find_if(
+      clip->effects.cbegin(), clip->effects.cend(),
+      [&parsed_effect](const auto& candidate) { return candidate.id == *parsed_effect; });
+  if (effect == clip->effects.cend()) {
+    return;
+  }
+  const auto found = effect->parameters.find(parameterId.toStdString());
+  if (found == effect->parameters.end()) {
+    return;
+  }
+  edit::EffectParameter updated = found->second;
+  const auto keyframe = std::find_if(
+      updated.keyframes.begin(), updated.keyframes.end(),
+      [&parsed_keyframe](const auto& candidate) { return candidate.id == *parsed_keyframe; });
+  if (keyframe == updated.keyframes.end()) {
+    return;
+  }
+  keyframe->interpolation = interpolation == desktop_ui::KeyframeInterpolationView::Hold
+                                ? edit::KeyframeInterpolation::Hold
+                            : interpolation == desktop_ui::KeyframeInterpolationView::Bezier
+                                ? edit::KeyframeInterpolation::Bezier
+                                : edit::KeyframeInterpolation::Linear;
+  (void)apply(
+      edit::EditCommand{.operation =
+                            edit::SetClipEffectParameterCommand{.sequence_id = sequence->id,
+                                                                .clip_id = clip->id,
+                                                                .effect_id = effect->id,
+                                                                .parameter = std::move(updated)},
+                        .coalescing_key = {}},
+      tr("Could not update keyframe interpolation"));
+}
+
+void EditorController::removeSelectedEffectKeyframe(const QString& effectId,
+                                                    const QString& parameterId,
+                                                    const QString& keyframeId) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || !active_clip_id_.has_value()) {
+    return;
+  }
+  const auto parsed_effect = parseId(effectId);
+  const auto parsed_keyframe = parseId(keyframeId);
+  const edit::Clip* clip = edit::findClip(*sequence, *active_clip_id_);
+  if (clip == nullptr || !parsed_effect.has_value() || !parsed_keyframe.has_value()) {
+    return;
+  }
+  const auto effect = std::find_if(
+      clip->effects.cbegin(), clip->effects.cend(),
+      [&parsed_effect](const auto& candidate) { return candidate.id == *parsed_effect; });
+  if (effect == clip->effects.cend()) {
+    return;
+  }
+  const auto found = effect->parameters.find(parameterId.toStdString());
+  if (found == effect->parameters.end()) {
+    return;
+  }
+  edit::EffectParameter updated = found->second;
+  const auto removed = std::remove_if(
+      updated.keyframes.begin(), updated.keyframes.end(),
+      [&parsed_keyframe](const auto& candidate) { return candidate.id == *parsed_keyframe; });
+  if (removed == updated.keyframes.end()) {
+    return;
+  }
+  updated.keyframes.erase(removed, updated.keyframes.end());
+  (void)apply(
+      edit::EditCommand{.operation =
+                            edit::SetClipEffectParameterCommand{.sequence_id = sequence->id,
+                                                                .clip_id = clip->id,
+                                                                .effect_id = effect->id,
+                                                                .parameter = std::move(updated)},
+                        .coalescing_key = {}},
+      tr("Could not delete the keyframe"));
+}
+
+void EditorController::updateSelectedEffectControlPoints(const QString& effectId,
+                                                         const QString& parameterId,
+                                                         const QString& keyframeId,
+                                                         const QPointF& incoming,
+                                                         const QPointF& outgoing) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || !active_clip_id_.has_value()) {
+    return;
+  }
+  const auto parsed_effect = parseId(effectId);
+  const auto parsed_keyframe = parseId(keyframeId);
+  const edit::Clip* clip = edit::findClip(*sequence, *active_clip_id_);
+  if (clip == nullptr || !parsed_effect.has_value() || !parsed_keyframe.has_value()) {
+    return;
+  }
+  const auto effect = std::find_if(
+      clip->effects.cbegin(), clip->effects.cend(),
+      [&parsed_effect](const auto& candidate) { return candidate.id == *parsed_effect; });
+  if (effect == clip->effects.cend()) {
+    return;
+  }
+  const auto found = effect->parameters.find(parameterId.toStdString());
+  if (found == effect->parameters.end()) {
+    return;
+  }
+  edit::EffectParameter updated = found->second;
+  const auto keyframe = std::find_if(
+      updated.keyframes.begin(), updated.keyframes.end(),
+      [&parsed_keyframe](const auto& candidate) { return candidate.id == *parsed_keyframe; });
+  if (keyframe == updated.keyframes.end()) {
+    return;
+  }
+  keyframe->incoming_control = {.x = incoming.x(), .y = incoming.y()};
+  keyframe->outgoing_control = {.x = outgoing.x(), .y = outgoing.y()};
+  (void)apply(
+      edit::EditCommand{.operation =
+                            edit::SetClipEffectParameterCommand{.sequence_id = sequence->id,
+                                                                .clip_id = clip->id,
+                                                                .effect_id = effect->id,
+                                                                .parameter = std::move(updated)},
+                        .coalescing_key = {}},
+      tr("Could not update keyframe curve handles"));
 }
 
 void EditorController::addTitleClip() {
@@ -2172,10 +2903,9 @@ void EditorController::addTitleClip() {
     window_.showTransientMessage(tr("No unlocked video track for a title"));
     return;
   }
-  edit::InsertClipCommand insert{.sequence_id = sequence->id,
-                                  .track_id = track_id,
-                                  .clip = std::move(clip)};
-  (void)apply(edit::EditCommand{.operation = std::move(insert)},
+  edit::InsertClipCommand insert{
+      .sequence_id = sequence->id, .track_id = track_id, .clip = std::move(clip)};
+  (void)apply(edit::EditCommand{.operation = std::move(insert), .coalescing_key = {}},
               tr("Could not add a title"));
 }
 
@@ -2204,7 +2934,8 @@ void EditorController::updateTransitionDuration(const QString& transitionId,
   updated.range = edit::TimeRange(end - new_duration, new_duration);
   (void)apply(
       edit::EditCommand{.operation = edit::UpdateTransitionCommand{.sequence_id = sequence->id,
-                                                                     .transition = updated}},
+                                                                   .transition = updated},
+                        .coalescing_key = {}},
       tr("Could not update the transition duration"));
 }
 
@@ -2218,8 +2949,9 @@ void EditorController::removeTransition(const QString& transitionId) {
     return;
   }
   (void)apply(
-      edit::EditCommand{.operation = edit::RemoveTransitionCommand{
-          .sequence_id = sequence->id, .transition_id = *parsed_id}},
+      edit::EditCommand{.operation = edit::RemoveTransitionCommand{.sequence_id = sequence->id,
+                                                                   .transition_id = *parsed_id},
+                        .coalescing_key = {}},
       tr("Could not remove the transition"));
   selected_transition_id_.reset();
 }
@@ -2242,7 +2974,8 @@ void EditorController::changeTransitionPreset(const QString& transitionId, const
                                                           : edit::TransitionKind::CrossDissolve;
   (void)apply(
       edit::EditCommand{.operation = edit::UpdateTransitionCommand{.sequence_id = sequence->id,
-                                                                     .transition = updated}},
+                                                                   .transition = updated},
+                        .coalescing_key = {}},
       tr("Could not change the transition preset"));
 }
 
@@ -2313,11 +3046,10 @@ void EditorController::setAudioTrackGain(const int trackIndex, const double gain
       continue;
     }
     (void)apply(
-        edit::EditCommand{.operation = edit::SetTrackAudioMixCommand{
-                              .sequence_id = sequence->id,
-                              .track_id = track.id,
-                              .gain_db = gainDb,
-                              .pan = track.audio_pan},
+        edit::EditCommand{.operation = edit::SetTrackAudioMixCommand{.sequence_id = sequence->id,
+                                                                     .track_id = track.id,
+                                                                     .gain_db = gainDb,
+                                                                     .pan = track.audio_pan},
                           .coalescing_key = "mixer:" + track.id.toString() + ":gain"},
         tr("Could not update track gain"));
     return;
@@ -2340,16 +3072,263 @@ void EditorController::setAudioTrackPan(const int trackIndex, const double pan) 
       continue;
     }
     (void)apply(
-        edit::EditCommand{.operation = edit::SetTrackAudioMixCommand{
-                              .sequence_id = sequence->id,
-                              .track_id = track.id,
-                              .gain_db = track.audio_gain_db,
-                              .pan = pan},
+        edit::EditCommand{.operation = edit::SetTrackAudioMixCommand{.sequence_id = sequence->id,
+                                                                     .track_id = track.id,
+                                                                     .gain_db = track.audio_gain_db,
+                                                                     .pan = pan},
                           .coalescing_key = "mixer:" + track.id.toString() + ":pan"},
         tr("Could not update track pan"));
     return;
   }
   refreshMixerView();
+}
+
+void EditorController::addAudioTrackEffect(const int trackIndex, const QString& effectType) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || trackIndex < 0 || !effectType.startsWith(QStringLiteral("audio."))) {
+    refreshMixerView();
+    return;
+  }
+  int audioIndex = 0;
+  for (const edit::Track& track : sequence->tracks) {
+    if (track.kind != edit::TrackKind::Audio || audioIndex++ != trackIndex) {
+      continue;
+    }
+    edit::Effect effect;
+    effect.type = effectType.toStdString();
+    const auto add = [&effect](const char* id, const double value) {
+      effect.parameters.emplace(id,
+                                edit::EffectParameter{.id = id, .value = value, .keyframes = {}});
+    };
+    if (effectType == QStringLiteral("audio.eq")) {
+      add("frequency_hz", 1'000.0);
+      add("quality", 1.0);
+      add("gain_db", 0.0);
+    } else if (effectType == QStringLiteral("audio.compressor")) {
+      add("threshold_db", -18.0);
+      add("ratio", 4.0);
+      add("attack_ms", 10.0);
+      add("release_ms", 100.0);
+      add("makeup_db", 0.0);
+    } else if (effectType == QStringLiteral("audio.dialogue_denoise")) {
+      add("strength", 0.5);
+      add("threshold_db", -45.0);
+    } else if (effectType == QStringLiteral("audio.limiter")) {
+      add("ceiling_db", -1.0);
+    } else {
+      return;
+    }
+    (void)applyTrackCommand(
+        edit::EditCommand{.operation = edit::AddTrackEffectCommand{.sequence_id = sequence->id,
+                                                                   .track_id = track.id,
+                                                                   .effect = std::move(effect)},
+                          .coalescing_key = {}},
+        tr("Could not add track effect"));
+    return;
+  }
+  refreshMixerView();
+}
+
+void EditorController::removeAudioTrackEffect(const int trackIndex, const QString& effectId) {
+  const edit::Sequence* sequence = currentSequence();
+  const auto parsed = parseId(effectId);
+  if (sequence == nullptr || trackIndex < 0 || !parsed.has_value()) {
+    refreshMixerView();
+    return;
+  }
+  int audioIndex = 0;
+  for (const edit::Track& track : sequence->tracks) {
+    if (track.kind != edit::TrackKind::Audio || audioIndex++ != trackIndex) {
+      continue;
+    }
+    (void)applyTrackCommand(
+        edit::EditCommand{.operation = edit::RemoveTrackEffectCommand{.sequence_id = sequence->id,
+                                                                      .track_id = track.id,
+                                                                      .effect_id = *parsed},
+                          .coalescing_key = {}},
+        tr("Could not remove track effect"));
+    return;
+  }
+  refreshMixerView();
+}
+
+void EditorController::updateAudioTrackEffectParameter(const int trackIndex,
+                                                       const QString& effectId,
+                                                       const QString& parameterId,
+                                                       const QVariant& value) {
+  const edit::Sequence* sequence = currentSequence();
+  const auto parsed = parseId(effectId);
+  if (sequence == nullptr || trackIndex < 0 || !parsed.has_value()) {
+    refreshMixerView();
+    return;
+  }
+  int audioIndex = 0;
+  for (const edit::Track& track : sequence->tracks) {
+    if (track.kind != edit::TrackKind::Audio || audioIndex++ != trackIndex) {
+      continue;
+    }
+    const auto effect =
+        std::find_if(track.effects.cbegin(), track.effects.cend(),
+                     [&parsed](const edit::Effect& candidate) { return candidate.id == *parsed; });
+    if (effect == track.effects.cend()) {
+      return;
+    }
+    const auto parameter = effect->parameters.find(parameterId.toStdString());
+    if (parameter == effect->parameters.end()) {
+      return;
+    }
+    edit::EffectParameter updated = parameter->second;
+    updated.value = effectValueFromUi(updated.value, value);
+    (void)applyTrackCommand(
+        edit::EditCommand{.operation =
+                              edit::SetTrackEffectParameterCommand{.sequence_id = sequence->id,
+                                                                   .track_id = track.id,
+                                                                   .effect_id = effect->id,
+                                                                   .parameter = std::move(updated)},
+                          .coalescing_key = "track-effect:" + effectId.toStdString() + ":" +
+                                            parameterId.toStdString()},
+        tr("Could not update track effect"));
+    return;
+  }
+  refreshMixerView();
+}
+
+void EditorController::analyzeLoudnessNormalization() {
+  if (normalization_watcher_.isRunning()) {
+    return;
+  }
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    window_.audioMixer()->setNormalizationStatus(tr("Create or open a sequence first."));
+    return;
+  }
+  auto snapshotResult = editor_->snapshot(sequence->id, editor_->revision());
+  if (!snapshotResult) {
+    window_.audioMixer()->setNormalizationStatus(tr("Could not snapshot the current revision."));
+    return;
+  }
+  auto snapshot = std::make_shared<edit::TimelineSnapshot>(std::move(snapshotResult).value());
+  auto originals = audio_registry_;
+  const auto reviewRevision = editor_->revision();
+  const double targetLufs = normalization_target_lufs_;
+  active_normalization_generation_ = normalization_completion_gate_.begin();
+  const auto generation = active_normalization_generation_;
+  window_.audioMixer()->setNormalizationBusy(true);
+  normalization_review_ = {};
+  normalization_future_ = QtConcurrent::run([snapshot, originals, reviewRevision, targetLufs,
+                                             generation] {
+    NormalizationReview review;
+    review.revision = reviewRevision;
+    const auto result = audio_render::compute_normalization_gain(*snapshot, originals, targetLufs);
+    if (!result) {
+      review.error = QString::fromStdString(result.error().message);
+      return review;
+    }
+    review.valid = true;
+    review.measured_lufs = result.value().integrated_lufs;
+    review.gain_db = result.value().gain_db;
+    review.target_lufs = targetLufs;
+    const auto& analyzedSequence = snapshot->sequence();
+    const bool hasSolo = std::any_of(analyzedSequence.tracks.cbegin(),
+                                     analyzedSequence.tracks.cend(), [](const edit::Track& track) {
+                                       return track.kind == edit::TrackKind::Audio && track.solo;
+                                     });
+    const auto contributes = [hasSolo](const edit::Track& track) {
+      return track.kind == edit::TrackKind::Audio && !track.muted && (!hasSolo || track.solo) &&
+             std::any_of(track.clips.cbegin(), track.clips.cend(),
+                         [](const edit::Clip& clip) { return clip.kind == edit::ClipKind::Audio; });
+    };
+    const auto unsafe =
+        std::find_if(analyzedSequence.tracks.cbegin(), analyzedSequence.tracks.cend(),
+                     [&](const edit::Track& track) {
+                       const double adjusted = track.audio_gain_db + review.gain_db;
+                       return contributes(track) && (adjusted < -96.0 || adjusted > 24.0);
+                     });
+    if (unsafe != analyzedSequence.tracks.cend()) {
+      review.valid = false;
+      review.error =
+          QObject::tr("The proposed gain would put %1 outside the safe track range (−96 to +24 "
+                      "dB).")
+              .arg(QString::fromStdString(unsafe->name));
+    }
+    Q_UNUSED(generation)
+    return review;
+  });
+  normalization_watcher_.setFuture(normalization_future_);
+}
+
+void EditorController::applyLoudnessNormalization() {
+  if (!normalization_review_.valid) {
+    return;
+  }
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || normalization_review_.revision != editor_->revision()) {
+    normalization_review_.valid = false;
+    window_.audioMixer()->setNormalizationStatus(tr("The timeline changed; analyze again."));
+    return;
+  }
+  std::vector<edit::EditCommand> commands;
+  const bool hasSolo =
+      std::any_of(sequence->tracks.cbegin(), sequence->tracks.cend(), [](const edit::Track& track) {
+        return track.kind == edit::TrackKind::Audio && track.solo;
+      });
+  for (const edit::Track& track : sequence->tracks) {
+    const bool hasAudioClip =
+        std::any_of(track.clips.cbegin(), track.clips.cend(),
+                    [](const edit::Clip& clip) { return clip.kind == edit::ClipKind::Audio; });
+    if (track.kind != edit::TrackKind::Audio || track.muted || (hasSolo && !track.solo) ||
+        !hasAudioClip) {
+      continue;
+    }
+    const double adjustedGain = track.audio_gain_db + normalization_review_.gain_db;
+    if (adjustedGain < -96.0 || adjustedGain > 24.0) {
+      normalization_review_.valid = false;
+      window_.audioMixer()->setNormalizationStatus(
+          tr("Track gain changed; analyze loudness again."));
+      return;
+    }
+    commands.push_back(
+        edit::EditCommand{.operation = edit::SetTrackAudioMixCommand{.sequence_id = sequence->id,
+                                                                     .track_id = track.id,
+                                                                     .gain_db = adjustedGain,
+                                                                     .pan = track.audio_pan},
+                          .coalescing_key = {}});
+  }
+  if (commands.empty() || !applyBatch(std::move(commands), tr("Could not apply normalization"))) {
+    return;
+  }
+  normalization_review_.valid = false;
+  window_.audioMixer()->setNormalizationStatus(tr("Normalization applied as one undoable edit."));
+}
+
+void EditorController::selectAudioOutputDevice(const QString& deviceId) {
+  selected_audio_device_id_ = deviceId;
+  audio_recovery_pending_ = false;
+  QSettings settings;
+  settings.setValue(QStringLiteral("audio/outputDeviceId"), deviceId);
+  settings.sync();
+  window_.showTransientMessage(tr("Audio output changes apply on the next playback start."));
+}
+
+void EditorController::setNormalizationTarget(const double targetLufs) {
+  normalization_completion_gate_.invalidate();
+  normalization_target_lufs_ = std::clamp(targetLufs, -24.0, -9.0);
+  QSettings settings;
+  settings.setValue(QStringLiteral("audio/normalizationTargetLufs"), normalization_target_lufs_);
+  settings.sync();
+  normalization_review_.valid = false;
+  window_.audioMixer()->setNormalizationStatus(tr("Target changed; analyze again."));
+}
+
+void EditorController::refreshAudioDevices() {
+  if (audio_devices_watcher_.isRunning()) {
+    return;
+  }
+  audio_devices_future_ = QtConcurrent::run([] {
+    audio::MiniaudioDeviceEnumerator enumerator;
+    return enumerator.enumerate();
+  });
+  audio_devices_watcher_.setFuture(audio_devices_future_);
 }
 
 void EditorController::persistSnapshot(const std::string_view reason) {
@@ -3029,18 +4008,18 @@ void EditorController::refreshInspectorView() {
     window_.inspector()->setParameter(QStringLiteral("titleFont"),
                                       QString::fromStdString(title.font_family));
     window_.inspector()->setParameter(QStringLiteral("titleSize"), title.font_size);
-    const QString align =
-        title.horizontal_alignment == edit::TitleHorizontalAlignment::Left  ? QStringLiteral("left")
-        : title.horizontal_alignment == edit::TitleHorizontalAlignment::Right ? QStringLiteral("right")
-                                                                              : QStringLiteral("center");
+    const QString align = title.horizontal_alignment == edit::TitleHorizontalAlignment::Left
+                              ? QStringLiteral("left")
+                          : title.horizontal_alignment == edit::TitleHorizontalAlignment::Right
+                              ? QStringLiteral("right")
+                              : QStringLiteral("center");
     window_.inspector()->setParameter(QStringLiteral("titleAlign"), align);
     window_.inspector()->setParameter(QStringLiteral("titleBold"), title.bold);
     window_.inspector()->setParameter(QStringLiteral("titleItalic"), title.italic);
   }
   // Speed is shown as a percentage of normal (100 = 1x).
-  const double speed_percent =
-      static_cast<double>(clip->playback_rate.numerator()) * 100.0 /
-      static_cast<double>(clip->playback_rate.denominator());
+  const double speed_percent = static_cast<double>(clip->playback_rate.numerator()) * 100.0 /
+                               static_cast<double>(clip->playback_rate.denominator());
   selected_speed_percent_ = speed_percent;
   window_.inspector()->setParameter(QStringLiteral("speed"), speed_percent);
   window_.inspector()->setParameter(QStringLiteral("reverse"), clip->reversed);
@@ -3083,6 +4062,52 @@ void EditorController::refreshInspectorView() {
   window_.inspector()->setParameter(QStringLiteral("fadeOut"),
                                     static_cast<double>(clip->fade_out.value()) /
                                         static_cast<double>(clip->fade_out.timescale()));
+  QVector<desktop_ui::EffectParameterView> effect_parameters;
+  for (const auto& effect : clip->effects) {
+    const QString effect_id = QString::fromStdString(effect.id.toString());
+    const QString effect_name = effectDisplayName(effect.type);
+    for (const auto& [parameter_id, parameter] : effect.parameters) {
+      desktop_ui::EffectParameterView view;
+      view.effectId = effect_id;
+      view.effectName = effect_name;
+      view.parameterId = QString::fromStdString(parameter_id);
+      view.displayName = view.parameterId;
+      view.value = effectValueForUi(parameter.value);
+      view.duration = toUiTime(clip->timeline_range.duration);
+      view.keyframes.reserve(static_cast<qsizetype>(parameter.keyframes.size()));
+      for (const auto& keyframe : parameter.keyframes) {
+        const auto interpolation = [&keyframe] {
+          switch (keyframe.interpolation) {
+          case edit::KeyframeInterpolation::Hold:
+            return desktop_ui::KeyframeInterpolationView::Hold;
+          case edit::KeyframeInterpolation::Bezier:
+            return desktop_ui::KeyframeInterpolationView::Bezier;
+          case edit::KeyframeInterpolation::Linear:
+          default:
+            return desktop_ui::KeyframeInterpolationView::Linear;
+          }
+        }();
+        const auto value = [&keyframe] {
+          if (const auto* number = std::get_if<double>(&keyframe.value)) {
+            return *number;
+          }
+          if (const auto* integer = std::get_if<std::int64_t>(&keyframe.value)) {
+            return static_cast<double>(*integer);
+          }
+          return 0.0;
+        }();
+        view.keyframes.push_back(
+            {.id = QString::fromStdString(keyframe.id.toString()),
+             .time = toUiTime(keyframe.time),
+             .value = value,
+             .interpolation = interpolation,
+             .incomingControl = QPointF{keyframe.incoming_control.x, keyframe.incoming_control.y},
+             .outgoingControl = QPointF{keyframe.outgoing_control.x, keyframe.outgoing_control.y}});
+      }
+      effect_parameters.push_back(std::move(view));
+    }
+  }
+  window_.inspector()->setEffectParameters(effect_parameters);
 }
 
 void EditorController::refreshMixerView() {
@@ -3091,11 +4116,25 @@ void EditorController::refreshMixerView() {
   if (sequence != nullptr) {
     for (const edit::Track& track : sequence->tracks) {
       if (track.kind == edit::TrackKind::Audio) {
-        tracks.push_back({.displayName = QString::fromStdString(track.name),
-                          .muted = track.muted,
-                          .soloed = track.solo,
-                          .gain_db = track.audio_gain_db,
-                          .pan = track.audio_pan});
+        desktop_ui::AudioTrackView view{.id = QString::fromStdString(track.id.toString()),
+                                        .displayName = QString::fromStdString(track.name),
+                                        .muted = track.muted,
+                                        .soloed = track.solo,
+                                        .gain_db = track.audio_gain_db,
+                                        .pan = track.audio_pan,
+                                        .effects = {}};
+        for (const auto& effect : track.effects) {
+          desktop_ui::AudioTrackView::Effect effectView;
+          effectView.id = QString::fromStdString(effect.id.toString());
+          effectView.type = QString::fromStdString(effect.type);
+          effectView.displayName = effectDisplayName(effect.type);
+          for (const auto& [parameterId, parameter] : effect.parameters) {
+            effectView.parameters.push_back({.id = QString::fromStdString(parameterId),
+                                             .value = effectValueForUi(parameter.value)});
+          }
+          view.effects.push_back(std::move(effectView));
+        }
+        tracks.push_back(std::move(view));
       }
     }
   }
@@ -3222,12 +4261,13 @@ bool EditorController::startAudioMasterPlayback() {
 
     auto timeline_renderer = std::make_shared<audio_render::TimelineAudioRenderer>(audio_registry_);
     auto provider = std::make_shared<TimelinePlaybackAudioProvider>(
-        std::move(timeline_renderer), std::move(snapshot), end_sample);
+        timeline_renderer, std::move(snapshot), end_sample);
     audio::RealtimePlaybackConfiguration configuration{
         .ring_capacity_frames = 192'000,
         .render_block_frames = 24'000,
         .prefill_frames = 48'000,
         .prefill_timeout = std::chrono::milliseconds(2'000),
+        .device_id = selected_audio_device_id_.toStdString(),
     };
     auto candidate = std::make_unique<audio::AsyncRealtimeAudioPlayback>(
         std::move(provider), configuration, std::make_unique<audio::MiniaudioOutputDevice>());
@@ -3245,6 +4285,7 @@ bool EditorController::startAudioMasterPlayback() {
       return false;
     }
 
+    playback_audio_renderer_ = std::move(timeline_renderer);
     audio_playback_ = std::move(candidate);
     audio_master_active_ = false;
     audio_start_pending_ = false;
@@ -3266,6 +4307,7 @@ bool EditorController::startAudioMasterPlayback() {
 }
 
 void EditorController::stopAudioPlayback() noexcept {
+  audio_recovery_pending_ = false;
   audio_master_active_ = false;
   audio_start_pending_ = false;
   audio_session_stale_ = true;
@@ -3275,6 +4317,8 @@ void EditorController::stopAudioPlayback() noexcept {
   if (audio_playback_ != nullptr) {
     static_cast<void>(audio_playback_->request_stop());
   }
+  window_.audioMixer()->setTrackMeters({});
+  playback_audio_renderer_.reset();
 }
 
 void EditorController::requestPreview(const PreviewRequestPolicy policy) {

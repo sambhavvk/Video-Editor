@@ -39,6 +39,10 @@ operations can be submitted through `TimelineEditor::applyBatch` for one atomic 
 | `SetTrackVisibilityCommand` | `sequence_id`, `track_id`, `visible` | Enables or disables visual render contribution. Locking does not block this presentation state. |
 | `SetTrackTargetedCommand` | `sequence_id`, `track_id`, `targeted` | Changes the insertion-routing hint. It has no render effect. |
 | `SetTrackAudioStateCommand` | `sequence_id`, `track_id`, `muted`, `solo` | Replaces mute/solo on an audio track; the live mixer state may change while locked. |
+| `SetTrackAudioMixCommand` | `sequence_id`, `track_id`, `gain_db`, `pan` | Replaces validated audio-track gain (−96…+24 dB) and pan (−1…+1). |
+| `AddTrackEffectCommand` | `sequence_id`, `track_id`, `effect` | Appends a validated typed/versioned effect to an unlocked audio track. |
+| `RemoveTrackEffectCommand` | `sequence_id`, `track_id`, `effect_id` | Removes one effect from an unlocked audio track. |
+| `SetTrackEffectParameterCommand` | `sequence_id`, `track_id`, `effect_id`, `parameter` | Replaces one validated track-effect parameter. |
 
 ## Clip and precision commands
 
@@ -79,8 +83,8 @@ operations can be submitted through `TimelineEditor::applyBatch` for one atomic 
 ## Command container
 
 `EditOperation` is the variant of every command type above. Existing alternatives retain their
-order; new timeline-interaction alternatives are appended so callers that inspect variant indices
-do not observe an avoidable compatibility change.
+order; new alternatives are appended so callers that inspect variant indices do not observe an
+avoidable compatibility change.
 
 `EditCommand` owns one `operation` and an optional `coalescing_key`. Adjacent successful single
 commands with the same nonempty key collapse into one undo entry. Atomic batches retain their own

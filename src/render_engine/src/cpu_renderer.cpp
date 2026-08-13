@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
-#include "video_editor/render_engine/bitmap_glyphs.h"
 #include "video_editor/render_engine/cpu_renderer.h"
+#include "video_editor/edit_model/effect_evaluator.h"
+#include "video_editor/render_engine/bitmap_glyphs.h"
 
 #include <algorithm>
 #include <array>
@@ -41,6 +42,11 @@ struct ActiveTransition final {
   const edit::Transition* transition{nullptr};
   const edit::Clip* outgoing{nullptr};
   const edit::Clip* incoming{nullptr};
+};
+
+struct RenderedClip final {
+  std::shared_ptr<CpuFrame> frame;
+  edit::Clip clip;
 };
 
 [[nodiscard]] float saturate(const double value) noexcept {
@@ -160,6 +166,127 @@ void fill_color(CpuFrame& frame, const edit::ColorRgba& color) noexcept {
               static_cast<float>(color.blue), static_cast<float>(color.alpha));
 }
 
+[[nodiscard]] std::optional<double>
+effect_number(const edit::Effect& effect, const std::string_view id, const edit::Time local_time) {
+  const auto found = effect.parameters.find(id);
+  if (found == effect.parameters.end()) {
+    return std::nullopt;
+  }
+  const auto value = edit::evaluateEffectParameter(found->second, local_time);
+  if (!value) {
+    return std::nullopt;
+  }
+  if (const auto* number = std::get_if<double>(&*value)) {
+    return *number;
+  }
+  if (const auto* integer = std::get_if<std::int64_t>(&*value)) {
+    return static_cast<double>(*integer);
+  }
+  return std::nullopt;
+}
+
+void apply_color(CpuFrame& frame, const edit::Effect& effect, const edit::Time local_time) {
+  const double exposure = effect_number(effect, "exposure", local_time).value_or(0.0);
+  const double contrast = effect_number(effect, "contrast", local_time).value_or(1.0);
+  const double saturation = effect_number(effect, "saturation", local_time).value_or(1.0);
+  const double temperature = effect_number(effect, "temperature", local_time).value_or(0.0);
+  const double tint = effect_number(effect, "tint", local_time).value_or(0.0);
+  const double exposure_scale = std::exp2(std::clamp(exposure, -32.0, 32.0));
+  for (int y = 0; y < frame.height(); ++y) {
+    for (int x = 0; x < frame.width(); ++x) {
+      auto pixel = frame.pixel(x, y);
+      const double alpha = std::clamp(static_cast<double>(pixel[3]), 0.0, 1.0);
+      if (alpha <= 0.0) {
+        continue;
+      }
+      double red = std::clamp(static_cast<double>(pixel[0]) / alpha, 0.0, 1.0);
+      double green = std::clamp(static_cast<double>(pixel[1]) / alpha, 0.0, 1.0);
+      double blue = std::clamp(static_cast<double>(pixel[2]) / alpha, 0.0, 1.0);
+      red *= exposure_scale;
+      green *= exposure_scale;
+      blue *= exposure_scale;
+      red = ((red - 0.5) * contrast) + 0.5;
+      green = ((green - 0.5) * contrast) + 0.5;
+      blue = ((blue - 0.5) * contrast) + 0.5;
+      const double luma = (0.2126 * red) + (0.7152 * green) + (0.0722 * blue);
+      red = luma + ((red - luma) * saturation);
+      green = luma + ((green - luma) * saturation);
+      blue = luma + ((blue - luma) * saturation);
+      // Temperature and tint are intentionally small normalized channel
+      // offsets. This is the CPU reference transform; the GPU path must use
+      // the same canonical parameter values when its shader support lands.
+      red += temperature * 0.1 + tint * 0.05;
+      green -= tint * 0.1;
+      blue -= temperature * 0.1 + tint * 0.05;
+      pixel[0] = static_cast<float>(std::clamp(red, 0.0, 1.0) * alpha);
+      pixel[1] = static_cast<float>(std::clamp(green, 0.0, 1.0) * alpha);
+      pixel[2] = static_cast<float>(std::clamp(blue, 0.0, 1.0) * alpha);
+    }
+  }
+}
+
+void apply_box_blur(CpuFrame& frame, const double requested_radius) {
+  const int radius = std::clamp(static_cast<int>(std::ceil(requested_radius)), 0, 64);
+  if (radius == 0) {
+    return;
+  }
+  CpuFrame blurred(frame.width(), frame.height());
+  for (int y = 0; y < frame.height(); ++y) {
+    for (int x = 0; x < frame.width(); ++x) {
+      std::array<float, 4> sum{};
+      int count = 0;
+      for (int sample_y = std::max(0, y - radius);
+           sample_y <= std::min(frame.height() - 1, y + radius); ++sample_y) {
+        for (int sample_x = std::max(0, x - radius);
+             sample_x <= std::min(frame.width() - 1, x + radius); ++sample_x) {
+          const auto sample = frame.pixel(sample_x, sample_y);
+          for (std::size_t channel = 0; channel < sum.size(); ++channel) {
+            sum[channel] += sample[channel];
+          }
+          ++count;
+        }
+      }
+      auto output = blurred.pixel(x, y);
+      for (std::size_t channel = 0; channel < sum.size(); ++channel) {
+        output[channel] = sum[channel] / static_cast<float>(count);
+      }
+    }
+  }
+  std::copy(blurred.pixels().begin(), blurred.pixels().end(), frame.pixels().begin());
+}
+
+void apply_visual_effects(RenderedClip& rendered, const edit::Time local_time,
+                          const PreviewProfile& profile) {
+  for (const auto& effect : rendered.clip.effects) {
+    if (!effect.enabled || !effect.known) {
+      continue;
+    }
+    if (effect.type == "video.color") {
+      apply_color(*rendered.frame, effect, local_time);
+    } else if (effect.type == "video.gaussian_blur") {
+      if (!profile.bypass_expensive_effects) {
+        apply_box_blur(*rendered.frame, effect_number(effect, "radius", local_time).value_or(0.0));
+      }
+    } else if (effect.type == "video.crop") {
+      const double left = effect_number(effect, "left", local_time).value_or(0.0);
+      const double top = effect_number(effect, "top", local_time).value_or(0.0);
+      const double right = effect_number(effect, "right", local_time).value_or(0.0);
+      const double bottom = effect_number(effect, "bottom", local_time).value_or(0.0);
+      if (left >= 0.0 && top >= 0.0 && right >= 0.0 && bottom >= 0.0 && left + right < 1.0 &&
+          top + bottom < 1.0) {
+        const auto base_width =
+            1.0 - rendered.clip.transform.crop_left - rendered.clip.transform.crop_right;
+        const auto base_height =
+            1.0 - rendered.clip.transform.crop_top - rendered.clip.transform.crop_bottom;
+        rendered.clip.transform.crop_left += base_width * left;
+        rendered.clip.transform.crop_right += base_width * right;
+        rendered.clip.transform.crop_top += base_height * top;
+        rendered.clip.transform.crop_bottom += base_height * bottom;
+      }
+    }
+  }
+}
+
 void composite(const CpuFrame& source, CpuFrame& destination, const edit::Clip& clip,
                const std::uint32_t sequence_width, const std::uint32_t sequence_height) {
   const auto& transform = clip.transform;
@@ -275,11 +402,12 @@ void composite(const CpuFrame& source, CpuFrame& destination, const edit::Clip& 
       break;
     }
     for (std::size_t glyph_index = 0; glyph_index < line.size(); ++glyph_index) {
-      const auto glyph = line[glyph_index] == U'\uFFFD' ? render::replacement_glyph()
-                                                       : render::glyph_for_ascii(line[glyph_index]);
+      const auto glyph = line[glyph_index] == U'\uFFFD'
+                             ? render::replacement_glyph()
+                             : render::glyph_for_ascii(line[glyph_index]);
       render::draw_glyph(*frame, glyph, left + static_cast<int>(glyph_index * cell_width) * scale,
-                 top + static_cast<int>(line_index * cell_height) * scale, scale, style.foreground,
-                 style.bold, style.italic);
+                         top + static_cast<int>(line_index * cell_height) * scale, scale,
+                         style.foreground, style.bold, style.italic);
     }
   }
   return frame;
@@ -320,13 +448,15 @@ active_transition_for_track(const edit::Sequence& sequence, const edit::Track& t
   return frame;
 }
 
-[[nodiscard]] RenderResult<std::shared_ptr<const CpuFrame>>
+[[nodiscard]] RenderResult<RenderedClip>
 render_clip_source(const edit::Clip& clip, const edit::Sequence& sequence, const edit::Time time,
                    const PreviewProfile& profile, const std::uint64_t request_epoch,
                    FrameProvider& provider, const CpuRenderer& renderer) {
   if (clip.kind == edit::ClipKind::Title) {
-    return RenderResult<std::shared_ptr<const CpuFrame>>::success(
-        rasterize_title_frame(clip, sequence, profile));
+    auto frame = std::make_shared<CpuFrame>(*rasterize_title_frame(clip, sequence, profile));
+    RenderedClip rendered{.frame = std::move(frame), .clip = clip};
+    apply_visual_effects(rendered, time - clip.timeline_range.start, profile);
+    return RenderResult<RenderedClip>::success(std::move(rendered));
   }
 
   AssetFrameRequest request{
@@ -339,14 +469,17 @@ render_clip_source(const edit::Clip& clip, const edit::Sequence& sequence, const
   };
   auto source = provider.request(request);
   if (!source) {
-    return RenderResult<std::shared_ptr<const CpuFrame>>::failure(*source.error);
+    return RenderResult<RenderedClip>::failure(*source.error);
   }
   if (request_epoch != renderer.current_epoch()) {
-    return RenderResult<std::shared_ptr<const CpuFrame>>::failure(
+    return RenderResult<RenderedClip>::failure(
         {.code = RenderErrorCode::StaleRequest,
          .message = "render request was superseded during decoding"});
   }
-  return source;
+  auto frame = clone_frame(**source.value);
+  RenderedClip rendered{.frame = std::move(frame), .clip = clip};
+  apply_visual_effects(rendered, time - clip.timeline_range.start, profile);
+  return RenderResult<RenderedClip>::success(std::move(rendered));
 }
 
 [[nodiscard]] RenderResult<std::shared_ptr<CpuFrame>>
@@ -360,7 +493,7 @@ render_track_clip_over_baseline(const edit::Clip& clip, const edit::Sequence& se
   if (!source) {
     return RenderResult<std::shared_ptr<CpuFrame>>::failure(*source.error);
   }
-  composite(**source.value, *rendered, clip, sequence.width, sequence.height);
+  composite(*source.value->frame, *rendered, source.value->clip, sequence.width, sequence.height);
   return RenderResult<std::shared_ptr<CpuFrame>>::success(std::move(rendered));
 }
 
@@ -473,7 +606,8 @@ RenderResult<VideoFrame> CpuRenderer::request_frame(const edit::TimelineSnapshot
       if (!source) {
         return RenderResult<VideoFrame>::failure(*source.error);
       }
-      composite(**source.value, *output, clip, sequence->width, sequence->height);
+      composite(*source.value->frame, *output, source.value->clip, sequence->width,
+                sequence->height);
     }
   }
 

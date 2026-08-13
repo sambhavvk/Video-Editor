@@ -109,8 +109,9 @@ multi-selection/tool/header/marker/gap signals are emitted directly by `Timeline
 ### Panel signals
 
 `mediaActivated(const QString& mediaId)`, `effectAddRequested(const QString& effectId)`, and
-`parameterEdited(const QString& parameterId, const QVariant& value)` pass panel intent to the
-controller.
+`parameterEdited(const QString& parameterId, const QVariant& value)` pass basic panel intent to the
+controller. Inspector effect/keyframe, mixer gain/pan/DSP/device/normalization, and Deliver option
+signals are exposed by their borrowed panel widgets and forwarded by the controller.
 
 ## Protected event handlers
 

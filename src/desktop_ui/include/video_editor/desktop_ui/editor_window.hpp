@@ -105,6 +105,20 @@ signals:
   void effectAddRequested(const QString& effectId);
   void parameterEdited(const QString& parameterId, const QVariant& value);
   void keyframeToggleRequested(const QString& parameterId);
+  void effectParameterEdited(const QString& effectId, const QString& parameterId,
+                             const QVariant& value);
+  void effectKeyframeToggleRequested(const QString& effectId, const QString& parameterId);
+  void effectKeyframeSelected(const QString& effectId, const QString& parameterId, qint64 time);
+  void effectKeyframeValueEdited(const QString& effectId, const QString& parameterId,
+                                 const QString& keyframeId, qint64 time, double value);
+  void effectKeyframeInterpolationEdited(const QString& effectId, const QString& parameterId,
+                                         const QString& keyframeId,
+                                         KeyframeInterpolationView interpolation);
+  void effectKeyframeRemoved(const QString& effectId, const QString& parameterId,
+                             const QString& keyframeId);
+  void effectKeyframeControlPointsEdited(const QString& effectId, const QString& parameterId,
+                                         const QString& keyframeId, const QPointF& incoming,
+                                         const QPointF& outgoing);
   void addTitleRequested();
   void transitionActivated(const QString& transitionId);
   void transitionDurationEdited(const QString& transitionId, qint64 duration);

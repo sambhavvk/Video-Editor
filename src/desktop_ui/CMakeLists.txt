@@ -13,12 +13,14 @@ find_package(Qt6 6.11 REQUIRED COMPONENTS Core Gui Widgets)
 add_library(video_editor_desktop_ui STATIC
     include/video_editor/desktop_ui/command_palette.hpp
     include/video_editor/desktop_ui/editor_window.hpp
+    include/video_editor/desktop_ui/keyframe_curve_widget.hpp
     include/video_editor/desktop_ui/panel_widgets.hpp
     include/video_editor/desktop_ui/program_viewer.hpp
     include/video_editor/desktop_ui/timeline_widget.hpp
     include/video_editor/desktop_ui/ui_types.hpp
     src/command_palette.cpp
     src/editor_window.cpp
+    src/keyframe_curve_widget.cpp
     src/panel_widgets.cpp
     src/program_viewer.cpp
     src/timeline_widget.cpp
@@ -35,7 +37,7 @@ target_include_directories(video_editor_desktop_ui
 target_compile_features(video_editor_desktop_ui PUBLIC cxx_std_20)
 target_link_libraries(video_editor_desktop_ui
     PUBLIC Qt6::Core Qt6::Gui Qt6::Widgets
-    PRIVATE VideoEditor::ExportService video_editor::media_codec)
+    PRIVATE video_editor::media_codec VideoEditor::ExportService)
 
 set_target_properties(video_editor_desktop_ui PROPERTIES
     AUTOMOC ON
@@ -48,4 +50,3 @@ if(MSVC)
 else()
     target_compile_options(video_editor_desktop_ui PRIVATE -Wall -Wextra -Wpedantic)
 endif()
-

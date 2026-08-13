@@ -18,7 +18,6 @@
 
 namespace video_editor::export_service {
 
-
 struct PresetInfo final {
   VideoPreset preset{VideoPreset::Ffv1Matroska};
   std::string display_name;
@@ -35,6 +34,8 @@ struct ExportProgress final {
   std::uint64_t total_frames{0};
   edit::Time timeline_time{};
   double fraction{0.0};
+  // True on the first event after an automatic hardware-to-software restart.
+  bool restarted_after_hardware_fallback{false};
 };
 
 using ProgressCallback = std::function<void(const ExportProgress&)>;
@@ -49,6 +50,10 @@ struct ExportRequest final {
   VideoPreset preset{VideoPreset::Ffv1Matroska};
   bool overwrite_existing{false};
   bool include_audio{false};
+  // Attempt a runtime-probed VP9 hardware encoder for creator delivery. The
+  // exporter retries the complete atomic export with libvpx-vp9 when device,
+  // frame upload, or hardware encode initialization fails.
+  bool prefer_hardware_encoder{true};
   std::stop_token cancellation;
   ProgressCallback progress;
 
@@ -64,6 +69,10 @@ struct ExportRequest final {
   std::uint32_t override_frame_rate_den{0};
   // Audio bitrate override (0 = preset default).
   std::uint32_t override_audio_bitrate{0};
+  // Video bitrate override (0 = preset default). For VP9, video_quality in
+  // the range 0..63 selects constant-quality mode instead of a bitrate.
+  std::uint64_t override_video_bitrate{0};
+  std::optional<int> video_quality{};
   // Captions to burn in / export as sidecar. Drawn from the snapshot's
   // sequence.captions by the caller, or left empty for None mode.
   std::vector<edit::Caption> captions;
@@ -75,6 +84,7 @@ enum class ExportErrorCode : std::uint8_t {
   AudioRenderFailed,
   DestinationExists,
   EncoderUnavailable,
+  HardwareEncoderFailed,
   Cancelled,
   RenderFailed,
   EncodingFailed,
@@ -96,7 +106,10 @@ struct ExportResult final {
   VideoPreset preset{VideoPreset::Ffv1Matroska};
   std::string container;
   std::string video_codec;
+  // Actual FFmpeg encoder selected. Hardware use is reported separately.
+  std::string video_encoder;
   std::string audio_codec;
+  std::string audio_encoder;
   std::uint64_t frame_count{0};
   std::uint64_t audio_sample_count{0};
   edit::Time source_timeline_duration{};
@@ -104,6 +117,7 @@ struct ExportResult final {
   edit::Time encoded_audio_duration{};
   bool video_exported{true};
   bool audio_exported{false};
+  bool hardware_encoder_used{false};
   // Path to the sidecar caption file if one was written alongside the media.
   std::filesystem::path caption_sidecar_path;
 };

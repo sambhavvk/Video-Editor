@@ -201,6 +201,10 @@ message Track {
   // model defaults when decoded.
   optional bool visible = 9;
   optional bool targeted = 10;
+  // Optional mixer-strip fields. Absence means the canonical model defaults
+  // (0 dB and center pan), preserving schema-v1 and early schema-v2 readers.
+  optional double audio_gain_db = 11;
+  optional double audio_pan = 12;
 }
 
 message Marker {

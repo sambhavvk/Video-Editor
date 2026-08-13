@@ -33,7 +33,7 @@ are immutable and may be read concurrently for the snapshot lifetime.
 | `ColorRgba` | `red`, `green`, `blue`, `alpha` | Straight normalized color channels. |
 | `Title` | `text`, `font_family`, `font_size`, foreground/background colors, alignment, `bold`, `italic` | Complete persistent title payload. |
 | `EffectValue` | Variant of integer, double, bool, string, `Time`, `Vec2`, `ColorRgba` | Typed effect value storage. |
-| `Keyframe` | `id`, `time`, `value`, interpolation, incoming/outgoing controls | One exact-time parameter sample. |
+| `Keyframe` | `id`, clip-local `time`, `value`, interpolation, incoming/outgoing control offsets | One exact-time parameter sample. Incoming X points left and outgoing X points right from the owning keyframe. |
 | `EffectParameter` | `id`, `value`, `keyframes` | Current parameter value and its curve. |
 | `Effect` | `id`, `type`, `version`, `enabled`, `known`, parameter map, `opaque_payload` | Typed/versioned processing node. Unknown future effects remain opaque and disabled. |
 | `Transform` | position, scale, rotation, anchor, crop edges, opacity | Visual placement and crop state in sequence space. |
@@ -45,7 +45,7 @@ are immutable and may be read concurrently for the snapshot lifetime.
 | `Asset` | identity/name/URI/fingerprint, duration, stream flags and descriptors, metadata | Reference to original media and its probed descriptors. Media bytes are not embedded. |
 | `Clip` | identity, asset/kind/name, timeline/source ranges, rate/reverse/link, transform/blend/audio/effects/title | One non-destructive timeline use of media or generated title content. |
 | `Gap` | `timeline_range` | Derived half-open empty range. It has no persistent identity. |
-| `Track` | identity/kind/name, lock/mute/solo, `visible`, `targeted`, clips/effects | Ordered timeline lane. Visibility controls visual composition; targeting is an editorial routing hint. Both default true. |
+| `Track` | identity/kind/name, lock/mute/solo, `visible`, `targeted`, clips/effects, audio gain/pan | Ordered timeline lane. Visibility controls visual composition; targeting is an editorial routing hint. Audio tracks add canonical mixer state. |
 | `Marker` | identity, exact range, label, color | Sequence annotation. A zero-duration range is a point marker. |
 | `CaptionStyle` | font, size, text/background colors, bold/italic | Persistent caption styling. |
 | `Caption` | identity, exact range, text, language, style | Sequence-owned caption cue. |
@@ -58,8 +58,10 @@ are immutable and may be read concurrently for the snapshot lifetime.
 A video track accepts video and title clips; an audio track accepts audio clips. Title clips use a
 nil asset ID and require a `Title`; media clips require an existing compatible asset and must not
 carry title state. Clip ranges are positive, non-overlapping within a track, and source-bounded.
-Locked tracks reject structural edits. Track order, name, visibility, targeting, mute, and solo are
-project state and therefore round-trip through checkpoints.
+Locked tracks reject structural edits. Track order, name, visibility, targeting, mute/solo,
+−96…+24 dB gain, −1…+1 pan, and track effects are project state and therefore round-trip through
+checkpoints. Known clip/track effects and their keyframes are validated before a revision is
+published; unknown future effects remain opaque and disabled.
 
 An enabled transition refers to adjacent clips on the same video track. Its range begins inside the
 outgoing clip, ends inside the incoming clip, strictly straddles their shared cut, and requires

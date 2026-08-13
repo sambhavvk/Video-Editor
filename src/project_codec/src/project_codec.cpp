@@ -38,6 +38,8 @@ constexpr std::size_t kMaximumTitleTextBytes = 64U * 1024U;
 constexpr std::size_t kMaximumTitleFontFamilyBytes = 1024U;
 constexpr double kMinimumTitleFontSize = 1.0;
 constexpr double kMaximumTitleFontSize = 4096.0;
+constexpr double kMinimumAudioGainDb = -96.0;
+constexpr double kMaximumAudioGainDb = 24.0;
 
 [[noreturn]] void fail(CodecErrorCode code, std::string field_path, std::string message) {
   throw CodecException(CodecError{code, std::move(message), std::move(field_path)});
@@ -427,6 +429,9 @@ void encodeClip(const edit::Clip& value, wire::Clip* output, std::string_view pa
   output->set_blend_mode(encodeBlendMode(value.blend_mode));
   requireFinite(value.audio_gain_db, childPath(path, "audio_gain_db"));
   requireFinite(value.audio_pan, childPath(path, "audio_pan"));
+  require(value.audio_gain_db >= kMinimumAudioGainDb && value.audio_gain_db <= kMaximumAudioGainDb,
+          CodecErrorCode::InvalidField, childPath(path, "audio_gain_db"),
+          "audio gain must be within [-96, 24] dB");
   require(value.audio_pan >= -1.0 && value.audio_pan <= 1.0, CodecErrorCode::InvalidField,
           childPath(path, "audio_pan"), "audio pan must be between minus one and one");
   require(!value.fade_in.isNegative() && !value.fade_out.isNegative(), CodecErrorCode::InvalidField,
@@ -454,6 +459,15 @@ void encodeTrack(const edit::Track& value, wire::Track* output, std::string_view
   output->set_solo(value.solo);
   output->set_visible(value.visible);
   output->set_targeted(value.targeted);
+  requireFinite(value.audio_gain_db, childPath(path, "audio_gain_db"));
+  requireFinite(value.audio_pan, childPath(path, "audio_pan"));
+  require(value.audio_gain_db >= kMinimumAudioGainDb && value.audio_gain_db <= kMaximumAudioGainDb,
+          CodecErrorCode::InvalidField, childPath(path, "audio_gain_db"),
+          "audio gain must be within [-96, 24] dB");
+  require(value.audio_pan >= -1.0 && value.audio_pan <= 1.0, CodecErrorCode::InvalidField,
+          childPath(path, "audio_pan"), "audio pan must be between minus one and one");
+  output->set_audio_gain_db(value.audio_gain_db);
+  output->set_audio_pan(value.audio_pan);
   const edit::Clip* previous = nullptr;
   for (std::size_t index = 0; index < value.clips.size(); ++index) {
     const auto clip_path = indexedPath(path, "clips", index);
@@ -682,6 +696,20 @@ void reject_v2_fields_in_declared_v1(const wire::ProjectSnapshot& snapshot) {
                                    track_index),
                        "targeted"),
              "declared schema v1 snapshot cannot contain v2 track targeting fields");
+      }
+      if (track.has_audio_gain_db()) {
+        fail(CodecErrorCode::InvalidField,
+             childPath(indexedPath(indexedPath("project", "sequences", sequence_index), "tracks",
+                                   track_index),
+                       "audio_gain_db"),
+             "declared schema v1 snapshot cannot contain v2 track audio fields");
+      }
+      if (track.has_audio_pan()) {
+        fail(CodecErrorCode::InvalidField,
+             childPath(indexedPath(indexedPath("project", "sequences", sequence_index), "tracks",
+                                   track_index),
+                       "audio_pan"),
+             "declared schema v1 snapshot cannot contain v2 track audio fields");
       }
       std::size_t clip_index = 0;
       for (const auto& clip : track.clips()) {
@@ -1101,6 +1129,16 @@ decodeMetadata(const google::protobuf::RepeatedPtrField<wire::StringEntry>& entr
   // deliberately means the model defaults, rather than proto3's false.
   result.visible = !value.has_visible() || value.visible();
   result.targeted = !value.has_targeted() || value.targeted();
+  result.audio_gain_db = value.has_audio_gain_db() ? value.audio_gain_db() : 0.0;
+  result.audio_pan = value.has_audio_pan() ? value.audio_pan() : 0.0;
+  requireFinite(result.audio_gain_db, childPath(path, "audio_gain_db"));
+  requireFinite(result.audio_pan, childPath(path, "audio_pan"));
+  require(result.audio_gain_db >= kMinimumAudioGainDb &&
+              result.audio_gain_db <= kMaximumAudioGainDb,
+          CodecErrorCode::InvalidField, childPath(path, "audio_gain_db"),
+          "audio gain must be within [-96, 24] dB");
+  require(result.audio_pan >= -1.0 && result.audio_pan <= 1.0, CodecErrorCode::InvalidField,
+          childPath(path, "audio_pan"), "audio pan must be between minus one and one");
   const edit::Clip* previous = nullptr;
   std::size_t index = 0;
   for (const auto& clip : value.clips()) {

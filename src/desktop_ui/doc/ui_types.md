@@ -19,6 +19,7 @@ the desktop library.
 | `Workspace` | `Import`, `Edit`, `AudioCaptions`, `Deliver` | Active progressive-disclosure desktop layout. |
 | `TrackKind` | `Video`, `Audio`, `Caption` | Presentation track category. |
 | `TimelineSnapKind` | `None`, `Frame`, `Marker`, `Playhead`, `ClipEdge` | Canonical resolver result used for guide styling and accessible text. |
+| `KeyframeInterpolationView` | `Hold`, `Linear`, `Bezier` | Presentation form of the canonical interpolation policy. |
 
 ## Types
 
@@ -30,9 +31,12 @@ the desktop library.
 | `TimelineGapView` | revision-local key, track identity/index, start/duration, selected | Derived empty timeline range; the key must be re-resolved by the controller before editing. |
 | `TimelineSnapRequest` | proposed time, pixel threshold, excluded clip IDs, optional excluded marker ID, marker flag | Presentation request passed synchronously to the controller's exact snap resolver. A marker drag supplies its own ID; marker creation leaves the field empty. |
 | `TimelineSnapResult` | resolved time, kind, label | Resolver response. `snapped()` is true for every kind except `None`. |
-| `AudioTrackView` | display name, mute, solo | One mixer strip's present state. |
+| `AudioTrackView` | stable ID, display name, mute/solo, gain/pan, meter state, current typed effect values | One mixer strip's authoritative presentation state. Nested effects preserve stable IDs and current parameters across rebuilds. |
+| `AudioTrackMeterView` | stable track ID, stereo peak/RMS, active/stale flags | One audio-master-position meter update; identity prevents reorder/removal misrouting. |
 | `TimelineClipView` | identity/name, track/start/duration, color, selection/offline/proxy flags | One virtualized painted clip. |
 | `EffectView` | identity/name/category/accelerated | One effects-browser row. |
+| `KeyframeView` | identity, clip-local time/value, interpolation, incoming/outgoing offsets | One editable curve sample. |
+| `EffectParameterView` | effect/parameter identity and names, base value, clip duration, keyframes | Complete Inspector view for one effect parameter. |
 
 ## Ownership and thread safety
 

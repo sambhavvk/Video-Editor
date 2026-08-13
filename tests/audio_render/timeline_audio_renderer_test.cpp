@@ -214,6 +214,13 @@ struct TimelineFixture final {
   return track;
 }
 
+[[nodiscard]] edit::Effect audio_effect(const std::string& type) {
+  edit::Effect effect;
+  effect.type = type;
+  effect.enabled = true;
+  return effect;
+}
+
 [[nodiscard]] edit::TimelineSnapshot snapshot(TimelineFixture fixture,
                                               std::vector<edit::Track> tracks) {
   fixture.project.sequences.front().tracks = std::move(tracks);
@@ -417,9 +424,110 @@ TEST(TimelineAudioRenderer, TrackGainAndPanApplyAsMixerStageOverClipMix) {
       renderer.render(snapshot(timeline, {boosted}), {.start_sample = 0, .sample_count = 32});
   ASSERT_TRUE(boosted_result) << boosted_result.error().message;
   for (std::size_t i = 0; i < 32; ++i) {
-    EXPECT_NEAR(boosted_result.value().channel(0)[i],
-                baseline.value().channel(0)[i] * 2.0F, 0.0001F);
+    EXPECT_NEAR(boosted_result.value().channel(0)[i], baseline.value().channel(0)[i] * 2.0F,
+                0.0001F);
   }
+}
+
+TEST(TimelineAudioRenderer, PublishesStablePostDspTrackMetersWithMuteSoloAndReorder) {
+  auto timeline = make_timeline();
+  auto audible_clip = audio_clip(timeline.constant_asset_id, 0, 0, 32);
+  audible_clip.audio_pan = 0.0;
+  auto first = audio_track({audible_clip});
+  first.name = "First";
+  auto muted = audio_track({audio_clip(timeline.ramp_asset_id, 0, 0, 32)}, true, false);
+  muted.name = "Muted";
+  auto solo = audio_track({audio_clip(timeline.constant_asset_id, 0, 0, 32)}, false, true);
+  solo.name = "Solo";
+  auto limiter = audio_effect("audio.limiter");
+  limiter.parameters["ceiling_db"] = {.id = "ceiling_db", .value = -20.0, .keyframes = {}};
+  solo.effects.push_back(std::move(limiter));
+  const auto first_id = first.id;
+  const auto muted_id = muted.id;
+  const auto solo_id = solo.id;
+  const auto registry = registry_for(timeline);
+  TimelineAudioRenderer renderer(registry);
+  const auto initial = renderer.render(snapshot(timeline, {first, muted, solo}),
+                                       {.start_sample = 0, .sample_count = 32});
+  ASSERT_TRUE(initial) << initial.error().message;
+  const auto meters = renderer.trackMeters();
+  ASSERT_EQ(meters.tracks.size(), 3U);
+  EXPECT_FALSE(meters.stale);
+  EXPECT_EQ(meters.revision, edit::Revision{0});
+  const auto find_meter = [&meters](const edit::EntityId id) -> const TrackMeterReading& {
+    const auto found =
+        std::find_if(meters.tracks.begin(), meters.tracks.end(),
+                     [id](const TrackMeterReading& meter) { return meter.track_id == id; });
+    EXPECT_NE(found, meters.tracks.end());
+    return *found;
+  };
+  EXPECT_FALSE(find_meter(first_id).active);
+  EXPECT_FALSE(find_meter(muted_id).active);
+  EXPECT_TRUE(find_meter(solo_id).active);
+  // The meter is sampled after the track limiter, not from the pre-DSP mix.
+  EXPECT_GT(find_meter(solo_id).peak[0], 0.0F);
+  EXPECT_LT(find_meter(solo_id).peak[0], 0.11F);
+
+  // Reordering does not change ID association. Removing a track removes only
+  // its reading on the next bounded snapshot; no index mapping is retained.
+  const auto reordered =
+      renderer.render(snapshot(timeline, {solo, first}), {.start_sample = 0, .sample_count = 32});
+  ASSERT_TRUE(reordered) << reordered.error().message;
+  const auto reordered_meters = renderer.trackMeters();
+  EXPECT_EQ(reordered_meters.tracks.size(), 2U);
+  EXPECT_EQ(reordered_meters.tracks[0].track_id, solo_id);
+  EXPECT_EQ(reordered_meters.tracks[1].track_id, first_id);
+  EXPECT_EQ(std::find_if(
+                reordered_meters.tracks.begin(), reordered_meters.tracks.end(),
+                [muted_id](const TrackMeterReading& meter) { return meter.track_id == muted_id; }),
+            reordered_meters.tracks.end());
+}
+
+TEST(TimelineAudioRenderer, MutedAndNonSoloTracksDoNotDecodeOrFail) {
+  auto timeline = make_timeline();
+  auto missing = audio_track({audio_clip(timeline.ramp_asset_id, 0, 0, 32)}, true, false);
+  auto solo = audio_track({audio_clip(timeline.constant_asset_id, 0, 0, 32)}, false, true);
+  const auto registry = std::make_shared<OriginalAudioRegistry>();
+  ASSERT_TRUE(registry->register_original(timeline.constant_asset_id, {fixture().constant(), -1}));
+  TimelineAudioRenderer renderer(registry);
+  const auto result =
+      renderer.render(snapshot(timeline, {missing, solo}), {.start_sample = 0, .sample_count = 32});
+  ASSERT_TRUE(result) << result.error().message;
+  const auto meters = renderer.trackMeters();
+  ASSERT_EQ(meters.tracks.size(), 2U);
+  EXPECT_FALSE(meters.tracks[0].active);
+  EXPECT_TRUE(meters.tracks[1].active);
+}
+
+TEST(TimelineAudioRenderer, SelectsTrackMetersAtAudioMasterPosition) {
+  auto timeline = make_timeline();
+  const auto loud_clip = audio_clip(timeline.constant_asset_id, 0, 0, 32);
+  const auto quiet_clip = audio_clip(timeline.ramp_asset_id, 32, 0, 32);
+  auto track = audio_track({loud_clip, quiet_clip});
+  const auto track_id = track.id;
+  TimelineAudioRenderer renderer(registry_for(timeline));
+  const auto frozen = snapshot(timeline, {track});
+
+  ASSERT_TRUE(renderer.render(frozen, {.start_sample = 0, .sample_count = 32}));
+  ASSERT_TRUE(renderer.render(frozen, {.start_sample = 32, .sample_count = 32}));
+
+  const auto first = renderer.trackMetersAt(16);
+  const auto second = renderer.trackMetersAt(48);
+  ASSERT_EQ(first.tracks.size(), 1U);
+  ASSERT_EQ(second.tracks.size(), 1U);
+  EXPECT_EQ(first.tracks.front().track_id, track_id);
+  EXPECT_EQ(second.tracks.front().track_id, track_id);
+  EXPECT_EQ(first.start_sample, 0);
+  EXPECT_EQ(first.end_sample, 32);
+  EXPECT_EQ(second.start_sample, 32);
+  EXPECT_EQ(second.end_sample, 64);
+  EXPECT_FALSE(first.stale);
+  EXPECT_FALSE(second.stale);
+  EXPECT_GT(first.tracks.front().peak[0], second.tracks.front().peak[0]);
+
+  const auto outside = renderer.trackMetersAt(96);
+  EXPECT_TRUE(outside.stale);
+  EXPECT_EQ(outside.tracks.front().track_id, track_id);
 }
 
 TEST(TimelineAudioRenderer, TrackPanAtCenterIsUnityAndFullLeftRoutesToLeftOnly) {
@@ -443,12 +551,51 @@ TEST(TimelineAudioRenderer, TrackPanAtCenterIsUnityAndFullLeftRoutesToLeftOnly) 
   ASSERT_TRUE(left_result) << left_result.error().message;
   for (std::size_t i = 0; i < 16; ++i) {
     // Center track pan 0 must be unity (no attenuation).
-    EXPECT_NEAR(center_result.value().channel(0)[i],
-                center_result.value().channel(1)[i], 0.00001F);
+    EXPECT_NEAR(center_result.value().channel(0)[i], center_result.value().channel(1)[i], 0.00001F);
     // Full-left track pan routes all energy to the left channel.
-    EXPECT_NEAR(left_result.value().channel(0)[i],
-                center_result.value().channel(0)[i], 0.0001F);
+    EXPECT_NEAR(left_result.value().channel(0)[i], center_result.value().channel(0)[i], 0.0001F);
     EXPECT_NEAR(left_result.value().channel(1)[i], 0.0F, 0.0001F);
+  }
+}
+
+TEST(TimelineAudioRenderer, StatefulTrackDspIsInvariantToContiguousRequestPartitioning) {
+  auto timeline = make_timeline();
+  auto clip = audio_clip(timeline.constant_asset_id, 0, 0, 2'400);
+  edit::Track track = audio_track({clip});
+  auto eq = audio_effect("audio.eq");
+  eq.parameters["frequency_hz"] = {.id = "frequency_hz", .value = 1'000.0};
+  eq.parameters["quality"] = {.id = "quality", .value = 0.707};
+  eq.parameters["gain_db"] = {.id = "gain_db", .value = 3.0};
+  auto compressor = audio_effect("audio.compressor");
+  compressor.parameters["threshold_db"] = {.id = "threshold_db", .value = -18.0};
+  compressor.parameters["ratio"] = {.id = "ratio", .value = 4.0};
+  auto denoise = audio_effect("audio.dialogue_denoise");
+  denoise.parameters["strength"] = {.id = "strength", .value = 0.2};
+  denoise.parameters["threshold_db"] = {.id = "threshold_db", .value = -40.0};
+  auto limiter = audio_effect("audio.limiter");
+  limiter.parameters["ceiling_db"] = {.id = "ceiling_db", .value = -1.0};
+  // Deliberately persist them in a non-canonical order; the renderer owns the
+  // canonical EQ -> compressor -> denoise -> limiter order.
+  track.effects = {limiter, denoise, compressor, eq};
+  const auto frozen = snapshot(timeline, {track});
+  const auto registry = registry_for(timeline);
+
+  TimelineAudioRenderer whole_renderer(registry);
+  const auto whole = whole_renderer.render(frozen, {.start_sample = 0, .sample_count = 2'400});
+  ASSERT_TRUE(whole) << whole.error().message;
+
+  TimelineAudioRenderer partitioned_renderer(registry);
+  const auto first =
+      partitioned_renderer.render(frozen, {.start_sample = 0, .sample_count = 1'200});
+  const auto second =
+      partitioned_renderer.render(frozen, {.start_sample = 1'200, .sample_count = 1'200});
+  ASSERT_TRUE(first) << first.error().message;
+  ASSERT_TRUE(second) << second.error().message;
+  for (std::size_t index = 0; index < 1'200; ++index) {
+    EXPECT_FLOAT_EQ(first.value().channel(0)[index], whole.value().channel(0)[index]);
+    EXPECT_FLOAT_EQ(first.value().channel(1)[index], whole.value().channel(1)[index]);
+    EXPECT_FLOAT_EQ(second.value().channel(0)[index], whole.value().channel(0)[index + 1'200]);
+    EXPECT_FLOAT_EQ(second.value().channel(1)[index], whole.value().channel(1)[index + 1'200]);
   }
 }
 

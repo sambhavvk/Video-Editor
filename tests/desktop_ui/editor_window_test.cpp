@@ -9,10 +9,13 @@
 #include "video_editor/desktop_ui/timeline_widget.hpp"
 
 #include <QAction>
+#include <QComboBox>
 #include <QCoreApplication>
 #include <QDockWidget>
 #include <QFileInfo>
+#include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMouseEvent>
 #include <QProgressBar>
 #include <QPushButton>
@@ -44,6 +47,7 @@ private slots:
   void exposesTransportControllerSignals();
   void mediaBinShowsProxyLifecycle();
   void audioMixerReflectsTrackState();
+  void audioMixerDisplaysStableTrackMeters();
   void captionsPanelEmitsEditableCueActions();
   void timelineVirtualizesAndSeeks();
   void timelineEmitsTypedMovePreviewAndCommit();
@@ -60,7 +64,9 @@ private slots:
   void timelineMarkerSnappingExcludesTheDraggedMarker();
   void timelineRefreshCancelsMarkerGesturesAndUsesAuthoritativeSelection();
   void timelineCanCreateTracksWithoutAnExistingTrack();
+  void inspectorExposesKeyframeAuthoring();
   void deliverPanelShowsCancelableProgress();
+  void audioMixerShowsSystemDefaultAndAuthoritativeLufsStates();
 };
 
 namespace {
@@ -265,6 +271,42 @@ void EditorWindowTest::mediaBinShowsProxyLifecycle() {
   QCOMPARE(table->item(0, 3)->text(), QStringLiteral("Proxy ready"));
 }
 
+void EditorWindowTest::inspectorExposesKeyframeAuthoring() {
+  video_editor::desktop_ui::InspectorWidget inspector;
+  QSignalSpy interpolation(
+      &inspector, &video_editor::desktop_ui::InspectorWidget::effectKeyframeInterpolationEdited);
+  QSignalSpy removed(&inspector, &video_editor::desktop_ui::InspectorWidget::effectKeyframeRemoved);
+  video_editor::desktop_ui::EffectParameterView parameter{
+      .effectId = QStringLiteral("effect"),
+      .effectName = QStringLiteral("Color"),
+      .parameterId = QStringLiteral("exposure"),
+      .displayName = QStringLiteral("Exposure"),
+      .value = 0.0,
+      .duration = 48'000,
+      .keyframes = {
+          {.id = QStringLiteral("kf"),
+           .time = 24'000,
+           .value = 1.0,
+           .interpolation = video_editor::desktop_ui::KeyframeInterpolationView::Linear}}};
+  inspector.setEffectParameters({parameter});
+  auto* list = inspector.findChild<QListWidget*>(QStringLiteral("keyframeList"));
+  auto* interpolationBox = inspector.findChild<QComboBox*>(QStringLiteral("keyframeInterpolation"));
+  auto* remove = inspector.findChild<QToolButton*>(QStringLiteral("deleteKeyframe"));
+  auto* curve = inspector.findChild<QWidget*>(QStringLiteral("keyframeCurve"));
+  QVERIFY(list != nullptr);
+  QVERIFY(interpolationBox != nullptr);
+  QVERIFY(remove != nullptr);
+  QVERIFY(curve != nullptr);
+  QCOMPARE(list->count(), 1);
+  interpolationBox->setCurrentIndex(2);
+  QCOMPARE(interpolation.count(), 1);
+  QCOMPARE(interpolation.at(0).at(0).toString(), QStringLiteral("effect"));
+  QCOMPARE(interpolation.at(0).at(1).toString(), QStringLiteral("exposure"));
+  remove->click();
+  QCOMPARE(removed.count(), 1);
+  QCOMPARE(removed.at(0).at(2).toString(), QStringLiteral("kf"));
+}
+
 void EditorWindowTest::audioMixerReflectsTrackState() {
   video_editor::desktop_ui::AudioMixerWidget mixer;
   QSignalSpy muted(&mixer, &video_editor::desktop_ui::AudioMixerWidget::muteToggled);
@@ -283,11 +325,81 @@ void EditorWindowTest::audioMixerReflectsTrackState() {
   QVERIFY(first_mute->isChecked());
   QVERIFY(second_solo->isChecked());
   QVERIFY(first_fader->isEnabled());
+  QCOMPARE(first_fader->minimum(), -96);
+  QCOMPARE(first_fader->maximum(), 24);
 
   first_mute->click();
   QCOMPARE(muted.count(), 1);
   QCOMPARE(muted.at(0).at(0).toInt(), 0);
   QVERIFY(!muted.at(0).at(1).toBool());
+
+  mixer.setMasterMeter(-1.0F, -8.0F, -14.2, true, true, false);
+  auto* loudness = mixer.findChild<QLabel*>(QStringLiteral("masterLufsMeter"));
+  QVERIFY(loudness != nullptr);
+  QVERIFY(loudness->text().contains(QStringLiteral("LUFS-I")));
+}
+
+void EditorWindowTest::audioMixerDisplaysStableTrackMeters() {
+  video_editor::desktop_ui::AudioMixerWidget mixer;
+  mixer.setTracks({{.id = QStringLiteral("track-a"), .displayName = QStringLiteral("Dialogue")},
+                   {.id = QStringLiteral("track-b"), .displayName = QStringLiteral("Music")}});
+  mixer.setTrackMeters({{.id = QStringLiteral("track-a"),
+                         .peak_dbfs = {-3.0F, -6.0F},
+                         .rms_dbfs = {-12.0F, -14.0F},
+                         .active = true,
+                         .stale = false},
+                        {.id = QStringLiteral("track-b"),
+                         .peak_dbfs = {0.0F, 0.0F},
+                         .rms_dbfs = {0.0F, 0.0F},
+                         .active = false,
+                         .stale = false}});
+  auto* dialogue = mixer.findChild<QProgressBar*>(QStringLiteral("audioMeter.0"));
+  auto* music = mixer.findChild<QProgressBar*>(QStringLiteral("audioMeter.1"));
+  QVERIFY(dialogue != nullptr);
+  QVERIFY(music != nullptr);
+  QCOMPARE(dialogue->value(), 57);
+  QVERIFY(dialogue->isEnabled());
+  QCOMPARE(music->value(), 0);
+  QVERIFY(!music->isEnabled());
+  QVERIFY(dialogue->toolTip().contains(QStringLiteral("Peak: -3.0 dBFS")));
+  QVERIFY(music->toolTip().contains(QStringLiteral("inactive")));
+
+  // A reordered view updates by stable IDs, not the prior strip index.
+  mixer.setTracks({{.id = QStringLiteral("track-b"), .displayName = QStringLiteral("Music")},
+                   {.id = QStringLiteral("track-a"), .displayName = QStringLiteral("Dialogue")}});
+  mixer.setTrackMeters({{.id = QStringLiteral("track-a"),
+                         .peak_dbfs = {-9.0F, -9.0F},
+                         .rms_dbfs = {-18.0F, -18.0F},
+                         .active = true,
+                         .stale = false}});
+  auto* reordered_dialogue = mixer.findChild<QProgressBar*>(QStringLiteral("audioMeter.1"));
+  QVERIFY(reordered_dialogue != nullptr);
+  QCOMPARE(reordered_dialogue->value(), 51);
+  QVERIFY(reordered_dialogue->isEnabled());
+
+  // An empty/stopped snapshot clears removed strips instead of leaving stale
+  // telemetry visible.
+  mixer.setTrackMeters({});
+  QCOMPARE(reordered_dialogue->value(), 0);
+  QVERIFY(!reordered_dialogue->isEnabled());
+  QVERIFY(reordered_dialogue->toolTip().contains(QStringLiteral("inactive")));
+}
+
+void EditorWindowTest::audioMixerShowsSystemDefaultAndAuthoritativeLufsStates() {
+  video_editor::desktop_ui::AudioMixerWidget mixer;
+  mixer.setOutputDevices({QStringLiteral("speaker")}, {QStringLiteral("Speaker")}, {}, true,
+                         QStringLiteral("Ready"));
+  auto* selector = mixer.findChild<QComboBox*>(QStringLiteral("audioOutputDevice"));
+  QVERIFY(selector != nullptr);
+  QCOMPARE(selector->itemData(0).toString(), QString{});
+  QCOMPARE(selector->itemText(0), QStringLiteral("System default"));
+  mixer.setMasterMeter(-1.0F, -8.0F, -14.2, true, true, false);
+  auto* lufs = mixer.findChild<QLabel*>(QStringLiteral("masterLufsMeter"));
+  QVERIFY(lufs != nullptr);
+  QVERIFY(lufs->text().contains(QStringLiteral("LUFS-I")));
+  QVERIFY(lufs->text().contains(QStringLiteral("-14.2")));
+  mixer.setMasterMeter(-1.0F, -8.0F, -14.2, true, false, true);
+  QVERIFY(lufs->text().contains(QStringLiteral("stale")));
 }
 
 void EditorWindowTest::captionsPanelEmitsEditableCueActions() {

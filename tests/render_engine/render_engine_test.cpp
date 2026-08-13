@@ -130,6 +130,40 @@ edit::TimelineSnapshot make_single_snapshot(const edit::EntityId asset_id, const
   return snapshot.value();
 }
 
+edit::TimelineSnapshot make_effect_snapshot(const edit::EntityId asset_id,
+                                            std::vector<edit::Effect> effects, const int width = 2,
+                                            const int height = 1) {
+  edit::Project project;
+  edit::Asset asset;
+  asset.id = asset_id;
+  asset.name = "Effect source";
+  asset.source_uri = "memory://effect";
+  asset.duration = edit::Time(30, 30);
+  asset.has_video = true;
+  asset.width = static_cast<std::uint32_t>(width);
+  asset.height = static_cast<std::uint32_t>(height);
+  project.assets.push_back(asset);
+
+  edit::Sequence sequence;
+  sequence.width = static_cast<std::uint32_t>(width);
+  sequence.height = static_cast<std::uint32_t>(height);
+  edit::Track track;
+  track.kind = edit::TrackKind::Video;
+  edit::Clip clip;
+  clip.asset_id = asset_id;
+  clip.timeline_range = {edit::Time(0, 30), edit::Time(30, 30)};
+  clip.source_range = clip.timeline_range;
+  clip.effects = std::move(effects);
+  track.clips.push_back(std::move(clip));
+  sequence.tracks.push_back(std::move(track));
+  const auto sequence_id = sequence.id;
+  project.sequences.push_back(std::move(sequence));
+  edit::TimelineEditor editor(std::move(project));
+  auto snapshot = editor.snapshot(sequence_id, editor.revision());
+  EXPECT_TRUE(snapshot) << (snapshot ? "" : snapshot.error().message);
+  return snapshot.value();
+}
+
 class RecordingProvider final : public FrameProvider {
 public:
   std::map<edit::EntityId, std::shared_ptr<const CpuFrame>> frames;
@@ -324,6 +358,59 @@ TEST(CpuRenderer, RejectsStaleEpochBeforeProviderWork) {
   ASSERT_FALSE(result);
   EXPECT_EQ(result.error->code, RenderErrorCode::StaleRequest);
   EXPECT_FALSE(provider->last_request.has_value());
+}
+
+TEST(CpuRenderer, EvaluatesColorKeyframesAtClipLocalTime) {
+  const auto asset_id = edit::EntityId::generate();
+  edit::Effect effect;
+  effect.type = "video.color";
+  edit::EffectParameter exposure{.id = "exposure", .value = 0.0, .keyframes = {}};
+  exposure.keyframes = {
+      edit::Keyframe{.time = edit::Time(0, 1), .value = 0.0},
+      edit::Keyframe{.time = edit::Time(1, 2), .value = 2.0},
+  };
+  effect.parameters.emplace(exposure.id, exposure);
+  const auto snapshot = make_effect_snapshot(asset_id, {effect});
+  auto source = std::make_shared<CpuFrame>(2, 1);
+  source->clear(0.25F, 0.25F, 0.25F, 1.0F);
+  auto provider = std::make_shared<PatternProvider>();
+  provider->frames.emplace(asset_id, source);
+  CpuRenderer renderer(provider);
+  renderer.begin_epoch(1);
+  const auto before = renderer.request_frame(snapshot, edit::Time(0, 1), {}, 1);
+  const auto after = renderer.request_frame(snapshot, edit::Time(1, 2), {}, 1);
+  ASSERT_TRUE(before);
+  ASSERT_TRUE(after);
+  const auto before_frame = std::get<std::shared_ptr<const CpuFrame>>(before.value->storage);
+  const auto after_frame = std::get<std::shared_ptr<const CpuFrame>>(after.value->storage);
+  EXPECT_NEAR(before_frame->pixel(0, 0)[0], 0.25F, 0.001F);
+  EXPECT_NEAR(after_frame->pixel(0, 0)[0], 1.0F, 0.001F);
+}
+
+TEST(CpuRenderer, BypassesGaussianBlurOnlyForPreview) {
+  const auto asset_id = edit::EntityId::generate();
+  edit::Effect effect;
+  effect.type = "video.gaussian_blur";
+  effect.parameters.emplace("radius",
+                            edit::EffectParameter{.id = "radius", .value = 1.0, .keyframes = {}});
+  const auto snapshot = make_effect_snapshot(asset_id, {effect});
+  auto source = std::make_shared<CpuFrame>(2, 1);
+  set_pixel(*source, 0, 0, {1.0F, 0.0F, 0.0F, 1.0F});
+  set_pixel(*source, 1, 0, {0.0F, 0.0F, 1.0F, 1.0F});
+  auto provider = std::make_shared<PatternProvider>();
+  provider->frames.emplace(asset_id, source);
+  CpuRenderer renderer(provider);
+  renderer.begin_epoch(1);
+  const auto preview = renderer.request_frame(snapshot, edit::Time(0, 1),
+                                              PreviewProfile{.bypass_expensive_effects = true}, 1);
+  const auto full = renderer.request_frame(snapshot, edit::Time(0, 1),
+                                           PreviewProfile{.bypass_expensive_effects = false}, 1);
+  ASSERT_TRUE(preview);
+  ASSERT_TRUE(full);
+  const auto preview_frame = std::get<std::shared_ptr<const CpuFrame>>(preview.value->storage);
+  const auto full_frame = std::get<std::shared_ptr<const CpuFrame>>(full.value->storage);
+  EXPECT_NEAR(preview_frame->pixel(0, 0)[0], 1.0F, 0.001F);
+  EXPECT_NEAR(full_frame->pixel(0, 0)[0], 0.5F, 0.001F);
 }
 
 TEST(CpuRenderer, BilinearScaleUsesPixelCentersAndSignedScaleFlips) {

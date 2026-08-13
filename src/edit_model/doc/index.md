@@ -12,6 +12,8 @@ and undoable mutations.
 - [TimelineEditor](TimelineEditor.md) describes revisions, atomic apply/batch, history, snapshots,
   and derived gaps.
 - [Exact snapping](snapping.md) describes candidates, exclusions, and deterministic tie ordering.
+- [Effect evaluation](effect-evaluation.md) describes clip-local Hold/Linear/Bezier curves and
+  known-effect validation.
 - [Timeline semantics](../../../docs/reference/timeline-semantics.md) documents cross-command
   invariants.
 

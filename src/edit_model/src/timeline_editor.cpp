@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "video_editor/edit_model/timeline_editor.h"
+#include "video_editor/edit_model/effect_evaluator.h"
 
 #include <algorithm>
 #include <cmath>
@@ -460,6 +461,11 @@ validateTransition(const Project& project, const Sequence& sequence, const Trans
   if (const auto issue = validateAudioProperties(clip)) {
     return issue;
   }
+  for (const auto& effect : clip.effects) {
+    if (const auto issue = validateEffect(effect, clip.timeline_range.duration)) {
+      return error(EditErrorCode::InvalidArgument, *issue);
+    }
+  }
   return std::nullopt;
 }
 
@@ -513,11 +519,32 @@ validateTransition(const Project& project, const Sequence& sequence, const Trans
             return error(EditErrorCode::DuplicateId,
                          "project contains a duplicate or nil effect id");
           }
+          for (const auto& [parameter_id, parameter] : effect.parameters) {
+            static_cast<void>(parameter_id);
+            for (const auto& keyframe : parameter.keyframes) {
+              if (!addId(keyframe.id)) {
+                return error(EditErrorCode::DuplicateId,
+                             "project contains a duplicate or nil keyframe id");
+              }
+            }
+          }
         }
       }
       for (const auto& effect : track.effects) {
         if (!addId(effect.id)) {
           return error(EditErrorCode::DuplicateId, "project contains a duplicate or nil effect id");
+        }
+        if (const auto issue = validateEffect(effect)) {
+          return error(EditErrorCode::InvalidArgument, *issue);
+        }
+        for (const auto& [parameter_id, parameter] : effect.parameters) {
+          static_cast<void>(parameter_id);
+          for (const auto& keyframe : parameter.keyframes) {
+            if (!addId(keyframe.id)) {
+              return error(EditErrorCode::DuplicateId,
+                           "project contains a duplicate or nil keyframe id");
+            }
+          }
         }
       }
     }
@@ -1592,6 +1619,10 @@ struct PlannedClip final {
             if (location->track->locked) {
               return error(EditErrorCode::TrackLocked, "cannot edit effects on a locked track");
             }
+            if (const auto issue =
+                    validateEffect(command.effect, location->clip->timeline_range.duration)) {
+              return error(EditErrorCode::InvalidArgument, *issue);
+            }
             if (std::any_of(location->clip->effects.begin(), location->clip->effects.end(),
                             [&](const Effect& effect) { return effect.id == command.effect.id; })) {
               return error(EditErrorCode::DuplicateId, "an effect with the same id already exists");
@@ -1640,6 +1671,12 @@ struct PlannedClip final {
             }
             if (command.parameter.id.empty()) {
               return error(EditErrorCode::InvalidArgument, "effect parameter id cannot be empty");
+            }
+            auto candidate_effect = *found;
+            candidate_effect.parameters.insert_or_assign(command.parameter.id, command.parameter);
+            if (const auto issue =
+                    validateEffect(candidate_effect, location->clip->timeline_range.duration)) {
+              return error(EditErrorCode::InvalidArgument, *issue);
             }
             found->parameters.insert_or_assign(command.parameter.id, command.parameter);
             return std::nullopt;
@@ -1758,15 +1795,15 @@ struct PlannedClip final {
                            "title clips do not support speed or reverse controls");
             }
             if (command.playback_rate.denominator() == 0) {
-              return error(EditErrorCode::InvalidArgument, "playback rate denominator cannot be zero");
+              return error(EditErrorCode::InvalidArgument,
+                           "playback rate denominator cannot be zero");
             }
             if (command.playback_rate.numerator() == 0) {
               return error(EditErrorCode::InvalidArgument,
                            "playback rate numerator must be positive (use reversed for direction)");
             }
-            const long double rate =
-                static_cast<long double>(command.playback_rate.numerator()) /
-                static_cast<long double>(command.playback_rate.denominator());
+            const long double rate = static_cast<long double>(command.playback_rate.numerator()) /
+                                     static_cast<long double>(command.playback_rate.denominator());
             if (rate < 0.01L || rate > 100.0L) {
               return error(EditErrorCode::InvalidArgument,
                            "playback rate must be between 0.01x and 100x");
@@ -1806,13 +1843,95 @@ struct PlannedClip final {
               return error(EditErrorCode::InvalidTrackKind,
                            "only audio tracks have mixer gain and pan");
             }
-            if (!std::isfinite(command.gain_db) || !std::isfinite(command.pan)) {
+            if (!inClosedRange(command.gain_db, kMinimumAudioGainDb, kMaximumAudioGainDb) ||
+                !inClosedRange(command.pan, -1.0, 1.0)) {
               return error(EditErrorCode::InvalidArgument,
-                           "track gain and pan must be finite");
+                           "track audio gain must be within [-96, 24] dB and pan within [-1, 1]");
             }
             // Track locking protects editorial mutations, not live mixer state.
             track->audio_gain_db = command.gain_db;
             track->audio_pan = command.pan;
+            return std::nullopt;
+          },
+          [&](const AddTrackEffectCommand& command) -> std::optional<EditError> {
+            auto* sequence = mutableSequence(project, command.sequence_id);
+            if (sequence == nullptr) {
+              return error(EditErrorCode::EntityNotFound, "sequence was not found");
+            }
+            auto* track = mutableTrack(*sequence, command.track_id);
+            if (track == nullptr) {
+              return error(EditErrorCode::EntityNotFound, "track was not found");
+            }
+            if (track->kind != TrackKind::Audio) {
+              return error(EditErrorCode::InvalidTrackKind, "only audio tracks have audio effects");
+            }
+            if (track->locked) {
+              return error(EditErrorCode::TrackLocked, "cannot edit effects on a locked track");
+            }
+            if (const auto issue = validateEffect(command.effect)) {
+              return error(EditErrorCode::InvalidArgument, *issue);
+            }
+            if (std::any_of(track->effects.begin(), track->effects.end(),
+                            [&](const Effect& effect) { return effect.id == command.effect.id; })) {
+              return error(EditErrorCode::DuplicateId, "an effect with the same id already exists");
+            }
+            track->effects.push_back(command.effect);
+            return std::nullopt;
+          },
+          [&](const RemoveTrackEffectCommand& command) -> std::optional<EditError> {
+            auto* sequence = mutableSequence(project, command.sequence_id);
+            if (sequence == nullptr) {
+              return error(EditErrorCode::EntityNotFound, "sequence was not found");
+            }
+            auto* track = mutableTrack(*sequence, command.track_id);
+            if (track == nullptr) {
+              return error(EditErrorCode::EntityNotFound, "track was not found");
+            }
+            if (track->kind != TrackKind::Audio) {
+              return error(EditErrorCode::InvalidTrackKind, "only audio tracks have audio effects");
+            }
+            if (track->locked) {
+              return error(EditErrorCode::TrackLocked, "cannot edit effects on a locked track");
+            }
+            const auto found =
+                std::find_if(track->effects.begin(), track->effects.end(),
+                             [&](const Effect& effect) { return effect.id == command.effect_id; });
+            if (found == track->effects.end()) {
+              return error(EditErrorCode::EntityNotFound, "effect was not found");
+            }
+            track->effects.erase(found);
+            return std::nullopt;
+          },
+          [&](const SetTrackEffectParameterCommand& command) -> std::optional<EditError> {
+            auto* sequence = mutableSequence(project, command.sequence_id);
+            if (sequence == nullptr) {
+              return error(EditErrorCode::EntityNotFound, "sequence was not found");
+            }
+            auto* track = mutableTrack(*sequence, command.track_id);
+            if (track == nullptr) {
+              return error(EditErrorCode::EntityNotFound, "track was not found");
+            }
+            if (track->kind != TrackKind::Audio) {
+              return error(EditErrorCode::InvalidTrackKind, "only audio tracks have audio effects");
+            }
+            if (track->locked) {
+              return error(EditErrorCode::TrackLocked, "cannot edit effects on a locked track");
+            }
+            const auto found =
+                std::find_if(track->effects.begin(), track->effects.end(),
+                             [&](const Effect& effect) { return effect.id == command.effect_id; });
+            if (found == track->effects.end()) {
+              return error(EditErrorCode::EntityNotFound, "effect was not found");
+            }
+            if (command.parameter.id.empty()) {
+              return error(EditErrorCode::InvalidArgument, "effect parameter id cannot be empty");
+            }
+            auto candidate_effect = *found;
+            candidate_effect.parameters.insert_or_assign(command.parameter.id, command.parameter);
+            if (const auto issue = validateEffect(candidate_effect)) {
+              return error(EditErrorCode::InvalidArgument, *issue);
+            }
+            found->parameters.insert_or_assign(command.parameter.id, command.parameter);
             return std::nullopt;
           },
           [&](const AddTransitionCommand& command) -> std::optional<EditError> {
@@ -1968,6 +2087,12 @@ std::string commandName(const EditCommand& command) {
           return "Set track audio state";
         if constexpr (std::is_same_v<T, SetTrackAudioMixCommand>)
           return "Set track audio mix";
+        if constexpr (std::is_same_v<T, AddTrackEffectCommand>)
+          return "Add track effect";
+        if constexpr (std::is_same_v<T, RemoveTrackEffectCommand>)
+          return "Remove track effect";
+        if constexpr (std::is_same_v<T, SetTrackEffectParameterCommand>)
+          return "Set track effect parameter";
         if constexpr (std::is_same_v<T, SetClipTitleCommand>)
           return "Set clip title";
         if constexpr (std::is_same_v<T, SetClipSpeedCommand>)

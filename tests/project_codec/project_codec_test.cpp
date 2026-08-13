@@ -425,16 +425,22 @@ TEST(ProjectCodecTest, TrackVisibilityAndTargetingRoundTripAndOldV2Defaults) {
   auto& track = project.sequences[0].tracks[0];
   track.visible = false;
   track.targeted = false;
+  track.audio_gain_db = -6.0;
+  track.audio_pan = 0.25;
   const auto encoded = serialize_project(project);
   auto decoded = deserialize_project(encoded);
   ASSERT_TRUE(decoded);
   EXPECT_FALSE(decoded.value().sequences[0].tracks[0].visible);
   EXPECT_FALSE(decoded.value().sequences[0].tracks[0].targeted);
+  EXPECT_DOUBLE_EQ(decoded.value().sequences[0].tracks[0].audio_gain_db, -6.0);
+  EXPECT_DOUBLE_EQ(decoded.value().sequences[0].tracks[0].audio_pan, 0.25);
 
   video_editor::persistence::v1::ProjectSnapshot old_v2;
   ASSERT_TRUE(old_v2.ParseFromArray(encoded.data(), static_cast<int>(encoded.size())));
   old_v2.mutable_project()->mutable_sequences(0)->mutable_tracks(0)->clear_visible();
   old_v2.mutable_project()->mutable_sequences(0)->mutable_tracks(0)->clear_targeted();
+  old_v2.mutable_project()->mutable_sequences(0)->mutable_tracks(0)->clear_audio_gain_db();
+  old_v2.mutable_project()->mutable_sequences(0)->mutable_tracks(0)->clear_audio_pan();
   std::string old_bytes;
   ASSERT_TRUE(old_v2.SerializeToString(&old_bytes));
   ProjectBytes old_payload;
@@ -445,6 +451,8 @@ TEST(ProjectCodecTest, TrackVisibilityAndTargetingRoundTripAndOldV2Defaults) {
   ASSERT_TRUE(decoded);
   EXPECT_TRUE(decoded.value().sequences[0].tracks[0].visible);
   EXPECT_TRUE(decoded.value().sequences[0].tracks[0].targeted);
+  EXPECT_DOUBLE_EQ(decoded.value().sequences[0].tracks[0].audio_gain_db, 0.0);
+  EXPECT_DOUBLE_EQ(decoded.value().sequences[0].tracks[0].audio_pan, 0.0);
 }
 
 TEST(ProjectCodecTest, SerializationIsDeterministic) {
@@ -524,6 +532,8 @@ TEST(ProjectCodecTest, AcceptsDeclaredVersionOneProjectsAndRewritesCanonicalVers
     for (auto& track : *sequence.mutable_tracks()) {
       track.clear_visible();
       track.clear_targeted();
+      track.clear_audio_gain_db();
+      track.clear_audio_pan();
     }
   }
   std::string old_bytes;
@@ -601,6 +611,26 @@ TEST(ProjectCodecTest, RejectsDeclaredVersionOneSnapshotsThatSmuggleTrackPresent
   EXPECT_EQ(decoded.error().field_path, "project.sequences[0].tracks[0].visible");
 }
 
+TEST(ProjectCodecTest, RejectsDeclaredVersionOneSnapshotsThatSmuggleTrackAudioFields) {
+  std::vector<std::uint8_t> track_message;
+  appendFieldDouble(track_message, 11, 1.0);
+  std::vector<std::uint8_t> sequence_message;
+  appendFieldMessage(sequence_message, 7, track_message);
+  std::vector<std::uint8_t> project_message;
+  appendFieldMessage(project_message, 1, makeEntityIdMessage(0x11U));
+  appendFieldMessage(project_message, 4, sequence_message);
+
+  std::vector<std::uint8_t> snapshot;
+  appendFieldVarint(snapshot, 1, 1);
+  appendFieldVarint(snapshot, 2, 1);
+  appendFieldMessage(snapshot, 3, project_message);
+
+  const auto decoded = deserialize_project(packBytes(snapshot));
+  ASSERT_FALSE(decoded);
+  EXPECT_EQ(decoded.error().code, CodecErrorCode::InvalidField);
+  EXPECT_EQ(decoded.error().field_path, "project.sequences[0].tracks[0].audio_gain_db");
+}
+
 TEST(ProjectCodecTest, RefusesToSerializeInvalidProjectState) {
   auto project = makeComplexProject();
   project.assets[0].id = project.id;
@@ -610,6 +640,18 @@ TEST(ProjectCodecTest, RefusesToSerializeInvalidProjectState) {
   } catch (const CodecException& exception) {
     EXPECT_EQ(exception.error().code, CodecErrorCode::InvalidProject);
     EXPECT_FALSE(exception.error().message.empty());
+  }
+}
+
+TEST(ProjectCodecTest, RefusesToSerializeOutOfRangeTrackMixerState) {
+  auto project = makeComplexProject();
+  project.sequences[0].tracks[0].audio_gain_db = 24.01;
+  try {
+    (void)serialize_project(project);
+    FAIL() << "expected CodecException";
+  } catch (const CodecException& exception) {
+    EXPECT_EQ(exception.error().code, CodecErrorCode::InvalidField);
+    EXPECT_EQ(exception.error().field_path, "project.sequences[0].tracks[0].audio_gain_db");
   }
 }
 
