@@ -18,6 +18,9 @@ struct AudioDeviceConfiguration final {
   AudioFormat format{};
   AudioDeviceCallback callback{nullptr};
   void* user_data{nullptr};
+  // Empty selects the backend default. Backends must treat this as a stable
+  // opaque identifier, not as a user-facing device name.
+  std::string device_id;
 };
 
 enum class AudioDeviceErrorCode : std::uint8_t {

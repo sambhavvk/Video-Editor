@@ -439,6 +439,10 @@ PlaybackMeter::Reading AsyncRealtimeAudioPlayback::read_meter() const noexcept {
   return impl_->playback.read_meter();
 }
 
+RealtimeLoudnessAnalyzer::Reading AsyncRealtimeAudioPlayback::read_loudness() const noexcept {
+  return impl_->playback.read_loudness();
+}
+
 bool AsyncRealtimeAudioPlayback::wait_until_completed(
     const std::uint64_t version, const std::chrono::milliseconds timeout) const {
   std::unique_lock lock(impl_->result_mutex);

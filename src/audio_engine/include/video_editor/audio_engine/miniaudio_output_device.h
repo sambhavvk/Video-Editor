@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 #pragma once
 
+#include "video_editor/audio_engine/audio_device_manager.h"
 #include "video_editor/audio_engine/audio_output_device.h"
 
 #include <memory>
@@ -32,6 +33,11 @@ public:
 private:
   class Impl;
   std::unique_ptr<Impl> impl_;
+};
+
+class MiniaudioDeviceEnumerator final : public AudioDeviceEnumerator {
+public:
+  [[nodiscard]] std::vector<AudioDeviceInfo> enumerate() override;
 };
 
 } // namespace video_editor::audio

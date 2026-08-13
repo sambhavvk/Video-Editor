@@ -25,7 +25,14 @@ of 48 kHz, stereo, planar `float32` audio.
   sample in the half-open source range.
 - Audio tracks obey mute and global solo selection. Active clips are summed
   without implicit limiting. Clip gain is in dB, pan is constant-power, and
-  linear fades are evaluated in timeline time. Gaps are deterministic zeroes.
+  linear fades are evaluated in timeline time. The accumulated track mix then applies track gain
+  and stereo balance/pan followed by the canonical stateful chain EQ → compressor → dialogue noise
+  reduction → limiter. Gaps are deterministic zeroes.
+- Each audible track publishes peak/RMS after its gain/pan and DSP stage. Readings use stable track
+  IDs and exact half-open sample ranges in a bounded immutable history. Realtime UI code calls
+  `trackMetersAt(audio_master_sample)` so decode-ahead cannot display a future block; gaps and
+  uncovered ranges are explicitly inactive or stale. Metering reuses the rendered track block and
+  performs no additional decode.
 
 The decoder installs an FFmpeg interrupt callback and also checks cancellation
 between packets, frames, clips, and mixed samples. It seeks with one second of
@@ -38,8 +45,9 @@ revision or resampler-history leakage between deterministic export requests.
 - Playback-rate conversion is deterministic nearest-left sample selection; a
   later high-quality time-stretch/resampling policy can replace it without
   changing timeline time or sample-count semantics. Pitch is not preserved.
-- Track/clip effect chains, dialogue DSP, loudness normalization, and master
-  limiting are separate graph stages and are not applied here yet.
+- Supported track effects are applied; clip effects, arbitrary buses, and a separate master-effect
+  graph are not. Loudness normalization is represented as an explicit reviewed track-gain edit,
+  not an invisible renderer stage.
 - This renderer produces stereo blocks but does not drive an audio device or
   mux encoded audio. Export integration should request consecutive blocks from
   the same immutable revision, encode them, and use the block's absolute sample
@@ -52,7 +60,8 @@ revision or resampler-history leakage between deterministic export requests.
 
 The module tests generate deterministic PCM fixtures and cover exact ranges,
 timeline/source offsets, rate and reverse mapping, overlap summation, gain/pan,
-fades, mute/solo, nonzero input PTS, missing originals, cancellation, and
-bit-for-bit repeated requests. The target participates in the repository's
+fades, track gain/pan, mute/solo, ordered DSP, block-partition state continuity, stable-ID and
+audio-master-position meter selection, nonzero input PTS,
+missing originals, cancellation, and bit-for-bit repeated requests. The target participates in the repository's
 strict-warning and ASan/UBSan options once added after `audio_engine` in the
 media dependency order.

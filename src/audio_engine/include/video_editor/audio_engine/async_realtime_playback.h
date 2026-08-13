@@ -88,6 +88,7 @@ public:
   // Read the latest meter levels and reset the accumulators. Safe to call
   // from the GUI thread.
   [[nodiscard]] PlaybackMeter::Reading read_meter() const noexcept;
+  [[nodiscard]] RealtimeLoudnessAnalyzer::Reading read_loudness() const noexcept;
 
   // Test/worker synchronization helper. GUI code should observe versions via
   // diagnostics instead of waiting.

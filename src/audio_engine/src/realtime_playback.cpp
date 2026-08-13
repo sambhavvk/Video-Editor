@@ -262,6 +262,8 @@ public:
       std::lock_guard lock(status_mutex);
       last_error.clear();
     }
+    meter.reset();
+    loudness_analyzer.reset();
     epoch.fetch_add(1U, std::memory_order_acq_rel);
   }
 
@@ -269,8 +271,10 @@ public:
     if (device == nullptr) {
       return PlaybackControlResult::success();
     }
-    const AudioDeviceResult opened = device->open(
-        {.format = kPlaybackAudioFormat, .callback = &Impl::device_callback, .user_data = this});
+    const AudioDeviceResult opened = device->open({.format = kPlaybackAudioFormat,
+                                                   .callback = &Impl::device_callback,
+                                                   .user_data = this,
+                                                   .device_id = configuration.device_id});
     if (!opened) {
       return PlaybackControlResult::failure({.code = PlaybackControlErrorCode::DeviceOpenFailed,
                                              .message = opened.error->message,
@@ -517,6 +521,8 @@ public:
     next_render_sample.store(0, std::memory_order_release);
     provider_exhausted.store(false, std::memory_order_release);
     worker_failed.store(false, std::memory_order_release);
+    meter.reset();
+    loudness_analyzer.reset();
     epoch.fetch_add(1U, std::memory_order_acq_rel);
   }
 
@@ -564,6 +570,8 @@ public:
     if (read > 0U) {
       meter.process(output.data(), read / kPlaybackAudioFormat.channels,
                     kPlaybackAudioFormat.channels);
+      static_cast<void>(loudness_analyzer.submit(
+          output.data(), read / kPlaybackAudioFormat.channels, kPlaybackAudioFormat.channels));
     }
     consumer_active.clear(std::memory_order_release);
     active_callbacks.fetch_sub(1U, std::memory_order_release);
@@ -625,6 +633,7 @@ public:
   std::atomic<std::shared_ptr<std::stop_source>> worker_cancellation{nullptr};
   std::string last_error;
   mutable PlaybackMeter meter;
+  mutable RealtimeLoudnessAnalyzer loudness_analyzer{kPlaybackAudioFormat};
 };
 
 RealtimeAudioPlayback::RealtimeAudioPlayback(std::shared_ptr<PlaybackAudioProvider> provider,
@@ -702,6 +711,10 @@ PlaybackDiagnostics RealtimeAudioPlayback::diagnostics() const {
 
 PlaybackMeter::Reading RealtimeAudioPlayback::read_meter() const noexcept {
   return impl_->meter.read();
+}
+
+RealtimeLoudnessAnalyzer::Reading RealtimeAudioPlayback::read_loudness() const noexcept {
+  return impl_->loudness_analyzer.read();
 }
 
 void RealtimeAudioPlayback::request_control_cancellation() noexcept {

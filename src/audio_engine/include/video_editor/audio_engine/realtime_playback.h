@@ -3,6 +3,7 @@
 
 #include "video_editor/audio_engine/audio_block.h"
 #include "video_editor/audio_engine/audio_output_device.h"
+#include "video_editor/audio_engine/loudness_meter.h"
 #include "video_editor/audio_engine/playback_meter.h"
 
 #include <chrono>
@@ -71,6 +72,8 @@ struct RealtimePlaybackConfiguration final {
   std::size_t render_block_frames{960};
   std::size_t prefill_frames{4'800};
   std::chrono::milliseconds prefill_timeout{2'000};
+  // Stable opaque output-device identifier. Empty selects the backend default.
+  std::string device_id;
 };
 
 enum class PlaybackState : std::uint8_t {
@@ -185,6 +188,7 @@ public:
   // Read the latest meter levels and reset the accumulators. Safe to call
   // from any thread; typically called from the controller's poll timer.
   [[nodiscard]] PlaybackMeter::Reading read_meter() const noexcept;
+  [[nodiscard]] RealtimeLoudnessAnalyzer::Reading read_loudness() const noexcept;
 
   // Async control infrastructure can interrupt a blocking prefill/provider
   // pull without entering the control mutex. Direct synchronous users do not

@@ -6,12 +6,14 @@
 #include "video_editor/edit_model/result.h"
 #include "video_editor/edit_model/timeline_editor.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
 #include <stop_token>
 #include <string>
+#include <vector>
 
 namespace video_editor::audio_render {
 
@@ -45,6 +47,23 @@ struct AudioRenderRequest final {
   std::stop_token cancellation{};
 };
 
+struct TrackMeterReading final {
+  edit::EntityId track_id{};
+  std::array<float, 2> peak{0.0F, 0.0F};
+  std::array<float, 2> rms{0.0F, 0.0F};
+  bool active{false};
+};
+
+struct TrackMeterSnapshot final {
+  std::uint64_t version{0};
+  edit::Revision revision{};
+  // Half-open source-timeline range represented by this render-stage tap.
+  std::int64_t start_sample{0};
+  std::int64_t end_sample{0};
+  bool stale{true};
+  std::vector<TrackMeterReading> tracks;
+};
+
 using AudioRenderResult = edit::Result<audio::AudioBlock, AudioRenderError>;
 
 // Pull renderer intended for decode/render threads and offline export. render()
@@ -63,6 +82,16 @@ public:
 
   [[nodiscard]] AudioRenderResult render(const edit::TimelineSnapshot& snapshot,
                                          const AudioRenderRequest& request) const;
+
+  // Returns the latest bounded per-track post-DSP meter snapshot. Track IDs
+  // are authoritative; callers must not map these readings by track index.
+  // The snapshot is produced on the render worker and read from the UI thread.
+  [[nodiscard]] TrackMeterSnapshot trackMeters() const;
+
+  // Selects the bounded rendered block containing the audio-master position.
+  // A position outside retained ranges returns the latest track identity set
+  // marked stale, never a future pre-rendered block.
+  [[nodiscard]] TrackMeterSnapshot trackMetersAt(std::int64_t sample_counter) const;
 
 private:
   class Impl;

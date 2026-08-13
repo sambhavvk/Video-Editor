@@ -95,6 +95,21 @@ normal include search. Configure never downloads or vendors it. The source has
 a compile-time version assertion. Without that header the same class reports a
 typed Unavailable error and the core/fake-device tests remain fully usable.
 
+`MiniaudioDeviceEnumerator` reports connected playback endpoints with stable opaque IDs and a
+default marker. `AudioDeviceRecovery` is a non-callback state machine that can stop a disconnected
+endpoint and reopen the selected endpoint when a refreshed list reports it again. The desktop
+enumerates asynchronously once per second, persists the selected ID, and passes it into realtime
+playback startup. Loss pauses the audio master; return retries after serialized stop completes while
+the original playback intent remains active. Selecting **System default** stores the empty stable ID.
+Native event-driven hot-plug notifications are not used, so detection can lag by one poll interval.
+
+Realtime telemetry publishes callback-safe sample peak/RMS. The callback also copies into a
+preallocated, bounded, single-producer queue; `RealtimeLoudnessAnalyzer` consumes it on a dedicated
+worker and publishes authoritative EBU-R128 momentary, short-term, and integrated LUFS with version,
+validity, staleness, analyzed-frame, and dropped-block fields. Submission never allocates, locks, or
+waits. Queue overload marks the reading stale. Offline normalization uses `LoudnessMeter` over
+rendered planar blocks and likewise never runs libebur128 in the device callback.
+
 ## Diagnostics and current limitations
 
 `PlaybackDiagnostics` reports state, epoch, conservative playback position,
@@ -107,8 +122,7 @@ newest command result/error.
 
 The current worker uses independent provider pulls rather than a persistent
 FFmpeg decode lane. The application should therefore use larger decode-ahead
-blocks until the sequential decoder exists. Device hot-plug/reopen policy,
-latency calibration/hardware timestamps, output-device selection, time-stretch,
-arbitrary buses, and master DSP graph integration remain future work. The
-one-hour zero-xrun and two-hour A/V drift/device-matrix gates have not been
-demonstrated by these unit tests.
+blocks until the sequential decoder exists. Native hot-plug callbacks,
+latency calibration/hardware timestamps, time-stretch, and arbitrary buses remain future work.
+Accelerated one-hour zero-xrun and two-hour drift simulations cover the bounded core; physical
+device/driver/OS matrix endurance remains a release gate.

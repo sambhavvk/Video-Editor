@@ -13,11 +13,13 @@ extern "C" {
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
+#include <mutex>
 #include <numbers>
 #include <span>
 #include <string>
@@ -472,10 +474,26 @@ decode_requested_samples(const OriginalAudioMedia& media,
 
 class TimelineAudioRenderer::Impl final {
 public:
+  struct MeterHistory final {
+    std::vector<std::shared_ptr<const TrackMeterSnapshot>> snapshots;
+  };
+
+  struct DspSession final {
+    TrackDspChain chain;
+    edit::Revision revision{};
+    std::int64_t next_sample{0};
+    bool configured{false};
+  };
+
   explicit Impl(std::shared_ptr<const OriginalAudioProvider> source_provider)
-      : originals(std::move(source_provider)) {}
+      : originals(std::move(source_provider)),
+        meter_history(std::make_shared<const MeterHistory>()) {}
 
   std::shared_ptr<const OriginalAudioProvider> originals;
+  mutable std::mutex dsp_mutex;
+  mutable std::unordered_map<edit::EntityId, DspSession> dsp_sessions;
+  std::atomic<std::shared_ptr<const MeterHistory>> meter_history;
+  std::uint64_t meter_version{0};
 };
 
 TimelineAudioRenderer::TimelineAudioRenderer(std::shared_ptr<const OriginalAudioProvider> originals)
@@ -486,6 +504,30 @@ TimelineAudioRenderer::~TimelineAudioRenderer() = default;
 TimelineAudioRenderer::TimelineAudioRenderer(TimelineAudioRenderer&&) noexcept = default;
 
 TimelineAudioRenderer& TimelineAudioRenderer::operator=(TimelineAudioRenderer&&) noexcept = default;
+
+TrackMeterSnapshot TimelineAudioRenderer::trackMeters() const {
+  const auto history = impl_->meter_history.load(std::memory_order_acquire);
+  if (history == nullptr || history->snapshots.empty()) {
+    return TrackMeterSnapshot{};
+  }
+  return *history->snapshots.back();
+}
+
+TrackMeterSnapshot TimelineAudioRenderer::trackMetersAt(const std::int64_t sample_counter) const {
+  const auto history = impl_->meter_history.load(std::memory_order_acquire);
+  if (history == nullptr || history->snapshots.empty()) {
+    return TrackMeterSnapshot{};
+  }
+  for (auto it = history->snapshots.rbegin(); it != history->snapshots.rend(); ++it) {
+    const TrackMeterSnapshot& snapshot = **it;
+    if (sample_counter >= snapshot.start_sample && sample_counter < snapshot.end_sample) {
+      return snapshot;
+    }
+  }
+  TrackMeterSnapshot stale = *history->snapshots.back();
+  stale.stale = true;
+  return stale;
+}
 
 AudioRenderResult TimelineAudioRenderer::render(const edit::TimelineSnapshot& snapshot,
                                                 const AudioRenderRequest& request) const {
@@ -516,12 +558,33 @@ AudioRenderResult TimelineAudioRenderer::render(const edit::TimelineSnapshot& sn
                          "beta timeline audio must use a 48 kHz master sample rate");
   }
 
+  // DSP stages carry history across adjacent pulls. Serialize access to the
+  // renderer-owned sessions and reset on a seek/revision discontinuity so
+  // contiguous block rendering is equivalent to one larger request.
+  std::lock_guard dsp_lock(impl_->dsp_mutex);
+
   const bool has_solo =
       std::any_of(sequence.tracks.begin(), sequence.tracks.end(), [](const edit::Track& track) {
         return track.kind == edit::TrackKind::Audio && track.solo;
       });
+  TrackMeterSnapshot meter_snapshot;
+  meter_snapshot.version = impl_->meter_version + 1U;
+  meter_snapshot.revision = snapshot.revision();
+  meter_snapshot.start_sample = request.start_sample;
+  meter_snapshot.end_sample =
+      request.start_sample + static_cast<std::int64_t>(request.sample_count);
+  meter_snapshot.stale = false;
+  const auto audio_track_count = static_cast<std::size_t>(
+      std::count_if(sequence.tracks.begin(), sequence.tracks.end(),
+                    [](const edit::Track& track) { return track.kind == edit::TrackKind::Audio; }));
+  meter_snapshot.tracks.reserve(audio_track_count);
   for (const edit::Track& track : sequence.tracks) {
-    if (track.kind != edit::TrackKind::Audio || track.muted || (has_solo && !track.solo)) {
+    if (track.kind != edit::TrackKind::Audio) {
+      continue;
+    }
+    const bool audible = !track.muted && (!has_solo || track.solo);
+    if (!audible) {
+      meter_snapshot.tracks.push_back({.track_id = track.id, .active = false});
       continue;
     }
     // Render this track into a temporary block so track-level DSP (EQ,
@@ -531,7 +594,6 @@ AudioRenderResult TimelineAudioRenderer::render(const edit::TimelineSnapshot& sn
     audio::AudioBlock track_output(
         {.sample_rate = kTimelineAudioSampleRate, .channels = kTimelineAudioChannels},
         request.start_sample, request.sample_count);
-    bool track_has_audio = false;
     for (const edit::Clip& clip : track.clips) {
       if (clip.kind != edit::ClipKind::Audio) {
         continue;
@@ -596,10 +658,8 @@ AudioRenderResult TimelineAudioRenderer::render(const edit::TimelineSnapshot& sn
       // pan 0 -> both unity, pan=+1 -> right only) rather than the equal-power
       // law used for clip pan, because a mixer fader's center detent should
       // not attenuate the signal.
-      const float track_gain =
-          static_cast<float>(std::pow(10.0, track.audio_gain_db / 20.0));
-      const float track_pan =
-          static_cast<float>(std::clamp(track.audio_pan, -1.0, 1.0));
+      const float track_gain = static_cast<float>(std::pow(10.0, track.audio_gain_db / 20.0));
+      const float track_pan = static_cast<float>(std::clamp(track.audio_pan, -1.0, 1.0));
       const float track_left_pan = std::clamp(1.0F - track_pan, 0.0F, 1.0F);
       const float track_right_pan = std::clamp(1.0F + track_pan, 0.0F, 1.0F);
       auto left_track = track_output.channel(0);
@@ -622,21 +682,33 @@ AudioRenderResult TimelineAudioRenderer::render(const edit::TimelineSnapshot& sn
             found->second.right * clip_gain * right_pan * envelope * track_gain * track_right_pan;
         left_track[index] += left_sample;
         right_track[index] += right_sample;
-        track_has_audio = true;
       }
-    }
-    if (!track_has_audio) {
-      continue;
     }
     // Apply track-level DSP chain (EQ, compressor, dialogue denoise, limiter)
     // to the isolated track mix before summing into the master output.
     if (!track.effects.empty()) {
-      TrackDspChain dsp_chain;
-      dsp_chain.configure(track.effects, static_cast<float>(kTimelineAudioSampleRate));
-      if (!dsp_chain.empty()) {
-        dsp_chain.process(track_output);
+      auto [session_it, inserted] = impl_->dsp_sessions.try_emplace(track.id);
+      auto& session = session_it->second;
+      if (inserted || !session.configured || session.revision != snapshot.revision() ||
+          session.next_sample != request.start_sample) {
+        session.chain.configure(track.effects, static_cast<float>(kTimelineAudioSampleRate));
+        session.revision = snapshot.revision();
+        session.next_sample = request.start_sample;
+        session.configured = true;
       }
+      if (!session.chain.empty()) {
+        session.chain.process(track_output);
+      }
+      session.next_sample = request.start_sample + static_cast<std::int64_t>(request.sample_count);
     }
+    const audio::LevelReading levels = audio::measure_levels(track_output);
+    TrackMeterReading track_meter{.track_id = track.id, .active = audible};
+    if (levels.peak.size() >= track_meter.peak.size() &&
+        levels.rms.size() >= track_meter.rms.size()) {
+      std::copy_n(levels.peak.begin(), track_meter.peak.size(), track_meter.peak.begin());
+      std::copy_n(levels.rms.begin(), track_meter.rms.size(), track_meter.rms.begin());
+    }
+    meter_snapshot.tracks.push_back(track_meter);
     // Sum the processed track into the master output.
     auto left_output = output.channel(0);
     auto right_output = output.channel(1);
@@ -647,6 +719,20 @@ AudioRenderResult TimelineAudioRenderer::render(const edit::TimelineSnapshot& sn
       right_output[index] += right_track[index];
     }
   }
+
+  impl_->meter_version = meter_snapshot.version;
+  auto history =
+      std::make_shared<Impl::MeterHistory>(*impl_->meter_history.load(std::memory_order_acquire));
+  history->snapshots.push_back(
+      std::make_shared<const TrackMeterSnapshot>(std::move(meter_snapshot)));
+  constexpr std::size_t kMaxMeterHistory = 64U;
+  if (history->snapshots.size() > kMaxMeterHistory) {
+    history->snapshots.erase(
+        history->snapshots.begin(),
+        history->snapshots.begin() +
+            static_cast<std::ptrdiff_t>(history->snapshots.size() - kMaxMeterHistory));
+  }
+  impl_->meter_history.store(std::move(history), std::memory_order_release);
 
   return Result::success(std::move(output));
 }

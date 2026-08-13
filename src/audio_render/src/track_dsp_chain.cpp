@@ -4,6 +4,7 @@
 #include "video_editor/audio_engine/dialogue_denoise.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -36,11 +37,12 @@ namespace {
 class EqStage final {
 public:
   EqStage(float sample_rate, const edit::Effect& effect)
-      : biquad_(audio::Biquad::peaking(sample_rate,
-                                       param(effect, kEqFrequencyHz, 1000.0F),
+      : biquad_(audio::Biquad::peaking(sample_rate, param(effect, kEqFrequencyHz, 1000.0F),
                                        std::max(param(effect, kEqQuality, 0.707F), 0.1F),
                                        param(effect, kEqGainDb, 0.0F))) {}
-  void process(audio::AudioBlock& block) noexcept { biquad_.process(block); }
+  void process(audio::AudioBlock& block) noexcept {
+    biquad_.process(block);
+  }
 
 private:
   audio::Biquad biquad_;
@@ -57,7 +59,9 @@ public:
     settings.makeup_db = param(effect, kCompressorMakeupDb, 0.0F);
     compressor_.configure(settings);
   }
-  void process(audio::AudioBlock& block) noexcept { compressor_.process(block); }
+  void process(audio::AudioBlock& block) noexcept {
+    compressor_.process(block);
+  }
 
 private:
   audio::Compressor compressor_;
@@ -69,7 +73,9 @@ public:
     const float ceiling = param(effect, kLimiterCeilingDb, -1.0F);
     limiter_.set_ceiling(ceiling);
   }
-  void process(audio::AudioBlock& block) noexcept { limiter_.process(block); }
+  void process(audio::AudioBlock& block) noexcept {
+    limiter_.process(block);
+  }
 
 private:
   audio::LookaheadFreeLimiter limiter_;
@@ -82,7 +88,9 @@ public:
     const float threshold = param(effect, kDenoiseThresholdDb, -40.0F);
     denoise_.configure(strength, threshold);
   }
-  void process(audio::AudioBlock& block) noexcept { denoise_.process(block); }
+  void process(audio::AudioBlock& block) noexcept {
+    denoise_.process(block);
+  }
 
 private:
   audio::DialogueDenoise denoise_;
@@ -94,12 +102,13 @@ public:
   virtual void process(audio::AudioBlock& block) noexcept = 0;
 };
 
-template <typename T>
-class StageWrapper final : public StageBase {
+template <typename T> class StageWrapper final : public StageBase {
 public:
   template <typename... Args>
   explicit StageWrapper(Args&&... args) : stage_(std::forward<Args>(args)...) {}
-  void process(audio::AudioBlock& block) noexcept override { stage_.process(block); }
+  void process(audio::AudioBlock& block) noexcept override {
+    stage_.process(block);
+  }
 
 private:
   T stage_;
@@ -113,20 +122,28 @@ public:
 
   void configure(const std::vector<edit::Effect>& effects, float sample_rate) {
     stages.clear();
-    for (const edit::Effect& effect : effects) {
-      if (!effect.enabled || effect.type.empty()) {
-        continue;
+    // The persisted vector is presentation/order metadata. Audio processing
+    // has one canonical order so equivalent projects cannot produce different
+    // output merely because an inspector reordered the effect rows:
+    // parametric EQ -> compressor -> dialogue denoise -> limiter. Multiple
+    // stages of one type retain their persisted relative order.
+    constexpr std::array<std::string_view, 4> canonical_types{
+        "audio.eq", "audio.compressor", "audio.dialogue_denoise", "audio.limiter"};
+    for (const auto type : canonical_types) {
+      for (const edit::Effect& effect : effects) {
+        if (!effect.enabled || effect.type != type) {
+          continue;
+        }
+        if (type == "audio.eq") {
+          stages.push_back(std::make_unique<StageWrapper<EqStage>>(sample_rate, effect));
+        } else if (type == "audio.compressor") {
+          stages.push_back(std::make_unique<StageWrapper<CompressorStage>>(sample_rate, effect));
+        } else if (type == "audio.dialogue_denoise") {
+          stages.push_back(std::make_unique<StageWrapper<DenoiseStage>>(sample_rate, effect));
+        } else if (type == "audio.limiter") {
+          stages.push_back(std::make_unique<StageWrapper<LimiterStage>>(effect));
+        }
       }
-      if (effect.type == "audio.eq") {
-        stages.push_back(std::make_unique<StageWrapper<EqStage>>(sample_rate, effect));
-      } else if (effect.type == "audio.compressor") {
-        stages.push_back(std::make_unique<StageWrapper<CompressorStage>>(sample_rate, effect));
-      } else if (effect.type == "audio.dialogue_denoise") {
-        stages.push_back(std::make_unique<StageWrapper<DenoiseStage>>(sample_rate, effect));
-      } else if (effect.type == "audio.limiter") {
-        stages.push_back(std::make_unique<StageWrapper<LimiterStage>>(effect));
-      }
-      // Unknown effect types are silently skipped.
     }
   }
 

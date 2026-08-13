@@ -32,8 +32,9 @@ inline constexpr std::string_view kDenoiseThresholdDb = "threshold_db";
 // AudioBlock. The chain is constructed from a track's `effects` vector and
 // preserves filter state across blocks so it can process a continuous stream.
 // Processing runs on the pre-render worker thread, never in the audio device
-// callback. Unknown or disabled effects are skipped. Effect order follows the
-// vector order: typically EQ → compressor → denoise → limiter.
+// callback. Unknown or disabled effects are skipped. Processing order is
+// canonical and independent of persisted row order: EQ → compressor → denoise
+// → limiter. Multiple instances of one type retain their persisted order.
 class TrackDspChain final {
 public:
   TrackDspChain();
