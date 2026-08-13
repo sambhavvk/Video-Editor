@@ -4,13 +4,17 @@
 
 Video Editor is an offline-first Windows and Linux editor under active development. The current
 repository is an engineering vertical slice, **not a public beta**. It already proves
-exact edits, transactional projects, software preview, local proxies, captions, and safe
-video-plus-PCM reference-master export. A capability-gated libplacebo D3D11/Vulkan engine composes
+exact edits, transactional projects, software preview, local proxies, captions, safe reference
+masters, and FOSS VP9/Opus creator delivery. A capability-gated libplacebo D3D11/Vulkan engine composes
 supported active clips on the GPU before the CPU fallback; the current viewer downloads an offscreen
 image rather than using native-swapchain presentation. Realtime 48 kHz audio
 device/master-clock playback is connected for forward 1× transport in builds with the pinned
 miniaudio adapter; it reports submitted versus latency-compensated positions and uncertainty.
-Production creator delivery formats and local transcription are not complete.
+The CPU reference graph renders titles, transitions, typed effect curves, color/crop/blur nodes,
+and the ordered track-audio DSP chain. FOSS creator delivery can use QSV/VAAPI VP9 with complete
+libvpx retry. Track/master meters, worker-owned EBU-R128 loudness, editable normalization, and
+polled audio-device recovery are connected. H.264/AAC approval, the physical audio/GPU matrix, and
+local transcription are not complete.
 
 The desktop timeline now exposes atomic multi-selection edits, linked A/V split/delete,
 normal/ripple/overwrite trims, roll/slip/slide tools, track management, marker/gap interaction, and
@@ -62,6 +66,9 @@ Accepted decisions live in [`architecture/`](architecture/):
 12. [Rebuildable media cache (thumbnails, waveforms, metadata)](architecture/0012-media-cache.md)
 13. [Schema v2 title and transition contracts](architecture/0013-schema-v2-titles-transitions.md)
 14. [Professional timeline interaction boundary](architecture/0014-professional-timeline-interaction.md)
+15. [Clip-local effect curves and CPU reference effects](architecture/0015-effect-parameter-authoring.md)
+16. [FOSS creator delivery with VP9 and Opus](architecture/0016-foss-creator-delivery.md)
+17. [Professional track audio, DSP, meters, and normalization](architecture/0017-professional-audio-workflow.md)
 
 Source code and documentation in this repository use MPL-2.0. Third-party libraries and media
 fixtures retain their own licenses; see the repository's `THIRD_PARTY.md` and fixture manifests.

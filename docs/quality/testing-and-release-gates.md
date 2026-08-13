@@ -38,7 +38,8 @@ The repository currently includes tests for:
   atomic-batch undo/redo/failure, insert/move/normal-ripple-overwrite trim, explicit linked split,
   linked delete, roll/slip/slide, track rename/reorder/lock/visibility/targeting, exact derived-gap
   close/stale rejection, NTSC frame math, snap clip/marker exclusions and stable ties, validated
-  clip properties, audio-track mute/solo, canonical titles, and transition invariants;
+  clip properties, audio-track mute/solo/gain/pan/effects, canonical titles, transition invariants,
+  typed effect validation, and Hold/Linear/Bezier curve evaluation;
 - deterministic schema-v2 snapshot serialization, strict validation, schema-v1 backward reads,
   v1-field smuggling rejection (including additive track flags), old-v2 visible/targeted defaults,
   new track-state/title/transition round trips, and unknown-effect preservation;
@@ -48,8 +49,9 @@ The repository currently includes tests for:
 - FFmpeg probing, random/exact CPU frame requests, cancellation epochs, asset registry behavior,
   CPU transform/crop/opacity/blend and invisible-track behavior, deterministic title glyphs, cross-dissolve and
   dip-to-black transition boundaries, source-handle mapping, provider-failure propagation, request
-  epochs and cache keys, deterministic video plus PCM export, exact decode-back frame/sample counts,
-  and cancellation safety;
+  epochs and cache keys, deterministic video plus PCM export, VP9/Opus WebM creator output,
+  aspect-preserving scale/letterbox, exact output-rate frame counts, podcast audio-only topology,
+  caption burn-in/sidecars, exact decode-back frame/sample spans, and cancellation safety;
 - pure GPU backend selection and unavailable-stub diagnostics, plus real Vulkan
   create/upload/normal-composite/download parity, per-clip GPU transform/composition behavior, and
   device-loss state when the exact dependency and a permitted device are available. Title and
@@ -59,17 +61,27 @@ The repository currently includes tests for:
 - proxy profile resolution, PTS-map validation/round-trip, transcode behavior, cancellation, and
   destination safety;
 - subtitle validation/round-trip/reflow/search and caption application workflows;
-- audio block, ring-buffer, DSP, and loudness primitives, plus exact originals-only timeline audio
-  ranges, offsets, rate/reverse, overlap mix, gain/pan/fades, mute/solo, cancellation, and repeated
-  request determinism; realtime prefill/callback/latency-compensated clock, submitted-position and
+- audio block, ring-buffer, DSP, and libebur128 primitives, plus exact originals-only timeline audio
+  ranges, offsets, rate/reverse, overlap mix, clip/track gain/pan/fades, mute/solo, ordered
+  EQ/compressor/dialogue-denoise/limiter processing, block-partition state continuity,
+  normalization analysis, cancellation, and repeated request determinism; realtime
+  prefill/callback/latency-compensated clock, submitted-position and
   uncertainty diagnostics, pause/resume, seek epoch invalidation, underrun zero-fill/diagnostics,
   end-of-stream demand, manual-device behavior, and the bounded asynchronous control facade's
-  versioned requested/effective-state publication. Desktop tests also require start/seek/pause Qt
-  signal calls to return within 250 ms, and an opt-in 48 kHz physical-device smoke checks zero xruns;
+  versioned requested/effective-state publication. Realtime EBU-R128 tests cover bounded-queue
+  overload, reset generations, and shutdown under normal, ASan/UBSan, and TSan. Sample-range track
+  meters prove that decode-ahead does not outrun the audio master. Desktop tests also require
+  start/seek/pause Qt signal calls to return within 250 ms, selected/system-default startup,
+  selected/default loss-return recovery, delayed stop, canceled recovery, stale normalization
+  generations, and an opt-in 48 kHz physical-device smoke check with zero xruns. Accelerated one-hour
+  zero-xrun and two-hour drift simulations are available through `VE_RUN_LONG_TESTS=1`;
 - Protobuf framing/protocol compatibility and cancellation registry, plus worker probe/proxy request
   validation, preset mapping, monotonic event sequences, and terminal errors;
 - Qt window/workspace/actions/accessibility basics, timeline interactions, and an end-to-end
-  application import/edit/save/reopen/caption/export slice. Timeline coverage includes
+  application import/edit/save/reopen/caption/export slice. Desktop coverage includes title,
+  transition, speed, effect/keyframe/curve authoring, current-value mixer DSP controls,
+  revision/target-bound normalization, lightweight encoder capabilities, hardware-to-software
+  VP9 fallback progress, and creator Deliver options. Timeline coverage includes
   replace/toggle/range multi-selection, rich tool edge/body constraints, preview/single
   commit/Escape, canonical resolver and Shift bypass, exact frame-count nudging, marker/gap
   interaction, non-destructive context menus, track commands, linked split/delete, targeted
@@ -121,8 +133,9 @@ No public beta should ship until all of the following are demonstrated on the su
   codec/patent review are complete.
 
 The current application does not meet these gates because physical-device xrun/drift and latency
-calibration, non-1× realtime audio, native GPU presentation/effect-color parity, creator delivery,
-worker, corpus, and production-packaging paths are incomplete. See the
+calibration, native event-driven hot-plug validation, non-1× realtime audio, native GPU
+presentation/effect-color parity, H.264/AAC approval, worker, corpus, and production-packaging
+paths are incomplete. See the
 [feature-status matrix](../beta-feature-status.md).
 
 ## Packaging gates

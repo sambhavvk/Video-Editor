@@ -22,8 +22,9 @@ three tables:
 The snapshot Protobuf has independent `schema_version` and `minimum_reader_version` fields and
 serializes assets, sequences, tracks, clips, source/timeline ranges, transform and audio fields,
 typed effects/keyframes, markers, captions, canonical title payloads, and sequence-owned
-transitions. Track name/order, lock, output visibility, and targeting are serialized with the
-sequence; transient clip/marker/gap selection and derived gap keys are not. Unknown future effects remain opaque and disabled so a compatible reader can
+transitions. Track name/order, lock, output visibility, targeting, mute/solo, gain/pan, and typed
+audio effects are serialized with the sequence; transient clip/marker/gap selection and derived gap
+keys are not. Unknown future effects remain opaque and disabled so a compatible reader can
 round-trip their payload without applying unknown processing.
 
 Paths, fingerprints, and media descriptors are project references. Original media bytes, proxy
@@ -69,9 +70,9 @@ The desktop copies the checkpoint into a newly named local working database, ope
 it, then reads the latest supported `project.snapshot.v1` or `project.snapshot.v2` entry. The
 journal type must agree with `payload_schema_version`, and the embedded snapshot declaration is
 validated independently. Declared schema-v1 snapshots are upgraded by the codec's backward reader;
-declared schema-v2 snapshots round-trip title, transition, and track-interaction state directly.
-Older schema-v2 payloads written before visibility/targeting fields existed decode both flags as
-enabled through protobuf presence-aware defaults. The decoded project ID
+declared schema-v2 snapshots round-trip title, transition, track-interaction, and track-audio state
+directly. Older schema-v2 payloads written before additive track fields existed decode
+visibility/targeting as enabled and gain/pan as neutral through presence-aware defaults. The decoded project ID
 must match the store metadata for recovery; invalid schemas or snapshots are rejected with an error
 rather than partly opening a project.
 

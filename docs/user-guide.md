@@ -14,19 +14,20 @@ public beta. Save important work often and keep the original media files availab
   GPU attempts.
   Backend/device failures preserve the CPU frame and latch CPU preview for the session. This is not
   native swapchain presentation, zero-copy decode, or a full effects/color graph.
-- Forward 1× transport uses optional miniaudio 48 kHz stereo playback when the default output opens.
+- Forward 1× transport uses optional miniaudio 48 kHz stereo playback when the selected output opens.
   Its playhead uses a latency-compensated audio-master position, not the end of the submitted device
   buffer; the remaining latency is reported as uncertainty. Otherwise it clearly falls back to
-  silent timer-driven video. Reverse and shuttle rates other than 1× are silent.
-- Export includes deterministic 48 kHz stereo PCM audio from originals. It does **not** burn in or
-  embed captions and is not a creator-delivery H.264/AAC preset.
-- Only FFV1/Matroska and, when the encoder is available, ProRes 422 HQ/MOV masters are offered.
-- The selected-clip Inspector can change the properties listed below. Effects-browser, keyframe,
-  and source-monitor editing controls are not connected; mixer track faders and realtime meters
-  are not active. The precision timeline tools are connected.
-- Canonical title and transition state is saved and CPU-rendered, but the current desktop has no
-  title or transition creation/editing surface. Existing schema-v2 state can be rendered and
-  round-tripped; this guide does not imply an authoring workflow that is not present.
+  silent timer-driven video. Reverse and shuttle rates other than 1× are silent. Device choice is
+  persisted; one-second background polling pauses safely on loss and reopens a returned selected or
+  system-default endpoint while playback is still intended.
+- Creator presets export FOSS VP9/Opus WebM, not H.264/AAC. On Windows the exporter can select
+  VP9 QSV and on Linux VP9 VAAPI after export-worker device validation. A hardware setup, upload,
+  device, or encode failure restarts the complete atomic export with `libvpx-vp9`.
+- Master peak/RMS and integrated `LUFS-I` are live. LUFS is calculated by libebur128 on a dedicated
+  worker and explicitly shows analyzing/stale state. Normalization independently analyzes one
+  immutable revision against an editable −24 through −9 LUFS target.
+- The Inspector and Effects panel author the supported title, transition, speed, effect, and
+  keyframe controls described below. Source-monitor insert/overwrite editing remains incomplete.
 - Local transcription is not implemented; the button only explains the model requirement.
 - Relinking, persistent cache management, thumbnails, and waveforms are not complete workflows.
 - Project and internal schema compatibility are pre-beta and may change through migrations.
@@ -41,7 +42,7 @@ a different editing mode.
 - **Import** emphasizes the media bin and program viewer.
 - **Edit** emphasizes the timeline, inspector, and effects browser.
 - **Audio & Captions** shows the mixer and caption/transcript panel.
-- **Deliver** shows the current reference-master export controls.
+- **Deliver** shows reference-master and FOSS creator-delivery controls.
 
 Dock panels can be rearranged with normal Qt docking behavior. The command palette searches the
 registered application commands and their shortcuts.
@@ -147,14 +148,38 @@ for flips, but the current Inspector exposes positive scale values only.
 Selecting an audio clip reveals Gain (-96 to +24 dB), Pan, Fade In, and Fade Out. Those edits are
 validated, undoable, persistent, and used by realtime forward playback and reference export.
 
-The Audio Mixer's **M** and **S** buttons change track mute and solo state. These changes are
-revisioned, persistent, undoable, and consumed by offline timeline audio render. Track faders are
-intentionally disabled because track gain/pan is not implemented; select an audio clip and use its
-Inspector Gain/Pan controls instead. The meter strips do not show live levels yet.
+Use **Add title** to create a title at the playhead. A selected title exposes text, font family,
+size, horizontal alignment, bold, and italic controls. A selected media clip exposes constant speed
+from 0.01× through 100× and Reverse. On the timeline, transition regions expose duration handles;
+their menu changes between Cross Dissolve and Dip to Black or removes the transition. These edits
+are ordinary undoable schema-v2 state and use the CPU reference renderer when the GPU path reports
+that frame unsupported.
 
 Adjacent Inspector changes to the same property and clip use one coalescing key so continuous
-spin-box adjustment collapses in undo history. Keyframe diamonds and interpolation controls are not
-wired, so the current properties are constant over the clip.
+spin-box adjustment collapses in undo history. The Effects panel adds supported color, crop, and
+blur nodes. Expand **Effects & animation** to edit typed values, add/remove a keyframe at the
+playhead, select a keyframe, enter exact clip-local time/value, choose Hold/Linear/Bezier, delete it,
+or edit its curve. A curve drag commits once on release; Escape restores its pre-drag value. Moving
+a clip preserves its animation because keyframe times are local to that clip.
+
+## Mix and normalize audio
+
+The Audio Mixer's track strips provide Gain (−96 to +24 dB), Pan, **M**ute, and **S**olo. Each audio
+track can add parametric EQ, compressor, dialogue noise reduction, and limiter stages and edit their
+current parameter values. The state is revisioned, persistent, undoable, and rendered in the fixed
+order EQ → compressor → noise reduction → limiter for preview and export.
+
+Each track strip shows live post-DSP peak/RMS for the block at the audio-master position—not a
+future decode-ahead block. The master strip shows peak/RMS and authoritative integrated `LUFS-I`,
+with analyzing or stale state when a valid result is unavailable. Choose a named output device or
+**System default**. Background polling detects loss within one second, pauses audio safely, and
+reopens a returned endpoint only while the previous playback intent is still active.
+
+**Analyze loudness** renders the immutable current revision on a worker through libebur128. The
+result previews the measured loudness and proposed gain for the selected −24 through −9 LUFS target.
+**Apply** is enabled only while that revision is current and every contributing track can accept the
+exact proposed gain without exceeding its canonical range. Changing the target invalidates an
+in-flight or completed review. Applying publishes one atomic undo step.
 
 ## Preview and transport
 
@@ -175,7 +200,7 @@ nor a full GPU effects/color graph.
 
 Current transport supports reverse, stop, forward, play/pause, single-frame movement, ruler seeking,
 and J/K/L shuttle stepping. For forward 1× playback, a miniaudio-enabled build renders exact ranges
-from an immutable timeline snapshot on a worker, prefills a bounded ring, and starts the default
+from an immutable timeline snapshot on a worker, prefills a bounded ring, and starts the selected
 output. The audio callback records the submitted position, while the playhead uses a conservative
 latency-compensated position and exposes output latency as uncertainty; pause, resume, and seek
 update that same clock. Qt actions enqueue versioned commands on a serialized background-control
@@ -192,8 +217,9 @@ If the adapter is not compiled, the default device cannot open/start, the render
 or the device later stops, the application reports the reason and continues with silent
 timer-driven video. Reverse and non-1× shuttle are also silent. An underrun inserts silence while
 the master counter continues and reports a local warning; this prevents a backwards clock jump but
-does not make the present build a calibrated A/V-sync reference. Physical-device latency calibration,
-one-hour xrun, and two-hour drift tests still gate beta.
+does not make the present build a calibrated A/V-sync reference. Accelerated one-hour zero-xrun and
+two-hour less-than-one-frame drift simulations pass, but the stricter 10 ms requirement,
+physical-device latency calibration, and the supported hardware/OS matrix still gate beta.
 
 If a development build has no sound at forward 1×, check its CMake configure output first. The
 phrase `miniaudio adapter unavailable; manual callback fallback enabled` means that executable has
@@ -213,8 +239,9 @@ Open **Audio & Captions** to:
 
 Import validates timing, order, overlap, cue text, and UTF-8. All cues from one import form a single
 undoable edit batch. Export writes atomically and rounds timing to the nearest millisecond because
-SRT and WebVTT timestamps are millisecond-based. Caption styling, word timing, reflow UI,
-transcription, and burn-in are not integrated.
+SRT and WebVTT timestamps are millisecond-based. The Deliver panel can also burn captions into video
+or create an SRT/WebVTT sidecar. Caption styling UI, word timing, reflow UI, embedded subtitle
+streams, and transcription are not integrated.
 
 ## Create an editing proxy
 
@@ -229,27 +256,39 @@ Cancellation and failures do not commit a partial destination. Proxy association
 session-local: reopening the project does not rediscover a previously generated proxy. There is no
 cache browser, size budget, or LRU eviction yet. See [Media, proxies, and cache](reference/media-proxies-and-cache.md).
 
-## Export a video master
+## Export a master or creator file
 
 1. Add at least one clip to the sequence.
-2. Open **Deliver** and choose FFV1/Matroska or ProRes 422 HQ/MOV.
-3. Choose **Export master** and a destination.
-4. Use the same button to request cancellation while an export is running.
+2. Open **Deliver**. Choose FFV1/Matroska or ProRes/MOV for a reference master, or a YouTube,
+   vertical, or podcast preset for FOSS VP9/Opus WebM delivery.
+3. Optionally expand the controls and select resolution, frame rate, video bitrate or VP9 quality,
+   audio bitrate, and caption burn-in/sidecar behavior.
+4. Choose **Browse…** to select a destination, then **Export master**. Use the export button again
+   to request cancellation while the job is running.
 
 The exporter binds to an immutable revision, renders the full sequence resolution with originals,
 and writes a unique temporary sibling. Only a complete output is atomically committed. Failure or
 cancellation removes the temporary file and leaves an existing destination unchanged.
 
-The file contains video plus deterministic signed 16-bit little-endian PCM at 48 kHz stereo. Audio
-is rendered from the same immutable revision in bounded 960-sample (20 ms) packets. The exact master
+Reference masters contain video plus deterministic signed 16-bit little-endian PCM at 48 kHz
+stereo. Creator video presets contain VP9 plus optional `libopus`; podcast output contains one Opus
+stream and no video. Software delivery uses `libvpx-vp9`. When **Use hardware VP9 when available**
+is enabled and a hardware encoder is registered, the export worker tries `vp9_qsv` on Windows and
+`vp9_vaapi` on Linux. It validates the actual device without blocking panel startup. Any hardware
+setup, frame-upload, device, or encode failure discards
+that temporary attempt, reports the restart, and encodes from the beginning with libvpx. Audio is
+rendered from the same immutable revision in bounded
+960-sample (20 ms) packets. The exact master
 sample count is the ceiling of sequence duration multiplied by 48,000, and audio timestamps derive
 from absolute sample positions. Original media—not proxy audio—is authoritative. The realtime
 provider follows the same originals-only rule. Clip gain/pan,
-fades, track mute/solo, gaps, overlaps, playback rate, and reverse mapping are applied; track-effect
-DSP, normalization, and limiting are not.
+fades, track gain/pan/mute/solo, the ordered track DSP chain, gaps, overlaps, playback rate, and
+reverse mapping are applied. Creator scaling preserves aspect ratio and letterboxes unused space;
+frame-rate conversion samples exact rational output times.
 
-Export captions separately from the Captions panel. Do not treat the current PCM reference master
-as a creator-ready H.264/AAC delivery file.
+This path intentionally does not use H.264/AAC. Missing `libvpx-vp9`/`libopus` capabilities disable
+incompatible presets with a local explanation; hardware VP9 is optional and never removes the
+software fallback.
 
 ## Keyboard shortcuts
 

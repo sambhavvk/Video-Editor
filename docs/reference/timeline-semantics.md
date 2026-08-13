@@ -133,11 +133,20 @@ the same expected-revision, locking, validation, persistence, and undo behavior 
 - Changes on a locked track fail atomically. The desktop coalesces adjacent updates to the same
   selected clip property into one undo step.
 
-Audio-track mute and solo use `SetTrackAudioStateCommand`. The target must be an existing audio
-track; the values are revisioned, coalescible, undoable, and consumed by timeline audio render.
-Track locking protects editorial structure but deliberately does not prevent this live mixer-state
-change. The desktop mixer connects its M/S buttons to this command; its track faders remain disabled
-because no track gain/pan command exists.
+Audio-track mute and solo use `SetTrackAudioStateCommand`; gain/pan use
+`SetTrackAudioMixCommand`. The target must be an existing audio track. Gain is `[-96, +24]` dB and
+pan is `[-1, 1]`; values are revisioned, coalescible, undoable, persistent, and consumed after clip
+mixing. Track effects use the typed `Effect` contract and are applied in canonical order: EQ,
+compressor, dialogue noise reduction, limiter. Known parameters are range-validated before publish.
+Track locking protects editorial structure but deliberately does not prevent mute/solo or mixer
+gain/pan changes; it does protect effect-chain edits.
+
+Effect keyframe times are clip-local and half-open at the clip duration. Values match the base
+parameter type and are strictly time-ordered. Hold, Linear, and Bezier evaluation uses the
+interpolation stored on the left keyframe. Bezier controls are normalized offsets from their owning
+keyframe (incoming X left, outgoing X right), and segment time controls must remain monotonic.
+Invalid curves fail before a revision is published. The CPU graph is the preview/export reference;
+the current GPU path returns typed per-frame fallback for active effects.
 
 ## Titles and transitions
 

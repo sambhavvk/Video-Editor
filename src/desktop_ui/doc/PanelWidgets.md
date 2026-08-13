@@ -1,0 +1,50 @@
+<!-- SPDX-License-Identifier: MPL-2.0 -->
+
+# Authoring, mixer, and delivery panel widgets
+
+Header: `video_editor/desktop_ui/panel_widgets.hpp`
+
+Namespace: `video_editor::desktop_ui`
+
+## Inspector and effects
+
+`InspectorWidget` presents clip transform/audio/title/speed state and typed effect parameters. The
+controller supplies values with `setParameter` and a complete curve view with
+`setEffectParameters`. Effect signals distinguish base-value edits, keyframe toggle/selection,
+exact time/value, interpolation, deletion, and Bezier-control edits. All times are presentation
+ticks and are converted to clip-local edit-model `Time` by the controller.
+
+`EffectsPanelWidget` owns a searchable list of `EffectView` presets and emits activation/add intent.
+It does not instantiate a canonical effect itself.
+
+## AudioMixerWidget
+
+`setTracks` rebuilds owned strip views containing gain, pan, mute, solo, and current effect values.
+Track signals report mixer and effect intent by presentation index and stable effect ID.
+`setMasterMeter` updates master peak/RMS and truthfully labels authoritative integrated EBU-R128 as
+live, analyzing, stale, or inactive. `setTrackMeters` maps post-DSP peak/RMS by stable track ID so
+reorder/removal cannot attach a reading to the wrong strip; inactive and uncovered ranges are
+disabled. `setMeterLevels` remains a compatibility entry point.
+
+`setOutputDevices` replaces stable IDs/names, current selection, availability, and status. Selection
+emits an ID, with the empty ID representing **System default**; actual device opening and recovery
+remain application responsibilities. Normalization methods publish the editable −24 through −9
+LUFS target plus busy, review, and failure state. Apply remains disabled until the controller
+supplies a valid current-generation review.
+
+## DeliverPanelWidget
+
+`loadPlatformPresets` fills reference-master and capability-gated creator presets using lightweight
+encoder-presence checks; actual driver/device validation is deferred to the export worker. Query methods
+return the selected preset, destination, even output dimensions, rational frame rate, video/audio
+bitrate, optional VP9 quality, hardware preference, and caption/sidecar modes. Browse and export are
+separate signals; while running, the export action becomes cancellation.
+
+The panel reports encoder availability but does not choose an FFmpeg encoder or perform I/O.
+
+## Ownership and thread safety
+
+All widgets are QObject-parent-owned and GUI-thread only. View objects and strings are copied. They
+emit user intent; `EditorController` owns asynchronous work and revision-checked mutation.
+
+AI assistance has been used to create this output.

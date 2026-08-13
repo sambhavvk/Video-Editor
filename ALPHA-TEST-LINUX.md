@@ -1,307 +1,495 @@
-# Video Editor — Alpha Test (Linux)
+<!-- SPDX-License-Identifier: MPL-2.0 -->
 
-> **Version:** 0.1.0-alpha  
-> **Status:** Pre-release, not for public distribution  
-> **Last updated:** 2026-08-10
+# Video Editor — Alpha Test Guide for Linux
 
-Thanks for helping test! This document walks you through building and running the video editor from source on Linux. It's a bit involved because we pin exact dependency versions — but once it's built, it just works.
+> **Version:** 0.1.0-alpha
+>
+> **Status:** Engineering preview; not for public distribution or irreplaceable work
+>
+> **Last updated:** 2026-08-13
+
+Thank you for testing. This guide covers a source build and the current Linux alpha workflow. The
+editor is offline-first and does not require an account, but packaging and the supported hardware
+matrix are not complete. Keep original media and backups of important projects.
+
+For precise implementation status, see [Beta feature status](docs/beta-feature-status.md). For
+normal application usage, see the [User guide](docs/user-guide.md).
 
 ---
 
-## System Requirements
+## System requirements
 
-- **OS:** Ubuntu 24.04+, Fedora 41+, Arch Linux, or similar (glibc 2.38+)
-- **RAM:** 8 GB minimum, 16 GB recommended
-- **Disk:** ~10 GB free (build tree + dependencies)
-- **GPU:** Not required. Optional Vulkan-capable GPU enables a libplacebo-accelerated preview path; CPU-only preview is fully supported.
-- **Compiler:** GCC 14+ or Clang 18+ (must support C++20 with `__int128`)
+- **Validated target:** Ubuntu 24.04/26.04 or the current Fedora release, x86-64. Other current
+  glibc-based distributions are best-effort for source builds.
+- **RAM:** 8 GB minimum; 16 GB recommended.
+- **Disk:** At least 15 GB for dependencies and build trees, plus media, proxies, and exports.
+- **Compiler:** A C++20 compiler with `__int128`; current GCC or Clang is recommended.
+- **Build tools:** CMake 3.30+, Ninja, pkg-config, Git, and Python 3.
+- **Display:** Wayland or X11 through Qt.
+- **GPU:** Optional Vulkan 1.2-capable Intel, AMD, or NVIDIA GPU. CPU preview remains available when
+  libplacebo, Vulkan, or a usable device is unavailable.
+- **Audio:** Optional output device supported by miniaudio. A build without the pinned miniaudio
+  header runs video silently and reports that fallback explicitly.
 
----
+## 1. Install system build tools
 
-## 1. Install System Packages
+These packages provide the compiler, CMake tooling, Qt platform prerequisites, and Vulkan headers.
+They do not replace the exact project dependencies listed in the next section.
 
 ### Ubuntu / Debian
 
 ```bash
 sudo apt update
 sudo apt install -y \
-  build-essential cmake ninja-build pkg-config git \
+  build-essential cmake ninja-build pkg-config git python3 \
   libgl-dev libegl-dev libxkbcommon-dev \
-  libvulkan-dev mesa-vulkan-drivers \
-  python3 python3-pip
+  libvulkan-dev mesa-vulkan-drivers vulkan-tools
 ```
 
 ### Fedora
 
 ```bash
 sudo dnf install -y \
-  gcc gcc-c++ cmake ninja-build pkgconf git \
+  gcc gcc-c++ cmake ninja-build pkgconf-pkg-config git python3 \
   mesa-libGL-devel mesa-libEGL-devel libxkbcommon-devel \
-  vulkan-loader-devel mesa-vulkan-drivers \
-  python3 python3-pip
+  vulkan-loader-devel mesa-vulkan-drivers vulkan-tools
 ```
 
-### Arch Linux
+### Arch Linux — best effort
 
 ```bash
 sudo pacman -S --needed \
-  base-devel cmake ninja pkgconf git \
-  mesa libxkbcommon \
-  vulkan-icd-loader vulkan-tools \
-  python
+  base-devel cmake ninja pkgconf git python \
+  mesa libxkbcommon vulkan-icd-loader vulkan-tools
 ```
 
----
+After installation, run `cmake --version`. If it is older than 3.30, install a newer CMake before
+configuring the project; the repository intentionally rejects older versions.
 
-## 2. Install Exact-Version Dependencies
+## 2. Provide the pinned dependencies
 
-The project requires **exact** versions of several libraries. If your distro doesn't ship them, you'll need to build them from source or use a tool like vcpkg. The required versions are:
+The authoritative versions are in `cmake/DependencyVersions.cmake`. At this revision they are:
 
-| Dependency     | Required Version |
-|----------------|-----------------|
-| Qt             | 6.11.1 (exact)  |
-| FFmpeg         | 8.1.2 (exact)   |
-| Protobuf       | 35.1 (exact)    |
-| Abseil         | 20250512.1      |
-| OpenSSL        | ≥ 3.0           |
-| SQLite         | ≥ 3.45          |
-| libplacebo     | 7.360.1         |
-| libebur128     | 1.2.6           |
-| GTest          | (for tests)     |
+| Dependency | Required contract |
+| --- | --- |
+| Qt | 6.11.1 exact; Core, Concurrent, Gui, and Widgets |
+| FFmpeg | 9.0 exact; shared LGPL-compatible build |
+| FFmpeg ABI | avformat/avcodec 63.1.100, avutil 61.1.100, swresample 7.1.100, swscale 10.1.100 |
+| Protobuf | 35.1 exact |
+| Abseil | 20250512.1 exact |
+| libplacebo | 7.360.1 exact; optional GPU acceleration |
+| libebur128 | 1.2.6 exact |
+| miniaudio | 0.11.25 header; optional but required for physical audio playback |
+| SQLite | 3.45 or newer |
+| OpenSSL | 3.0 or newer |
+| GTest | Required when `VIDEO_EDITOR_BUILD_TESTS=ON` |
 
-### Recommended: Use vcpkg
+The repository does not yet ship a complete redistributable dependency bundle. Use locally built
+shared libraries or another reproducible prefix that satisfies these exact contracts. Arbitrary
+distribution or vcpkg versions may configure incorrectly or fail the runtime ABI audit.
+
+The FFmpeg build used for alpha validation should dynamically link compatible libraries and must
+not enable GPL or nonfree configuration for distribution. FOSS creator delivery additionally needs
+the `libvpx-vp9` and `libopus` encoders. `vp9_vaapi` is optional; failed hardware setup or encoding
+automatically restarts that export with `libvpx-vp9`.
+
+Example configuration with a local dependency prefix:
 
 ```bash
-git clone https://github.com/microsoft/vcpkg.git ~/vcpkg
-cd ~/vcpkg
-./bootstrap-vcpkg.sh
+export VIDEO_EDITOR_DEPS=/absolute/path/to/video-editor-deps
+export CMAKE_PREFIX_PATH="$VIDEO_EDITOR_DEPS"
+export PKG_CONFIG_PATH="$VIDEO_EDITOR_DEPS/lib/pkgconfig:$VIDEO_EDITOR_DEPS/lib64/pkgconfig"
+export LD_LIBRARY_PATH="$VIDEO_EDITOR_DEPS/lib:$VIDEO_EDITOR_DEPS/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
-# Install what vcpkg can handle
-./vcpkg install protobuf abseil openssl 'sqlite3[json1]' gtest libplacebo libebur128
+cmake --preset dev \
+  -DCMAKE_PREFIX_PATH="$CMAKE_PREFIX_PATH" \
+  -DVIDEO_EDITOR_MINIAUDIO_ROOT="$VIDEO_EDITOR_DEPS"
 ```
 
-> ⚠️ **Qt 6.11.1** must be installed separately — it's too new for most distros and vcpkg. Use the [Qt Online Installer](https://www.qt.io/download-qt-installer-oss) (open-source edition), install to `~/Qt/6.11.1/gcc_64`, and set `CMAKE_PREFIX_PATH`.
->
-> ⚠️ **FFmpeg 8.1.2** — if your distro doesn't have it, build from source with `--enable-shared` or grab a pre-built bundle.
+If Qt is installed separately, include both prefixes:
 
-Then configure with:
 ```bash
-cmake --preset release \
-  -DCMAKE_PREFIX_PATH="$HOME/Qt/6.11.1/gcc_64;$HOME/vcpkg/installed/x64-linux" \
-  -DCMAKE_TOOLCHAIN_FILE="$HOME/vcpkg/scripts/buildsystems/vcpkg.cmake"
+cmake --preset dev \
+  -DCMAKE_PREFIX_PATH="/absolute/path/to/Qt/6.11.1/gcc_64;$VIDEO_EDITOR_DEPS" \
+  -DVIDEO_EDITOR_MINIAUDIO_ROOT="$VIDEO_EDITOR_DEPS"
 ```
 
-### Manual build from source
+During configuration, check the realtime-audio message:
 
-If you prefer not to use vcpkg, build each dependency from source. See `cmake/DependencyVersions.cmake` for the exact versions needed. Install each to a local prefix (e.g. `build/deps/`) and point `CMAKE_PREFIX_PATH` there.
-
----
+- `Realtime audio: miniaudio 0.11.25 adapter enabled` means physical playback can be tested.
+- `miniaudio adapter unavailable; manual callback fallback enabled` means preview will be silent.
 
 ## 3. Build
 
+Use the developer preset for alpha testing:
+
 ```bash
-cd /path/to/VideoEditor
-
-# Configure (Release build)
-cmake --preset release
-
-# Build
-cmake --build build/release -j$(nproc)
+cmake --preset dev
+cmake --build --preset dev -j"$(nproc)"
 ```
 
-This produces the `VideoEditor` executable at `build/release/src/app/VideoEditor`.
+The application is written to:
 
-### Build options
+```text
+build/dev/src/app/VideoEditor
+```
 
-| CMake Variable                   | Default | Description                        |
-|----------------------------------|---------|------------------------------------|
-| `VIDEO_EDITOR_BUILD_TESTS`       | ON      | Build the test suite               |
-| `VIDEO_EDITOR_BUILD_DESKTOP_UI`  | ON      | Build the Qt desktop app           |
-| `VIDEO_EDITOR_BUILD_MEDIA`       | ON      | Build FFmpeg media modules         |
-| `VIDEO_EDITOR_BUILD_WORKERS`     | ON      | Build background worker executables|
+For an optimized build:
 
-To build without tests (faster):
+```bash
+cmake --preset release
+cmake --build --preset release -j"$(nproc)"
+```
+
+Useful configuration switches:
+
+| CMake variable | Default | Purpose |
+| --- | --- | --- |
+| `VIDEO_EDITOR_BUILD_TESTS` | `ON` | Build automated tests |
+| `VIDEO_EDITOR_BUILD_DESKTOP_UI` | `ON` | Build the Qt desktop application |
+| `VIDEO_EDITOR_BUILD_MEDIA` | `ON` | Build FFmpeg, render, audio, proxy, and export modules |
+| `VIDEO_EDITOR_BUILD_WORKERS` | `ON` | Build the worker-host executable |
+| `VIDEO_EDITOR_ENABLE_GPU_RENDERING` | `ON` | Build libplacebo support when its exact dependency is found |
+| `VIDEO_EDITOR_MINIAUDIO_ROOT` | empty | Prefix or directory containing `miniaudio.h` |
+
+To build faster without tests:
+
 ```bash
 cmake --preset release -DVIDEO_EDITOR_BUILD_TESTS=OFF
-cmake --build build/release -j$(nproc)
+cmake --build --preset release -j"$(nproc)"
 ```
 
----
+## 4. Verify the build
 
-## 4. Run
+Run the ordinary and sanitizer suites before interactive testing:
 
 ```bash
-./build/release/src/app/VideoEditor
+ctest --preset dev --output-on-failure
+
+cmake --preset asan
+cmake --build --preset asan -j"$(nproc)"
+ASAN_OPTIONS=detect_leaks=0 ctest --preset asan --output-on-failure
 ```
 
-Or install to a prefix and run from there:
+The accelerated endurance simulations are opt-in:
+
+```bash
+VE_RUN_LONG_TESTS=1 ctest --test-dir build/dev \
+  -R '^(XrunValidation|DriftValidation)' --output-on-failure
+```
+
+These simulate one hour without xruns and two hours with less than one frame of accumulated drift;
+they do not replace real-time validation on the supported physical device/driver matrix.
+
+Inspect the linked FFmpeg runtime:
+
+```bash
+./build/dev/src/media_codec/video_editor_dependency_audit
+```
+
+`expected_abi` must be `true`. A distributable build also requires
+`lgpl_compatible_configuration` to be `true`.
+
+Optional capability checks:
+
+```bash
+ffmpeg -hide_banner -encoders | grep -E 'libvpx-vp9|libopus|vp9_vaapi'
+vulkaninfo --summary
+```
+
+## 5. Run
+
+```bash
+./build/dev/src/app/VideoEditor
+```
+
+Run from a terminal while testing so stderr diagnostics are preserved. To install only the
+application target into a local prefix:
+
 ```bash
 cmake --install build/release --prefix ./install
 ./install/bin/VideoEditor
 ```
 
----
-
-## 5. Run Tests (Optional)
+For a headless shell smoke test:
 
 ```bash
-cd build/release
-ctest --output-on-failure
+QT_QPA_PLATFORM=offscreen \
+  ./build/dev/src/app/VideoEditor --screenshot editor.png
 ```
 
 ---
 
-## What to Test
+## Interactive alpha checklist
 
-Work through each item below. Each has an **Expected Result** so you know what a passing test looks like.
+Record whether each item passed, failed, or was unavailable on the test machine.
 
-### 1. Project creation
+### 1. Project save, reopen, and recovery
 
-Create a new project, save it, close the application, and reopen the saved project file.
+1. Create a project and save it as `.veproj`.
+2. Import media and make several timeline edits.
+3. Save, close normally, and reopen the project.
+4. For a disposable project, terminate the process after completing another edit but before a
+   checkpoint save, then restart the editor and inspect the recovery offer.
 
-**Expected result:** The project opens with all settings intact. No errors on save or load. The file round-trips cleanly.
+**Expected:** Canonical project and timeline edits survive save/reopen. A valid newer recovery
+candidate is explained in plain language and can be opened without corrupting the saved checkpoint.
+Media is referenced, not embedded, so original paths must remain available. Full reconstruction of
+the imported runtime media registry is still partial; include any offline or missing-bin state in
+the test report.
 
 ### 2. Media import
 
-Import video files using drag-and-drop from a file manager **and** using the in-app file picker.
+1. Import files through **File > Import Media**.
+2. Drop media on the program viewer.
+3. Search the media bin by name and format.
+4. Insert a file containing linked video and audio.
+**Expected:** Import runs asynchronously; successful items show name, duration, format, and status.
+Linked A/V inserts atomically on compatible targeted tracks. Do not require desktop thumbnails,
+waveform display, metadata editing, or relinking yet—those workflows remain incomplete.
 
-**Expected result:** Imported files appear in the media bin with generated thumbnails. Thumbnail generation completes within a few seconds for typical clips.
+### 3. Professional timeline interaction
 
-### 3. Timeline editing
+Test all of the following with undo and redo:
 
-Insert clips from the media bin into the timeline. Try moving, trimming, splitting, and ripple-deleting clips. Test undo and redo after each operation.
+- Ctrl-click multi-selection and Shift-click range selection;
+- move, normal trim, ripple trim, and overwrite trim;
+- roll, slip, and slide tools;
+- linked A/V split, delete, and ripple delete;
+- exact one-frame and ten-frame nudges;
+- snapping to the playhead, markers, clip edges, and sequence frame grid;
+- track create, rename, reorder, remove, lock, visibility, and targeting;
+- marker create, move, rename, and remove;
+- select and close a nonterminal gap;
+- press Escape during a drag to cancel it.
 
-**Expected result:** All edit operations behave correctly. Undo reverses the last action; redo re-applies it. The timeline state stays consistent after a sequence of edits and undos.
+**Expected:** A gesture previews transiently and commits one atomic revision on release. Invalid or
+locked operations reject the complete batch. Multi-selection geometry and linked relationships are
+preserved, and undo reverses the entire gesture in one step.
 
-### 4. Video preview
+### 4. Titles, transitions, speed, effects, and keyframes
 
-Play back the timeline using the preview controls.
+1. Add a title and edit its text, font, size, alignment, bold, and italic controls.
+2. Add Cross Dissolve and Dip to Black transitions, drag their duration, change preset, and remove.
+3. Set constant speed between 0.01× and 100× and toggle Reverse on a media clip.
+4. Add color, crop, and blur effects.
+5. Add Hold, Linear, and Bezier keyframes; edit exact time/value fields and drag the curve.
+6. Save, close, reopen, and verify the authored state.
 
-**Expected result:** Video frames render asynchronously using the CPU pipeline. Playback is smooth for standard-definition content; some frame drops on high-resolution clips are acceptable. **No audio will play through speakers** — realtime audio-device playback is not integrated in this alpha. Audio data is rendered internally and included in exports, but you cannot audition it live.
+**Expected:** Every change is revisioned, undoable, schema-v2 persistent, and visible through the CPU
+reference renderer. Unsupported title, transition, blend, or effect frames fall back from GPU to CPU
+without disabling later compatible GPU frames.
 
-### 5. Captions
+### 5. Preview, transport, and GPU fallback
 
-Import an SRT or WebVTT subtitle file. Verify it appears in the caption track. Try searching caption text, editing a caption entry (add, modify text, delete), and exporting a subtitle file.
+1. Play forward at 1×, pause/resume, seek, and scrub.
+2. Use J/K/L, frame stepping, Home/End, and reverse/non-1× shuttle.
+3. Exercise transform, crop, opacity, rotation, and blend modes.
+4. If Vulkan/libplacebo is available, compare compatible GPU frames with CPU-fallback frames.
 
-**Expected result:** The caption file loads and displays in a dedicated caption track. Search finds matching text. Edits persist after save/reload. Exported SRT or WebVTT matches your edits (round-trip).
+**Expected:** Frames continue updating during playback. Forward 1× follows the audio-master clock
+when physical audio starts; otherwise the UI reports silent timer fallback. Reverse and non-1×
+shuttle are currently silent. GPU-compatible frames use Vulkan; effects, titles, transitions,
+non-Normal blends, or a moved rotation pivot use per-frame CPU fallback. Native swapchain
+presentation and zero-copy decode are not implemented.
 
-### 6. Proxy workflow
+### 6. Realtime audio and professional mixing
 
-Select a media clip in the media bin and trigger proxy generation. Wait for it to complete, then play back the timeline. Switch the clip back to original media.
+This test requires a build that reported the miniaudio adapter as enabled.
 
-**Expected result:** A half-resolution proxy file is created. Timeline preview uses the proxy automatically (you should see lower-resolution output). Switching back to original media restores full resolution.
+1. Select **System default**, then a named output device.
+2. Play a linked A/V clip forward at 1× and verify audible output follows the video.
+3. Adjust clip and track gain/pan, mute, solo, fades, EQ, compressor, dialogue noise reduction, and
+   limiter.
+4. Observe per-track peak/RMS plus master peak/RMS and `LUFS-I`.
+5. Change the loudness target, choose **Analyze loudness**, review the proposal, and apply it.
+6. If safe, disconnect and reconnect a nonessential USB output while playback is intended.
 
-### 7. Reference export
+**Expected:** The device callback remains responsive, meters follow the audible audio-master
+position, LUFS shows analyzing/stale state until valid, and normalization applies one undoable atomic
+track-gain batch. Device loss is detected within roughly one second, pauses safely, and a returned
+selected/default endpoint recovers only while playback is still intended. Report any xrun, audible
+glitch, restart after Pause/Stop, or growing A/V offset.
 
-Open the **Deliver** workspace and export a master file. Use the default settings.
+### 7. Captions
 
-**Expected result:** Export produces an FFV1/Matroska (`.mkv`) or ProRes/MOV (`.mov`) file. **The output is video-only with 48 kHz stereo PCM audio** (per ADR 0009). No H.264/AAC creator presets are available. Open the exported file in VLC or `ffplay` and verify it plays back correctly with both video and audio.
+1. Import UTF-8 SRT and WebVTT files.
+2. Add, search, edit, and delete caption cues.
+3. Save/reopen the project and export SRT and WebVTT sidecars.
+4. In Deliver, test caption burn-in and burn-in plus sidecar.
 
-### 8. Inspector properties
+**Expected:** Caption edits are undoable and persistent. Sidecars round to millisecond timing and
+write atomically. Burned captions appear in video exports. Styling preview, word timing, embedded
+subtitle streams, and transcription are not implemented.
 
-Select a clip on the timeline and open the Inspector panel. Adjust transform properties (position, scale, rotation, anchor point), crop, opacity, blend mode, clip gain, pan, and fades. Save the project, close, reopen, and check the properties again.
+### 8. Proxy workflow
 
-**Expected result:** Changes are visible in the preview as you make them. After save and reload, all property values are preserved exactly as you set them.
+1. Select media marked **Proxy recommended**.
+2. Choose **Create editing proxy**, test cancellation once, then allow a new job to finish.
+3. Play the timeline with proxy use enabled and export the project.
 
-### 9. Stability
+**Expected:** A half-resolution ProRes Proxy/MOV with PCM audio is produced when available, otherwise
+the configured FFV1/Matroska fallback is used. Partial canceled output is not committed. Preview may
+use the proxy, but export remains authoritative to originals. Proxy discovery is session-local; a
+reopened project does not yet rediscover the previous proxy automatically.
 
-Use the editor for 15–20 minutes of continuous work — import media, edit the timeline, preview, export. Watch for crashes, freezes, excessive memory use, or zombie processes.
+### 9. Reference and creator export
 
-**Expected result:** No segfaults, hangs, or runaway memory. The application remains responsive. No lingering `VideoEditor` or worker processes after quitting.
+Test these Deliver presets:
 
-### 10. UI
+- FFV1/Matroska reference master;
+- ProRes 422 HQ/MOV when the encoder is available;
+- YouTube 1080p, 1440p, and 2160p VP9/Opus WebM;
+- vertical 1080×1920 and 720×1280 VP9/Opus WebM;
+- Opus-only podcast WebM.
 
-Examine every panel and workspace. Look for overlapping widgets, unreadable text (wrong colors, clipped labels), broken layouts at different window sizes, or missing accessible labels (try navigating with keyboard only).
+Also test custom resolution, exact frame rate, video bitrate or VP9 quality, audio bitrate, captions,
+cancellation, and refusal to overwrite an existing destination without permission.
 
-**Expected result:** All text is readable. Widgets don't overlap. Layouts adapt reasonably to window resizing. Screen readers can identify major UI elements.
+**Expected:** Reference masters contain exact 48 kHz stereo PCM. Creator video contains VP9 plus
+optional Opus; podcast output has one Opus stream and no synthetic video. On Linux, enabled hardware
+delivery may use `vp9_vaapi`; hardware setup/upload/encode failure must visibly restart the complete
+atomic export with `libvpx-vp9`. Cancellation or failure must leave no partial destination. H.264
+and AAC are intentionally unavailable.
+
+### 10. Stability, accessibility, and Linux integration
+
+Use the editor continuously for at least 20 minutes while importing, editing, playing, changing
+workspaces, normalizing, and exporting. Test both Wayland and X11 where practical. Resize and dock
+panels, use keyboard navigation, and inspect terminal diagnostics and memory growth.
+
+**Expected:** No crash, freeze, runaway memory, corrupted project, stuck export, or lingering worker
+process after exit. Major controls have accessible names and usable keyboard focus. Record the
+session type, desktop environment, GPU/driver, audio backend/device, and whether CPU or GPU preview
+was active.
 
 ---
 
-## Known Limitations
+## Known alpha limitations
 
-These are deliberate boundaries of the 0.1.0-alpha, not bugs:
+Do not report these as regressions unless behavior is worse than described:
 
-- **No realtime audio-device playback** — Timeline audio is rendered for export but you cannot hear it through speakers during preview.
-- **No integrated GPU presentation** — The preview path is CPU-rendered. An optional libplacebo backend exists for testing but native swapchain presentation is not wired up.
-- **No H.264/AAC creator export** — Only FFV1/Matroska and ProRes/MOV reference masters. Creator codecs are a legal/packaging gate.
-- **No automatic proxy scheduling** — Proxies are manually triggered only.
-- **No titles, transitions, effects, or color tools** — Model fields may exist in the UI but no complete authoring or render workflow is wired up.
-- **No local transcription** — The whisper.cpp worker is not integrated.
-- **No caption burn-in** — Captions export as standalone SRT/WebVTT files only; they are not burned into the video stream.
+- Forward 1× physical audio requires the pinned miniaudio header and a usable device. Reverse and
+  non-1× playback are silent. Hardware latency is estimated rather than calibrated.
+- Hot-plug recovery uses one-second polling rather than native OS device events. Physical one-hour
+  xrun and two-hour A/V drift evidence is still required across the supported matrix.
+- GPU preview downloads an offscreen libplacebo result into Qt; there is no native swapchain,
+  zero-copy decode, complete GPU effect/color parity, or HDR mastering.
+- H.264/AAC export is disabled. Creator delivery currently uses FOSS VP9/Opus WebM.
+- Local whisper.cpp transcription, model management, word timing, and transcript/silence edit
+  proposals are not implemented.
+- Media-bin thumbnails, timeline waveforms, metadata editing, relinking, persistent proxy discovery,
+  and a unified cache browser are incomplete.
+- Source-monitor insert/overwrite editing, shortcut remapping, full LUT/color breadth, and the
+  accessibility/beginner study remain incomplete.
+- Background worker process routing, release Flatpak packaging, signing, and the 200+ media corpus
+  are not complete.
 
----
+## Reporting issues
 
-## Reporting Issues
+Run the application from a terminal and include the following:
 
-When something breaks, please include the following. The more detail, the faster we can fix it.
+```text
+Summary:
 
-### Issue template
+Steps to reproduce:
+1.
+2.
+3.
 
+Expected result:
+
+Actual result:
+
+Severity:
+[ ] Crash
+[ ] Data loss or project corruption
+[ ] Playback/audio/export failure
+[ ] Incorrect edit or render
+[ ] UI/accessibility problem
+[ ] Minor/cosmetic
+
+Reproducibility:
+[ ] Every time
+[ ] Intermittent
+[ ] Once
+
+Build revision:
+git rev-parse HEAD
+
+System information:
+uname -a
+cat /etc/os-release
+cmake --version
+c++ --version
+echo "$XDG_SESSION_TYPE"
+
+GPU information:
+vulkaninfo --summary
+
+Audio information:
+State whether miniaudio was enabled at configure time and identify the selected output device.
+
+Terminal output / logs:
 ```
-**Summary:**
-One-line description of the problem.
 
-**Steps to Reproduce:**
-1. ...
-2. ...
-3. ...
-
-**Expected Result:**
-What should have happened.
-
-**Actual Result:**
-What actually happened.
-
-**Severity:**
-[ ] Crash (application terminates or segfaults)
-[ ] Data loss (project file corruption, lost edits)
-[ ] Visual (layout, rendering, or display problem)
-[ ] Minor (cosmetic, inconvenience)
-
-**System Info:**
-Paste the output of:
-  uname -a && cmake --version && gcc --version | head -1 && cat /etc/os-release | head -4
-
-**Build Version:**
-Paste the output of:
-  git rev-parse HEAD
-
-**Logs / Terminal Output:**
-Paste any error messages from the terminal, or attach the relevant
-lines from terminal stderr. Check build/release/ for crash dump files
-and attach them if present.
-```
-
-### Tips
-
-- Run the app from a terminal so you can see stderr output — many errors print there.
-- After a crash, check `build/release/` for core dumps or crash dump files and include them.
-- If you can reproduce the issue reliably, that's the most valuable thing you can tell us.
-
----
+For playback problems, say whether audio was audible, whether the viewer title reported GPU or CPU
+fallback, the media codec/resolution/frame rate, and whether a proxy was active. For export problems,
+include the preset, destination container, actual encoder shown by the UI, fallback message, caption
+mode, and whether an existing destination remained unchanged.
 
 ## Troubleshooting
 
-**"Qt6 not found"** — Set `CMAKE_PREFIX_PATH` to your Qt install:
+### Qt 6.11.1 is not found
+
 ```bash
-cmake --preset release -DCMAKE_PREFIX_PATH=~/Qt/6.11.1/gcc_64
+cmake --preset dev \
+  -DCMAKE_PREFIX_PATH="/absolute/path/to/Qt/6.11.1/gcc_64;$VIDEO_EDITOR_DEPS"
 ```
 
-**"FFmpeg version mismatch"** — You need the exact version. See the vcpkg instructions above or build from source.
+### FFmpeg version mismatch
 
-**"clang required"** — GCC works fine on Linux. This error only applies to Windows.
+The source currently requires FFmpeg 9.0 library ABIs exactly. Check which pkg-config files are
+visible:
 
-**No Vulkan drivers / optional GPU path not working** — Vulkan is only needed for the optional libplacebo preview acceleration. The editor works fine without it. If you want to test the GPU path, verify your drivers:
 ```bash
-vulkaninfo | head -20
+pkg-config --modversion \
+  libavformat libavcodec libavutil libswresample libswscale
 ```
 
-**Smoke test without a display** — You can verify the app launches and renders without a physical display:
+Then correct `PKG_CONFIG_PATH`, delete or use a fresh build preset directory, and configure again.
+
+### No audio during forward 1× playback
+
+Check the CMake configure output. If miniaudio was unavailable, provide `miniaudio.h` 0.11.25 and
+reconfigure with `-DVIDEO_EDITOR_MINIAUDIO_ROOT=/absolute/prefix`. If it was enabled, select
+**System default** or a named device and inspect the visible playback error before checking mixer
+gain and operating-system volume.
+
+### Vulkan preview is unavailable
+
 ```bash
-QT_QPA_PLATFORM=offscreen ./build/release/src/app/VideoEditor --screenshot editor.png
+vulkaninfo --summary
 ```
-This writes a screenshot of the initial editor state to `editor.png`. If it produces an image, the app started successfully.
+
+The app remains usable through CPU rendering. Verify that libplacebo 7.360.1 and Vulkan headers were
+visible during configuration if GPU testing is required.
+
+### Creator presets are disabled
+
+```bash
+ffmpeg -hide_banner -encoders | grep -E 'libvpx-vp9|libopus|vp9_vaapi'
+```
+
+`libvpx-vp9` is required for creator video and `libopus` is required when the preset contains audio.
+VAAPI is optional; its failure should fall back to libvpx.
+
+### Offscreen smoke test fails
+
+Ensure the Qt platform plugins and shared dependency libraries are discoverable through
+`CMAKE_PREFIX_PATH`, `QT_PLUGIN_PATH`, and the local runtime library path. Run with
+`QT_DEBUG_PLUGINS=1` for Qt plugin diagnostics.
 
 ---
 
-*This is an alpha build. Expect rough edges. Thank you for testing!*
+This alpha is intended to find correctness, reliability, and usability defects before public beta.

@@ -52,8 +52,9 @@ cannot execute in the callback.
 
 - A deterministic offline audio reference can be verified independently of device timing and later
   reused by export workers.
-- Clip audio Inspector changes gain real render semantics without claiming that mixer effects,
-  dialogue processing, normalization, limiting, or release-grade realtime playback are finished.
+- Clip audio Inspector changes gain real render semantics. ADR 0017 subsequently adds track mixer
+  controls, ordered DSP, realtime meters, reviewable normalization, and device recovery on this
+  same render contract.
 - Audio and video export share revision, cancellation, and atomic destination guarantees, while
   keeping codec policy outside the edit model.
 - Repeated self-contained block requests favor determinism over decode reuse. Decode-ahead/session
@@ -68,5 +69,6 @@ monotonic 1/48000 audio PTS, container decode-back, A/V duration bounds, cancell
 phases, repeated deterministic output where the codec permits it, and preservation of an existing
 destination.
 
-Realtime device-clock, xrun, and two-hour A/V drift tests remain public-beta gates rather than
-claims of this offline contract.
+Realtime device-clock behavior and accelerated xrun/drift simulations are covered by ADRs 0010 and
+0017. Physical-device latency, xrun, and A/V drift evidence across the supported OS/device matrix
+remain public-beta gates rather than claims of this offline contract.

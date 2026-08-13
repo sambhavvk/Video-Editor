@@ -34,6 +34,39 @@ message JobSpec {
   bytes options = 8;
 }
 
+// Typed payload carried in JobSpec.options for JOB_KIND_TRANSCRIBE. Unknown
+// fields are intentionally rejected by the worker until a schema version is
+// explicitly supported.
+message TranscribeOptions {
+  uint32 schema_version = 1;
+  string model_id = 2;
+  string language = 3;
+  bool translate = 4;
+  uint32 thread_count = 5;
+  bool word_timestamps = 6;
+  bool prefer_vulkan = 7;
+}
+
+message TranscriptionWord {
+  string text = 1;
+  int64 start_centiseconds = 2;
+  int64 end_centiseconds = 3;
+  float probability = 4;
+}
+
+message TranscriptionResult {
+  uint32 schema_version = 1;
+  string model_id = 2;
+  string model_digest_algorithm = 3;
+  string model_digest = 4;
+  string detected_language = 5;
+  int64 duration_centiseconds = 6;
+  repeated TranscriptionWord words = 7;
+  bool vulkan_available = 8;
+  bool vulkan_used = 9;
+  string backend = 10;
+}
+
 message StartJob { JobSpec spec = 1; }
 message CancelJob { string job_id = 1; }
 message Shutdown { bool finish_active_jobs = 1; }
@@ -72,4 +105,3 @@ message WorkerEvent {
   uint32 protocol_minor = 2;
   JobEvent event = 10;
 }
-

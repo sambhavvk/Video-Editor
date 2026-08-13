@@ -21,12 +21,12 @@ flowchart LR
     Render --> GPU
     GPU --> Viewer["Qt Program viewer"]
     Render -->|"fallback"| Viewer
-    Render --> Export["Reference exporter"]
+    Render --> Export["Reference + VP9/Opus exporter"]
     AudioRegistry["Original-audio registry"] --> AudioRender["48 kHz timeline audio renderer"]
     Edit -->|"timeline snapshot"| AudioRender
     AudioRender --> Export
     AudioRender -->|"immutable snapshot ranges"| Realtime["Pre-render ring + sample clock"]
-    Realtime --> Device["Optional miniaudio output"]
+    Realtime --> Device["Selected miniaudio output"]
     Realtime -->|"master playhead"| Controller
     Import["Asset service"] --> Registry
     Import --> Proxy["Proxy service"]
@@ -38,10 +38,12 @@ flowchart LR
 The diagram describes the engine contracts and current desktop wiring. The engine decodes active
 video clips and the desktop requests supported transforms directly on a libplacebo GPU before its
 CPU renderer. The offscreen result is downloaded for the Qt viewer. Unsupported timeline content
-falls back to CPU for that frame; backend/device failures preserve a CPU result and latch CPU-only
-preview for the session. The desktop does not yet supply a native presentation surface, zero-copy
-decode import, or broad effects/color graph. Forward 1× desktop transport connects the timeline audio
-renderer to the realtime pre-render ring and optional miniaudio output; its latency-compensated
+including titles, transitions, and active effects falls back to the CPU reference graph for that
+frame; backend/device failures preserve a CPU result and latch CPU-only preview for the session.
+The CPU graph evaluates typed clip-local Hold/Linear/Bezier curves and known color/crop/blur
+effects. The desktop does not yet supply a native presentation surface, zero-copy decode import, or
+GPU effect parity. Forward 1× desktop transport connects the timeline audio renderer to the realtime
+pre-render ring and selected miniaudio output; its latency-compensated
 sample position, not the end of the submitted device buffer, drives video requests. Other shuttle
 rates and unavailable/failed devices use an explicit silent timer fallback. The worker can execute
 probe and proxy requests, but desktop process
@@ -59,10 +61,10 @@ launch/IPC routing and export/transcription workers are not connected.
 | `proxy_service` | Cancellable proxy transcode, profile fallback, versioned PTS sidecar, atomic output | Authoritative media or a cache eviction service |
 | `media_cache` | Content-addressed rebuildable-artifact store (100 GB LRU budget, atomic put, inventory) and the thumbnail, waveform, and metadata services that fill it | Authoritative media, the edit model, or a cache eviction policy for proxies |
 | `playback` | Original/proxy registry, persistent FFmpeg decode sessions, keyframe seek, epoch cancellation, CPU color conversion | Audio-device playback or full color management |
-| `render_engine` | Pull-based deterministic CPU frame graph including title/transition reference rendering and cache; capability-gated libplacebo D3D11/Vulkan backend, per-clip GPU transform/Normal-composite path, typed per-frame CPU fallback, offscreen upload/readback, and device-loss reporting | Native desktop swapchain presentation, native GPU title/transition shaders, rotation around a moved pivot, effects/color parity, hardware decoder, or zero-copy bridge |
-| `export_service` | Revision-bound, originals-only video plus deterministic 48 kHz stereo PCM mux, exact counts, and atomic commit | H.264/AAC, caption embedding, effects mastering, or render queue |
-| `audio_engine` | Planar float blocks, SPSC ring, DSP/loudness primitives, fixed-format realtime pre-render/callback/sample-clock controller, and optional miniaudio adapter | Timeline decode, revision ownership, or a connected effect/mastering graph |
-| `audio_render` | Originals-only FFmpeg decode/resample and deterministic immutable-snapshot mixing to exact 48 kHz stereo blocks | An audio-device callback, effect/master graph, or muxer |
+| `render_engine` | Pull-based deterministic CPU frame graph including title/transition rendering, typed effect/keyframe evaluation, known color/crop/blur processing, and cache; capability-gated libplacebo D3D11/Vulkan transform/composite path with typed per-frame CPU fallback | Native desktop swapchain presentation, native GPU title/transition/effect shaders, rotation around a moved pivot, full color/LUT parity, hardware decoder, or zero-copy bridge |
+| `export_service` | Revision-bound originals-only FFV1/ProRes masters and FOSS VP9/Opus WebM creator delivery, exact frame/sample spans, scale/frame-rate controls, caption burn-in/sidecars, optional QSV/VAAPI VP9 with complete libvpx retry, and atomic media commit | H.264/AAC approval, embedded subtitle streams, or render queue |
+| `audio_engine` | Planar float blocks, SPSC rings, DSP, callback-safe peak/RMS, worker-owned realtime/offline libebur128, fixed-format pre-render/sample clock, device enumeration/stable IDs, and optional miniaudio adapter | Timeline decode, revision ownership, native OS hot-plug events, or calibrated hardware timestamps |
+| `audio_render` | Originals-only FFmpeg decode/resample, deterministic immutable-snapshot mixing, track gain/pan, ordered stateful EQ/compressor/dialogue-denoise/limiter, and sample-range/stable-ID track meters in exact 48 kHz stereo blocks | An audio-device callback, arbitrary buses, or muxer |
 | `caption_service` | SRT/WebVTT parse, validate, reflow, search, serialize, and edit-model conversion | Speech recognition or caption rendering |
 | `job_service` | Versioned Protobuf messages, framing, job IDs, and cancellation registry | Process spawning or a durable job scheduler |
 | `workers` | Framed worker executable with fail-closed probe and synchronous proxy jobs plus versioned events | Desktop process orchestration or a complete cancellable export/transcription farm |
@@ -107,7 +109,8 @@ contract is recorded in `cmake/DependencyVersions.cmake`.
    epoch; stale decode work returns a cancellation-style error rather than updating the viewer.
 5. Export captures one `TimelineSnapshot`, creates independent originals-only video and audio
    providers, disables proxies, renders exact frame/sample ranges, and remains isolated from later
-   UI revisions.
+   UI revisions. Reference masters use FFV1/ProRes plus PCM; creator presets use software VP9/Opus
+   WebM with exact rational output sampling.
 
 ## Authoritative and rebuildable state
 
@@ -139,9 +142,12 @@ operate on the same controller, while edits and project replacement destroy the 
 playback. `AsyncRealtimeAudioPlayback` supplies a serialized background control thread with versioned
 requested/effective state; the desktop enqueues commands, waits for effective completion without
 blocking Qt signals, and only then adopts audio as master. During a pending start or seek it holds the
-video position rather than advancing from a conflicting timer. When miniaudio is absent or a
-device/provider fails, and for reverse or non-1× shuttle, the controller reports the limitation and
-uses silent timer-driven video.
+video position rather than advancing from a conflicting timer. A stable selected-device ID is
+passed to miniaudio when playback opens. When miniaudio is absent or a device/provider fails, and
+for reverse or non-1× shuttle, the controller reports the limitation and uses silent timer-driven
+video. The desktop polls devices off the UI thread, pauses on selected/default loss, and retries a
+returned endpoint only after serialized stop settles while playback remains intended. Native OS
+notifications and calibrated hardware timestamps remain outside the current wiring.
 
 ## Further reading
 
@@ -152,3 +158,6 @@ uses silent timer-driven video.
 - [Accepted ADRs](../index.md#architecture-decisions)
 - [Schema v2 title and transition contracts](0013-schema-v2-titles-transitions.md)
 - [Professional timeline interaction boundary](0014-professional-timeline-interaction.md)
+- [Clip-local effect curves and CPU reference effects](0015-effect-parameter-authoring.md)
+- [FOSS creator delivery with VP9 and Opus](0016-foss-creator-delivery.md)
+- [Professional track audio, DSP, meters, and normalization](0017-professional-audio-workflow.md)
