@@ -33,6 +33,11 @@ of 48 kHz, stereo, planar `float32` audio.
   `trackMetersAt(audio_master_sample)` so decode-ahead cannot display a future block; gaps and
   uncovered ranges are explicitly inactive or stale. Metering reuses the rendered track block and
   performs no additional decode.
+- `detectSilence` analyzes an owned exact 48 kHz mono/stereo block with explicit RMS/peak,
+  analysis-window, minimum-duration, and merge-gap options. It returns absolute half-open sample
+  ranges and rejects non-finite samples, invalid formats, options, or overflowing ranges. Long
+  presentation analysis must feed bounded aligned blocks and merge only after exact range detection;
+  the detector never reads media or mutates a timeline.
 
 The decoder installs an FFmpeg interrupt callback and also checks cancellation
 between packets, frames, clips, and mixed samples. It seeks with one second of
@@ -65,3 +70,5 @@ audio-master-position meter selection, nonzero input PTS,
 missing originals, cancellation, and bit-for-bit repeated requests. The target participates in the repository's
 strict-warning and ASan/UBSan options once added after `audio_engine` in the
 media dependency order.
+
+AI assistance has been used to create this output.

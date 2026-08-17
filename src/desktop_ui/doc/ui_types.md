@@ -20,6 +20,7 @@ the desktop library.
 | `TrackKind` | `Video`, `Audio`, `Caption` | Presentation track category. |
 | `TimelineSnapKind` | `None`, `Frame`, `Marker`, `Playhead`, `ClipEdge` | Canonical resolver result used for guide styling and accessible text. |
 | `KeyframeInterpolationView` | `Hold`, `Linear`, `Bezier` | Presentation form of the canonical interpolation policy. |
+| `TranscriptionState` | `ModelMissing`, `Downloading`, `Ready`, `Running`, `Cancelling`, `Failed` | Truthful model/job state shown by the captions panel. |
 
 ## Types
 
@@ -37,6 +38,12 @@ the desktop library.
 | `EffectView` | identity/name/category/accelerated | One effects-browser row. |
 | `KeyframeView` | identity, clip-local time/value, interpolation, incoming/outgoing offsets | One editable curve sample. |
 | `EffectParameterView` | effect/parameter identity and names, base value, clip duration, keyframes | Complete Inspector view for one effect parameter. |
+| `CaptionWordView` | stable ID, text, start/end ticks, probability | One exact word-navigation target. |
+| `CaptionStyleView` | font/size/colors/emphasis, alignment, vertical position, safe margin, outline | Complete renderer-actionable caption presentation style. |
+| `CaptionRowView` | stable cue ID, time/text/language/range, words/style, confidence/suggested | One caption-table row and its word/style detail state. |
+| `TranscriptionOptionsView` | model/language, translate, GPU preference, required word timing, thread count | User-requested local worker options; it does not imply backend availability or runtime Vulkan use. |
+| `ModelDownloadView` | model/filename/digest, byte progress, status/state | Explicit checksummed model acquisition state. |
+| `CaptionProposalView` | stable ID, kind, summary, range/confidence text, selected | One independently reviewable caption or timeline-cut suggestion. |
 
 ## Ownership and thread safety
 

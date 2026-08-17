@@ -23,6 +23,7 @@ class QListWidget;
 class QProgressBar;
 class QPushButton;
 class QSlider;
+class QSpinBox;
 class QStackedWidget;
 class QTableWidget;
 class QToolButton;
@@ -205,6 +206,13 @@ public:
   explicit CaptionsPanelWidget(QWidget* parent = nullptr);
 
   void setCaptionRows(const QStringList& timecodes, const QStringList& text);
+  void setCaptionRows(const QVector<CaptionRowView>& rows);
+  void setTranscriptionState(TranscriptionState state, const QString& message = {},
+                             int percent = 0);
+  void setModelDownloadState(const ModelDownloadView& state);
+  void setTranscriptionOptions(const TranscriptionOptionsView& options);
+  void setCaptionStyle(const CaptionStyleView& style);
+  void setReviewProposals(const QVector<CaptionProposalView>& proposals);
 
 signals:
   void transcribeRequested();
@@ -215,11 +223,61 @@ signals:
   void captionTextEdited(int row, const QString& text);
   void captionActivated(int row);
   void findInTranscriptRequested(const QString& query);
+  void captionIdActivated(const QString& captionId, qint64 start);
+  void wordActivated(const QString& wordId, qint64 start);
+  void transcriptionOptionsChanged(const TranscriptionOptionsView& options);
+  void downloadModelRequested(const QString& modelId);
+  void cancelTranscriptionRequested();
+  void transcribeWithOptionsRequested(const TranscriptionOptionsView& options);
+  void captionTimingEdited(const QString& captionId, qint64 start, qint64 end);
+  void captionStyleEdited(const QString& captionId, const CaptionStyleView& style);
+  void reviewProposalToggled(const QString& proposalId, bool selected);
+  void applyReviewRequested();
+  void discardReviewRequested();
 
 private:
+  void updateWordList(int row);
+  void updateStyleControls(const CaptionStyleView& style);
+  CaptionStyleView styleFromControls() const;
+  TranscriptionOptionsView optionsFromControls() const;
+  void updateStateControls();
+
   QLineEdit* search_{nullptr};
   QStackedWidget* content_{nullptr};
   QTableWidget* table_{nullptr};
+  QComboBox* language_{nullptr};
+  QCheckBox* translate_{nullptr};
+  QCheckBox* prefer_vulkan_{nullptr};
+  QCheckBox* word_timestamps_{nullptr};
+  QSpinBox* thread_count_{nullptr};
+  QLabel* transcription_status_{nullptr};
+  QProgressBar* transcription_progress_{nullptr};
+  QPushButton* model_download_{nullptr};
+  QPushButton* transcribe_{nullptr};
+  QPushButton* transcribe_cancel_{nullptr};
+  QListWidget* words_{nullptr};
+  QLineEdit* font_family_{nullptr};
+  QDoubleSpinBox* font_size_{nullptr};
+  QComboBox* alignment_{nullptr};
+  QDoubleSpinBox* vertical_position_{nullptr};
+  QDoubleSpinBox* safe_margin_{nullptr};
+  QDoubleSpinBox* outline_width_{nullptr};
+  QPushButton* text_color_{nullptr};
+  QPushButton* background_color_{nullptr};
+  QPushButton* outline_color_{nullptr};
+  QCheckBox* style_bold_{nullptr};
+  QCheckBox* style_italic_{nullptr};
+  QLabel* style_preview_{nullptr};
+  QListWidget* review_{nullptr};
+  QPushButton* apply_review_{nullptr};
+  QPushButton* discard_review_{nullptr};
+  QVector<CaptionRowView> rows_;
+  QVector<CaptionProposalView> proposals_;
+  TranscriptionState transcription_state_{TranscriptionState::Idle};
+  QString model_id_{QStringLiteral("base")};
+  QColor text_color_value_{Qt::white};
+  QColor background_color_value_{0, 0, 0, 178};
+  QColor outline_color_value_{Qt::black};
 };
 
 class DeliverPanelWidget final : public QWidget {

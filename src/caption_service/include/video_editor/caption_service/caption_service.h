@@ -3,6 +3,7 @@
 
 #include "video_editor/edit_model/model.h"
 #include "video_editor/edit_model/result.h"
+#include "video_editor/edit_model/timeline_editor.h"
 
 #include <cstddef>
 #include <optional>
@@ -52,10 +53,13 @@ struct CaptionCue final {
   std::string settings;
   // One-based line in the parsed source. Generated cues use zero.
   std::size_t source_line{0};
+  std::vector<edit::CaptionWord> words;
+  edit::CaptionProvenance provenance{};
 
   friend bool operator==(const CaptionCue& lhs, const CaptionCue& rhs) {
     return lhs.identifier == rhs.identifier && lhs.range == rhs.range && lhs.text == rhs.text &&
-           lhs.settings == rhs.settings;
+           lhs.settings == rhs.settings && lhs.words == rhs.words &&
+           lhs.provenance == rhs.provenance;
   }
 };
 
@@ -117,6 +121,7 @@ using SerializeResult = edit::Result<std::string, std::vector<Diagnostic>>;
 struct ReflowOptions final {
   std::size_t max_characters_per_line{42};
   std::size_t max_lines{2};
+  bool preserve_word_timing{true};
 };
 
 enum class ReflowErrorCode {
@@ -153,6 +158,8 @@ struct SearchHit final {
   std::size_t byte_offset{0};
   std::size_t byte_length{0};
   std::string matched_text;
+  std::optional<edit::EntityId> word_id;
+  std::optional<edit::TimeRange> word_range;
 
   friend bool operator==(const SearchHit&, const SearchHit&) = default;
 };
@@ -182,5 +189,44 @@ using SearchResult = edit::Result<std::vector<SearchHit>, SearchError>;
                                                         const edit::CaptionStyle& style = {});
 [[nodiscard]] CaptionDocument fromEditCaptions(std::span<const edit::Caption> captions,
                                                SubtitleFormat format, std::string language = {});
+
+struct ReviewItem final {
+  edit::TimeRange range{};
+  std::string description;
+  friend bool operator==(const ReviewItem&, const ReviewItem&) = default;
+};
+
+struct CaptionProposal final {
+  edit::Revision base_revision{};
+  std::vector<ReviewItem> review_items;
+  edit::ApplyCaptionChangeSetCommand caption_changes;
+  std::optional<edit::ApplyTimelineCutChangeSetCommand> timeline_cuts;
+};
+
+enum class ProposalErrorCode {
+  InvalidRange,
+  Overlap,
+  InvalidSnapshot,
+  UnsupportedTransition,
+  ArithmeticOverflow
+};
+struct ProposalError final {
+  ProposalErrorCode code{ProposalErrorCode::InvalidSnapshot};
+  std::string message;
+};
+using ProposalResult = edit::Result<CaptionProposal, ProposalError>;
+
+// Builds a deterministic, reviewable timeline-cut proposal from an immutable
+// snapshot. All affected tracks receive complete replacement clip lists.
+[[nodiscard]] ProposalResult
+buildTimelineCutProposal(const edit::TimelineSnapshot& snapshot,
+                         std::span<const edit::TimeRange> selected_ranges);
+
+// Maps a caption through the same ripple removals used by a timeline-cut
+// proposal. A fully removed cue returns nullopt; surviving cues retain their
+// word timings and provenance.
+[[nodiscard]] std::optional<edit::Caption>
+mapCaptionThroughCuts(const edit::Caption& caption,
+                      std::span<const edit::TimeRange> selected_ranges);
 
 } // namespace video_editor::caption_service

@@ -18,6 +18,8 @@ edit::Caption toEditCaption(const CaptionCue& cue, std::string language,
   caption.text = cue.text;
   caption.language = std::move(language);
   caption.style = style;
+  caption.provenance = cue.provenance;
+  caption.words = cue.words;
   return caption;
 }
 
@@ -26,6 +28,8 @@ CaptionCue fromEditCaption(const edit::Caption& caption) {
   cue.identifier = caption.id.toString();
   cue.range = caption.range;
   cue.text = caption.text;
+  cue.words = caption.words;
+  cue.provenance = caption.provenance;
   return cue;
 }
 

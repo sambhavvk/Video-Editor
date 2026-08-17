@@ -42,6 +42,23 @@ separate signals; while running, the export action becomes cancellation.
 
 The panel reports encoder availability but does not choose an FFmpeg encoder or perform I/O.
 
+## CaptionsPanelWidget
+
+`setCaptionRows` accepts owned `CaptionRowView` values with stable cue/word IDs, exact presentation
+ticks, probability, provenance-facing suggestion state, and canonical style. Selecting a cue
+rebuilds its word list; activating a word emits its stable ID and exact start tick for transcript
+navigation. Legacy parallel timecode/text rows remain a compatibility entry point.
+
+`setTranscriptionState`, `setModelDownloadState`, and `setTranscriptionOptions` expose explicit
+model-missing/downloading/ready/running/cancelling/failure states without performing network or
+worker work. Model download, one-job process lifecycle, and revision checks belong to the
+application controller. `setReviewProposals` presents independently checkable items and emits apply,
+discard, and selection intent; it never mutates the timeline itself.
+
+Style controls emit a complete `CaptionStyleView` for the selected stable caption ID. Alignment,
+vertical position, safe margin, font request, size, colors, emphasis, and outline are presentation
+values; the controller validates and commits them through the canonical caption command.
+
 ## Ownership and thread safety
 
 All widgets are QObject-parent-owned and GUI-thread only. View objects and strings are copied. They

@@ -48,6 +48,18 @@ namespace {
   return begins_at_boundary && ends_at_boundary;
 }
 
+[[nodiscard]] std::optional<std::pair<edit::EntityId, edit::TimeRange>>
+wordAt(const CaptionCue& cue, const std::size_t offset, const std::size_t length) {
+  for (const auto& word : cue.words) {
+    const auto position = cue.text.find(word.text);
+    if (position != std::string::npos && offset < position + word.text.size() &&
+        offset + length > position) {
+      return std::pair{word.id, word.range};
+    }
+  }
+  return std::nullopt;
+}
+
 } // namespace
 
 SearchResult search(std::span<const CaptionCue> cues, std::string_view query,
@@ -71,8 +83,11 @@ SearchResult search(std::span<const CaptionCue> cues, std::string_view query,
     std::size_t offset = 0;
     while ((offset = haystack.find(needle, offset)) != std::string::npos) {
       if (!options.whole_word || wholeWordMatch(cue.text, offset, needle.size())) {
-        hits.push_back(
-            {cue_index, cue.range, offset, needle.size(), cue.text.substr(offset, needle.size())});
+        const auto word = wordAt(cue, offset, needle.size());
+        hits.push_back({cue_index, cue.range, offset, needle.size(),
+                        cue.text.substr(offset, needle.size()),
+                        word ? std::optional<edit::EntityId>{word->first} : std::nullopt,
+                        word ? std::optional<edit::TimeRange>{word->second} : std::nullopt});
       }
       offset += needle.size();
     }

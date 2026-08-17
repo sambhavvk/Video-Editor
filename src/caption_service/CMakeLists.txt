@@ -18,6 +18,7 @@ add_library(video_editor_caption_service STATIC
   src/conversion.cpp
   src/internal.cpp
   src/parser.cpp
+  src/proposal.cpp
   src/reflow.cpp
   src/search.cpp
   src/serializer.cpp)

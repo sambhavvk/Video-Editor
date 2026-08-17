@@ -9,6 +9,7 @@
 #include "video_editor/media_codec/encoder_capabilities.h"
 
 #include <QCheckBox>
+#include <QColorDialog>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
@@ -24,6 +25,7 @@
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSlider>
+#include <QSpinBox>
 #include <QStackedWidget>
 #include <QStyle>
 #include <QTableWidget>
@@ -1370,6 +1372,76 @@ CaptionsPanelWidget::CaptionsPanelWidget(QWidget* parent) : QWidget(parent) {
   search_->setClearButtonEnabled(true);
   layout->addWidget(search_);
 
+  auto* transcription = new QGroupBox(tr("Local transcription"), this);
+  transcription->setObjectName(QStringLiteral("transcriptionOptionsGroup"));
+  transcription->setCheckable(true);
+  transcription->setChecked(false);
+  auto* transcriptionLayout = new QVBoxLayout(transcription);
+  auto* options = new QFormLayout;
+  language_ = new QComboBox(transcription);
+  language_->setObjectName(QStringLiteral("transcriptionLanguage"));
+  language_->setAccessibleName(tr("Transcription language"));
+  language_->addItem(tr("Detect language"), QString{});
+  language_->addItem(tr("English"), QStringLiteral("en"));
+  language_->addItem(tr("French"), QStringLiteral("fr"));
+  language_->addItem(tr("German"), QStringLiteral("de"));
+  language_->addItem(tr("Spanish"), QStringLiteral("es"));
+  language_->addItem(tr("Japanese"), QStringLiteral("ja"));
+  options->addRow(tr("Language"), language_);
+  translate_ = new QCheckBox(tr("Translate to English"), transcription);
+  translate_->setObjectName(QStringLiteral("transcriptionTranslate"));
+  translate_->setAccessibleName(tr("Translate transcript to English"));
+  options->addRow(QString{}, translate_);
+  prefer_vulkan_ = new QCheckBox(tr("Prefer Vulkan acceleration"), transcription);
+  prefer_vulkan_->setObjectName(QStringLiteral("transcriptionVulkan"));
+  prefer_vulkan_->setAccessibleName(tr("Prefer Vulkan acceleration when available"));
+  options->addRow(QString{}, prefer_vulkan_);
+  word_timestamps_ = new QCheckBox(tr("Keep word timings"), transcription);
+  word_timestamps_->setObjectName(QStringLiteral("transcriptionWordTimings"));
+  word_timestamps_->setAccessibleName(tr("Keep word-level timings"));
+  word_timestamps_->setChecked(true);
+  word_timestamps_->setEnabled(false);
+  options->addRow(QString{}, word_timestamps_);
+  thread_count_ = new QSpinBox(transcription);
+  thread_count_->setObjectName(QStringLiteral("transcriptionThreadCount"));
+  thread_count_->setAccessibleName(tr("Transcription worker threads"));
+  thread_count_->setRange(0, 64);
+  thread_count_->setSpecialValueText(tr("Automatic"));
+  options->addRow(tr("Threads"), thread_count_);
+  transcriptionLayout->addLayout(options);
+
+  auto* modelRow = new QHBoxLayout;
+  transcription_status_ =
+      new QLabel(tr("Model not installed; download is optional."), transcription);
+  transcription_status_->setObjectName(QStringLiteral("transcriptionStatus"));
+  transcription_status_->setAccessibleName(tr("Transcription model status"));
+  transcription_status_->setWordWrap(true);
+  modelRow->addWidget(transcription_status_, 1);
+  model_download_ = new QPushButton(tr("Download model…"), transcription);
+  model_download_->setObjectName(QStringLiteral("downloadTranscriptionModelButton"));
+  model_download_->setAccessibleName(tr("Download the optional transcription model"));
+  modelRow->addWidget(model_download_);
+  transcriptionLayout->addLayout(modelRow);
+  transcription_progress_ = new QProgressBar(transcription);
+  transcription_progress_->setObjectName(QStringLiteral("transcriptionProgress"));
+  transcription_progress_->setAccessibleName(tr("Transcription progress"));
+  transcription_progress_->setRange(0, 100);
+  transcription_progress_->setTextVisible(true);
+  transcription_progress_->hide();
+  transcriptionLayout->addWidget(transcription_progress_);
+  auto* transcriptionButtons = new QHBoxLayout;
+  transcribe_ = new QPushButton(tr("Transcribe selected audio"), transcription);
+  transcribe_->setObjectName(QStringLiteral("transcribeButton"));
+  transcribe_->setAccessibleName(tr("Transcribe the selected audio clip locally"));
+  transcribe_cancel_ = new QPushButton(tr("Cancel"), transcription);
+  transcribe_cancel_->setObjectName(QStringLiteral("cancelTranscriptionButton"));
+  transcribe_cancel_->setAccessibleName(tr("Cancel transcription or model download"));
+  transcribe_cancel_->hide();
+  transcriptionButtons->addWidget(transcribe_);
+  transcriptionButtons->addWidget(transcribe_cancel_);
+  transcriptionLayout->addLayout(transcriptionButtons);
+  layout->addWidget(transcription);
+
   content_ = new QStackedWidget(this);
   auto* empty = new QWidget(content_);
   auto* emptyLayout = new QVBoxLayout(empty);
@@ -1382,9 +1454,9 @@ CaptionsPanelWidget::CaptionsPanelWidget(QWidget* parent) : QWidget(parent) {
   emptyLayout->addWidget(heading);
   emptyLayout->addWidget(
       makeMutedLabel(tr("Transcribe locally, or import an SRT or WebVTT file."), empty));
-  auto* transcribe = new QPushButton(tr("Transcribe sequence"), empty);
-  transcribe->setObjectName(QStringLiteral("transcribeButton"));
-  transcribe->setAccessibleName(tr("Transcribe sequence locally"));
+  auto* transcribe = new QPushButton(tr("Transcribe selected audio"), empty);
+  transcribe->setObjectName(QStringLiteral("emptyTranscribeButton"));
+  transcribe->setAccessibleName(tr("Transcribe the selected audio clip locally"));
   auto* import = new QPushButton(tr("Import captions…"), empty);
   import->setObjectName(QStringLiteral("importCaptionsButton"));
   import->setAccessibleName(tr("Import SRT or WebVTT captions"));
@@ -1403,15 +1475,26 @@ CaptionsPanelWidget::CaptionsPanelWidget(QWidget* parent) : QWidget(parent) {
   table_ = new QTableWidget(tablePage);
   table_->setObjectName(QStringLiteral("captionsTable"));
   table_->setAccessibleName(tr("Caption segments"));
-  table_->setColumnCount(2);
-  table_->setHorizontalHeaderLabels({tr("Time"), tr("Caption")});
+  table_->setColumnCount(3);
+  table_->setHorizontalHeaderLabels({tr("Time"), tr("Caption"), tr("Confidence")});
   table_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
   table_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+  table_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
   table_->verticalHeader()->hide();
   table_->setSelectionBehavior(QAbstractItemView::SelectRows);
   table_->setSelectionMode(QAbstractItemView::SingleSelection);
   table_->setShowGrid(false);
   tableLayout->addWidget(table_, 1);
+
+  auto* wordsGroup = new QGroupBox(tr("Words"), tablePage);
+  wordsGroup->setObjectName(QStringLiteral("captionWordsGroup"));
+  auto* wordsLayout = new QVBoxLayout(wordsGroup);
+  words_ = new QListWidget(wordsGroup);
+  words_->setObjectName(QStringLiteral("captionWordsList"));
+  words_->setAccessibleName(tr("Word-level transcript navigation"));
+  words_->setMaximumHeight(110);
+  wordsLayout->addWidget(words_);
+  tableLayout->addWidget(wordsGroup);
 
   auto* captionActions = new QHBoxLayout;
   auto* addCaption = new QPushButton(tr("Add at playhead"), tablePage);
@@ -1431,7 +1514,120 @@ CaptionsPanelWidget::CaptionsPanelWidget(QWidget* parent) : QWidget(parent) {
   content_->addWidget(tablePage);
   layout->addWidget(content_, 1);
 
-  connect(transcribe, &QPushButton::clicked, this, &CaptionsPanelWidget::transcribeRequested);
+  auto* style = new QGroupBox(tr("Caption style"), this);
+  style->setObjectName(QStringLiteral("captionStyleGroup"));
+  style->setCheckable(true);
+  style->setChecked(false);
+  auto* styleForm = new QFormLayout(style);
+  font_family_ = new QLineEdit(style);
+  font_family_->setObjectName(QStringLiteral("captionFontFamily"));
+  font_family_->setAccessibleName(tr("Caption font family"));
+  font_family_->setText(QStringLiteral("sans-serif"));
+  styleForm->addRow(tr("Font"), font_family_);
+  font_size_ = new QDoubleSpinBox(style);
+  font_size_->setObjectName(QStringLiteral("captionFontSize"));
+  font_size_->setAccessibleName(tr("Caption font size"));
+  font_size_->setRange(1.0, 4096.0);
+  font_size_->setValue(48.0);
+  font_size_->setSuffix(tr(" pt"));
+  styleForm->addRow(tr("Size"), font_size_);
+  alignment_ = new QComboBox(style);
+  alignment_->setObjectName(QStringLiteral("captionAlignment"));
+  alignment_->setAccessibleName(tr("Caption alignment"));
+  alignment_->addItem(tr("Left"), QStringLiteral("left"));
+  alignment_->addItem(tr("Center"), QStringLiteral("center"));
+  alignment_->addItem(tr("Right"), QStringLiteral("right"));
+  alignment_->setCurrentIndex(1);
+  styleForm->addRow(tr("Alignment"), alignment_);
+  vertical_position_ = new QDoubleSpinBox(style);
+  vertical_position_->setObjectName(QStringLiteral("captionVerticalPosition"));
+  vertical_position_->setAccessibleName(tr("Caption vertical position"));
+  vertical_position_->setRange(0.0, 1.0);
+  vertical_position_->setSingleStep(0.01);
+  vertical_position_->setValue(0.9);
+  styleForm->addRow(tr("Vertical position"), vertical_position_);
+  safe_margin_ = new QDoubleSpinBox(style);
+  safe_margin_->setObjectName(QStringLiteral("captionSafeMargin"));
+  safe_margin_->setAccessibleName(tr("Caption safe margin"));
+  safe_margin_->setRange(0.0, 0.5);
+  safe_margin_->setSingleStep(0.01);
+  safe_margin_->setValue(0.05);
+  styleForm->addRow(tr("Safe margin"), safe_margin_);
+  outline_width_ = new QDoubleSpinBox(style);
+  outline_width_->setObjectName(QStringLiteral("captionOutlineWidth"));
+  outline_width_->setAccessibleName(tr("Caption outline width"));
+  outline_width_->setRange(0.0, 32.0);
+  outline_width_->setValue(0.0);
+  styleForm->addRow(tr("Outline"), outline_width_);
+  const auto addColorButton = [this, styleForm, style](const QString& label, QPushButton*& button,
+                                                       QColor& color, const QString& name) {
+    button = new QPushButton(style);
+    button->setObjectName(name);
+    button->setAccessibleName(label);
+    button->setText(label);
+    button->setToolTip(tr("Choose a color"));
+    styleForm->addRow(label, button);
+    connect(button, &QPushButton::clicked, this, [this, button, &color, label] {
+      const QColor selected =
+          QColorDialog::getColor(color, this, label, QColorDialog::ShowAlphaChannel);
+      if (!selected.isValid())
+        return;
+      color = selected;
+      button->setStyleSheet(
+          QStringLiteral("background-color: %1").arg(color.name(QColor::HexArgb)));
+      const int row = table_->currentRow();
+      if (row >= 0 && row < rows_.size())
+        emit captionStyleEdited(rows_.at(row).id, styleFromControls());
+    });
+  };
+  addColorButton(tr("Text color"), text_color_, text_color_value_,
+                 QStringLiteral("captionTextColor"));
+  addColorButton(tr("Background color"), background_color_, background_color_value_,
+                 QStringLiteral("captionBackgroundColor"));
+  addColorButton(tr("Outline color"), outline_color_, outline_color_value_,
+                 QStringLiteral("captionOutlineColor"));
+  auto* styleButtons = new QWidget(style);
+  auto* styleButtonsLayout = new QHBoxLayout(styleButtons);
+  styleButtonsLayout->setContentsMargins(0, 0, 0, 0);
+  style_bold_ = new QCheckBox(tr("Bold"), styleButtons);
+  style_bold_->setObjectName(QStringLiteral("captionStyleBold"));
+  style_bold_->setAccessibleName(tr("Bold captions"));
+  style_italic_ = new QCheckBox(tr("Italic"), styleButtons);
+  style_italic_->setObjectName(QStringLiteral("captionStyleItalic"));
+  style_italic_->setAccessibleName(tr("Italic captions"));
+  styleButtonsLayout->addWidget(style_bold_);
+  styleButtonsLayout->addWidget(style_italic_);
+  styleButtonsLayout->addStretch();
+  styleForm->addRow(tr("Emphasis"), styleButtons);
+  style_preview_ = new QLabel(tr("Preview uses these settings for burn-in and export."), style);
+  style_preview_->setObjectName(QStringLiteral("captionStylePreview"));
+  style_preview_->setAccessibleName(tr("Caption style preview"));
+  style_preview_->setWordWrap(true);
+  styleForm->addRow(QString{}, style_preview_);
+  layout->addWidget(style);
+
+  auto* reviewGroup = new QGroupBox(tr("Review suggestions"), this);
+  reviewGroup->setObjectName(QStringLiteral("captionReviewGroup"));
+  auto* reviewLayout = new QVBoxLayout(reviewGroup);
+  review_ = new QListWidget(reviewGroup);
+  review_->setObjectName(QStringLiteral("captionReviewList"));
+  review_->setAccessibleName(tr("Caption and silence proposals"));
+  reviewLayout->addWidget(review_);
+  auto* reviewButtons = new QHBoxLayout;
+  apply_review_ = new QPushButton(tr("Apply selected"), reviewGroup);
+  apply_review_->setObjectName(QStringLiteral("applyCaptionReviewButton"));
+  apply_review_->setAccessibleName(tr("Apply selected caption review suggestions"));
+  discard_review_ = new QPushButton(tr("Discard"), reviewGroup);
+  discard_review_->setObjectName(QStringLiteral("discardCaptionReviewButton"));
+  discard_review_->setAccessibleName(tr("Discard caption review suggestions"));
+  reviewButtons->addWidget(apply_review_);
+  reviewButtons->addWidget(discard_review_);
+  reviewLayout->addLayout(reviewButtons);
+  reviewGroup->setVisible(false);
+  layout->addWidget(reviewGroup);
+
+  connect(transcribe, &QPushButton::clicked, this,
+          [this] { emit transcribeWithOptionsRequested(optionsFromControls()); });
   connect(import, &QPushButton::clicked, this, &CaptionsPanelWidget::importCaptionsRequested);
   connect(emptyAdd, &QPushButton::clicked, this, &CaptionsPanelWidget::addCaptionRequested);
   connect(exportCaptions, &QPushButton::clicked, this,
@@ -1443,26 +1639,284 @@ CaptionsPanelWidget::CaptionsPanelWidget(QWidget* parent) : QWidget(parent) {
     }
   });
   connect(search_, &QLineEdit::textChanged, this, &CaptionsPanelWidget::findInTranscriptRequested);
-  connect(table_, &QTableWidget::cellDoubleClicked, this,
-          [this](int row, int) { emit captionActivated(row); });
+  connect(table_, &QTableWidget::cellDoubleClicked, this, [this](int row, int) {
+    emit captionActivated(row);
+    if (row >= 0 && row < rows_.size()) {
+      emit captionIdActivated(rows_.at(row).id, rows_.at(row).start);
+    }
+  });
+  connect(table_, &QTableWidget::currentCellChanged, this, [this](int currentRow, int, int, int) {
+    updateWordList(currentRow);
+    if (currentRow >= 0 && currentRow < rows_.size()) {
+      updateStyleControls(rows_.at(currentRow).style);
+    }
+  });
+  connect(words_, &QListWidget::itemActivated, this, [this](QListWidgetItem* item) {
+    if (item != nullptr)
+      emit wordActivated(item->data(Qt::UserRole).toString(),
+                         item->data(Qt::UserRole + 1).toLongLong());
+  });
+  connect(words_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem* item) {
+    if (item != nullptr)
+      emit wordActivated(item->data(Qt::UserRole).toString(),
+                         item->data(Qt::UserRole + 1).toLongLong());
+  });
   connect(table_, &QTableWidget::cellChanged, this, [this](const int row, const int column) {
     if (column == 1 && table_->item(row, column) != nullptr) {
       emit captionTextEdited(row, table_->item(row, column)->text());
     }
   });
+  const auto emitOptions = [this] { emit transcriptionOptionsChanged(optionsFromControls()); };
+  connect(language_, &QComboBox::currentTextChanged, this,
+          [emitOptions](const QString&) { emitOptions(); });
+  connect(translate_, &QCheckBox::toggled, this, [emitOptions](bool) { emitOptions(); });
+  connect(prefer_vulkan_, &QCheckBox::toggled, this, [emitOptions](bool) { emitOptions(); });
+  connect(word_timestamps_, &QCheckBox::toggled, this, [emitOptions](bool) { emitOptions(); });
+  connect(thread_count_, &QSpinBox::valueChanged, this, [emitOptions](int) { emitOptions(); });
+  connect(model_download_, &QPushButton::clicked, this,
+          [this] { emit downloadModelRequested(model_id_); });
+  connect(transcribe_, &QPushButton::clicked, this,
+          [this] { emit transcribeWithOptionsRequested(optionsFromControls()); });
+  connect(transcribe_cancel_, &QPushButton::clicked, this,
+          &CaptionsPanelWidget::cancelTranscriptionRequested);
+  const auto emitStyle = [this] {
+    const int row = table_->currentRow();
+    if (row >= 0 && row < rows_.size()) {
+      emit captionStyleEdited(rows_.at(row).id, styleFromControls());
+    }
+  };
+  connect(font_family_, &QLineEdit::editingFinished, this, emitStyle);
+  connect(font_size_, &QDoubleSpinBox::editingFinished, this, emitStyle);
+  connect(alignment_, &QComboBox::currentTextChanged, this,
+          [emitStyle](const QString&) { emitStyle(); });
+  connect(vertical_position_, &QDoubleSpinBox::editingFinished, this, emitStyle);
+  connect(safe_margin_, &QDoubleSpinBox::editingFinished, this, emitStyle);
+  connect(outline_width_, &QDoubleSpinBox::editingFinished, this, emitStyle);
+  connect(style_bold_, &QCheckBox::toggled, this, [emitStyle](bool) { emitStyle(); });
+  connect(style_italic_, &QCheckBox::toggled, this, [emitStyle](bool) { emitStyle(); });
+  connect(review_, &QListWidget::itemChanged, this, [this](QListWidgetItem* item) {
+    if (item == nullptr)
+      return;
+    const QString id = item->data(Qt::UserRole).toString();
+    for (auto& proposal : proposals_) {
+      if (proposal.id == id)
+        proposal.selected = item->checkState() == Qt::Checked;
+    }
+    emit reviewProposalToggled(id, item->checkState() == Qt::Checked);
+  });
+  connect(apply_review_, &QPushButton::clicked, this, &CaptionsPanelWidget::applyReviewRequested);
+  connect(discard_review_, &QPushButton::clicked, this,
+          &CaptionsPanelWidget::discardReviewRequested);
+  updateStateControls();
 }
 
 void CaptionsPanelWidget::setCaptionRows(const QStringList& timecodes, const QStringList& text) {
-  const QSignalBlocker blocker(table_);
+  QVector<CaptionRowView> rows;
   const auto count = std::min(timecodes.size(), text.size());
-  table_->setRowCount(count);
+  rows.reserve(count);
   for (int row = 0; row < count; ++row) {
-    auto* time = new QTableWidgetItem(timecodes.at(row));
-    time->setFlags(time->flags() & ~Qt::ItemIsEditable);
-    table_->setItem(row, 0, time);
-    table_->setItem(row, 1, new QTableWidgetItem(text.at(row)));
+    rows.push_back({.id = QStringLiteral("row-%1").arg(row),
+                    .timecode = timecodes.at(row),
+                    .text = text.at(row),
+                    .language = {},
+                    .start = 0,
+                    .end = 0,
+                    .words = {},
+                    .style = {},
+                    .confidence = 1.0,
+                    .suggested = false});
   }
-  content_->setCurrentIndex(count == 0 ? 0 : 1);
+  setCaptionRows(rows);
+}
+
+void CaptionsPanelWidget::setCaptionRows(const QVector<CaptionRowView>& rows) {
+  QString selectedId;
+  const int currentRow = table_->currentRow();
+  if (const auto* item = currentRow >= 0 ? table_->item(currentRow, 0) : nullptr; item != nullptr) {
+    selectedId = item->data(Qt::UserRole).toString();
+  }
+  rows_ = rows;
+  const QSignalBlocker blocker(table_);
+  table_->setRowCount(rows_.size());
+  for (int row = 0; row < rows_.size(); ++row) {
+    const auto& view = rows_.at(row);
+    auto* time = new QTableWidgetItem(view.timecode);
+    time->setFlags(time->flags() & ~Qt::ItemIsEditable);
+    time->setData(Qt::UserRole, view.id);
+    table_->setItem(row, 0, time);
+    table_->setItem(row, 1, new QTableWidgetItem(view.text));
+    auto* confidence = new QTableWidgetItem(
+        view.suggested ? tr("Suggested · %1%").arg(view.confidence * 100.0, 0, 'f', 0)
+                       : tr("Edited"));
+    confidence->setFlags(confidence->flags() & ~Qt::ItemIsEditable);
+    table_->setItem(row, 2, confidence);
+  }
+  content_->setCurrentIndex(rows_.isEmpty() ? 0 : 1);
+  int selectedRow = -1;
+  for (int row = 0; row < rows_.size(); ++row) {
+    if (!selectedId.isEmpty() && rows_.at(row).id == selectedId) {
+      selectedRow = row;
+      break;
+    }
+  }
+  if (selectedRow < 0 && !rows_.isEmpty())
+    selectedRow = 0;
+  if (selectedRow >= 0)
+    table_->setCurrentCell(selectedRow, 0);
+  updateWordList(selectedRow);
+  if (selectedRow >= 0) {
+    updateStyleControls(rows_.at(selectedRow).style);
+  }
+}
+
+void CaptionsPanelWidget::setTranscriptionState(const TranscriptionState state,
+                                                const QString& message, const int percent) {
+  transcription_state_ = state;
+  if (!message.isEmpty())
+    transcription_status_->setText(message);
+  transcription_progress_->setValue(std::clamp(percent, 0, 100));
+  transcription_progress_->setVisible(state == TranscriptionState::Downloading ||
+                                      state == TranscriptionState::Running ||
+                                      state == TranscriptionState::Cancelling);
+  updateStateControls();
+}
+
+void CaptionsPanelWidget::setModelDownloadState(const ModelDownloadView& state) {
+  model_id_ = state.modelId.isEmpty() ? model_id_ : state.modelId;
+  if (!state.status.isEmpty())
+    transcription_status_->setText(state.status);
+  const int percent =
+      state.totalBytes > 0 ? static_cast<int>((100LL * state.receivedBytes) / state.totalBytes) : 0;
+  setTranscriptionState(state.state, {}, percent);
+}
+
+void CaptionsPanelWidget::setTranscriptionOptions(const TranscriptionOptionsView& options) {
+  model_id_ = options.modelId.isEmpty() ? model_id_ : options.modelId;
+  const QSignalBlocker languageBlocker(language_);
+  const QSignalBlocker translateBlocker(translate_);
+  const QSignalBlocker vulkanBlocker(prefer_vulkan_);
+  const QSignalBlocker wordsBlocker(word_timestamps_);
+  const QSignalBlocker threadBlocker(thread_count_);
+  language_->setCurrentIndex(language_->findData(options.language));
+  if (language_->currentIndex() < 0)
+    language_->setCurrentIndex(0);
+  translate_->setChecked(options.translate);
+  prefer_vulkan_->setChecked(options.preferVulkan);
+  word_timestamps_->setChecked(options.wordTimestamps);
+  thread_count_->setValue(std::clamp(options.threadCount, 0, 64));
+}
+
+void CaptionsPanelWidget::setCaptionStyle(const CaptionStyleView& style) {
+  updateStyleControls(style);
+}
+
+void CaptionsPanelWidget::setReviewProposals(const QVector<CaptionProposalView>& proposals) {
+  proposals_ = proposals;
+  auto* group = findChild<QGroupBox*>(QStringLiteral("captionReviewGroup"));
+  if (group != nullptr)
+    group->setVisible(!proposals_.isEmpty());
+  const QSignalBlocker blocker(review_);
+  review_->clear();
+  for (const auto& proposal : proposals_) {
+    auto* item = new QListWidgetItem(
+        tr("%1 · %2 · %3").arg(proposal.kind, proposal.summary, proposal.previewRange), review_);
+    item->setData(Qt::UserRole, proposal.id);
+    item->setToolTip(proposal.confidence);
+    item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+    item->setCheckState(proposal.selected ? Qt::Checked : Qt::Unchecked);
+  }
+  apply_review_->setEnabled(!proposals_.isEmpty());
+}
+
+void CaptionsPanelWidget::updateWordList(const int row) {
+  if (words_ == nullptr)
+    return;
+  const QSignalBlocker blocker(words_);
+  words_->clear();
+  if (row < 0 || row >= rows_.size())
+    return;
+  for (const auto& word : rows_.at(row).words) {
+    auto* item = new QListWidgetItem(tr("%1  ·  %2–%3 s  ·  %4%")
+                                         .arg(word.text)
+                                         .arg(static_cast<double>(word.start) / 48'000.0, 0, 'f', 3)
+                                         .arg(static_cast<double>(word.end) / 48'000.0, 0, 'f', 3)
+                                         .arg(word.probability * 100.0, 0, 'f', 0),
+                                     words_);
+    item->setData(Qt::UserRole, word.id);
+    item->setData(Qt::UserRole + 1, word.start);
+  }
+}
+
+TranscriptionOptionsView CaptionsPanelWidget::optionsFromControls() const {
+  return {.modelId = model_id_,
+          .language = language_->currentData().toString(),
+          .translate = translate_->isChecked(),
+          .preferVulkan = prefer_vulkan_->isChecked(),
+          .wordTimestamps = word_timestamps_->isChecked(),
+          .threadCount = thread_count_->value()};
+}
+
+CaptionStyleView CaptionsPanelWidget::styleFromControls() const {
+  return {.fontFamily = font_family_->text(),
+          .fontSize = font_size_->value(),
+          .textColor = text_color_value_,
+          .backgroundColor = background_color_value_,
+          .bold = style_bold_->isChecked(),
+          .italic = style_italic_->isChecked(),
+          .alignment = alignment_->currentData().toString(),
+          .verticalPosition = vertical_position_->value(),
+          .safeMargin = safe_margin_->value(),
+          .outlineWidth = outline_width_->value(),
+          .outlineColor = outline_color_value_};
+}
+
+void CaptionsPanelWidget::updateStyleControls(const CaptionStyleView& style) {
+  const QSignalBlocker fontBlocker(font_family_);
+  const QSignalBlocker sizeBlocker(font_size_);
+  const QSignalBlocker alignBlocker(alignment_);
+  const QSignalBlocker positionBlocker(vertical_position_);
+  const QSignalBlocker marginBlocker(safe_margin_);
+  const QSignalBlocker outlineBlocker(outline_width_);
+  const QSignalBlocker boldBlocker(style_bold_);
+  const QSignalBlocker italicBlocker(style_italic_);
+  font_family_->setText(style.fontFamily);
+  text_color_value_ = style.textColor;
+  background_color_value_ = style.backgroundColor;
+  outline_color_value_ = style.outlineColor;
+  font_size_->setValue(style.fontSize);
+  alignment_->setCurrentIndex(std::max(0, alignment_->findData(style.alignment)));
+  vertical_position_->setValue(style.verticalPosition);
+  safe_margin_->setValue(style.safeMargin);
+  outline_width_->setValue(style.outlineWidth);
+  style_bold_->setChecked(style.bold);
+  style_italic_->setChecked(style.italic);
+  const QString css = QStringLiteral("font-family:'%1'; font-size:%2pt; color:%3; background:%4; "
+                                     "border: %5px solid %6; padding: 8px;")
+                          .arg(style.fontFamily)
+                          .arg(style.fontSize, 0, 'f', 1)
+                          .arg(style.textColor.name(QColor::HexArgb))
+                          .arg(style.backgroundColor.name(QColor::HexArgb))
+                          .arg(style.outlineWidth, 0, 'f', 1)
+                          .arg(style.outlineColor.name(QColor::HexArgb));
+  style_preview_->setText(tr("Preview (approximate; final export uses the same persisted style)"));
+  style_preview_->setStyleSheet(css);
+  text_color_->setStyleSheet(
+      QStringLiteral("background-color: %1").arg(text_color_value_.name(QColor::HexArgb)));
+  background_color_->setStyleSheet(
+      QStringLiteral("background-color: %1").arg(background_color_value_.name(QColor::HexArgb)));
+  outline_color_->setStyleSheet(
+      QStringLiteral("background-color: %1").arg(outline_color_value_.name(QColor::HexArgb)));
+}
+
+void CaptionsPanelWidget::updateStateControls() {
+  const bool active = transcription_state_ == TranscriptionState::Downloading ||
+                      transcription_state_ == TranscriptionState::Running ||
+                      transcription_state_ == TranscriptionState::Cancelling;
+  const bool ready = transcription_state_ == TranscriptionState::Ready;
+  model_download_->setEnabled(!active && !ready);
+  transcribe_->setEnabled(ready);
+  transcribe_cancel_->setVisible(active);
+  transcribe_cancel_->setEnabled(transcription_state_ != TranscriptionState::Cancelling);
 }
 
 DeliverPanelWidget::DeliverPanelWidget(QWidget* parent) : QWidget(parent) {

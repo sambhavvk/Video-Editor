@@ -138,6 +138,46 @@ ReflowResult reflow(const CaptionDocument& document, const ReflowOptions& option
       continue;
     }
 
+    if (options.preserve_word_timing && !source.words.empty()) {
+      std::size_t word_offset = 0;
+      edit::Time previous_end = source.range.start;
+      for (std::size_t page_index = 0; page_index < pages.size(); ++page_index) {
+        const auto page_word_count = words(pages[page_index]).size();
+        if (page_word_count == 0 || word_offset + page_word_count > source.words.size()) {
+          return ReflowResult::failure(
+              makeError(ReflowErrorCode::InsufficientCueDuration, cue_index,
+                        "word timing cannot be mapped to the requested reflow split"));
+        }
+        const auto begin = word_offset;
+        const auto end = word_offset + page_word_count;
+        const auto page_start =
+            page_index == 0 ? source.range.start : source.words[begin].range.start;
+        const auto page_end =
+            page_index + 1 == pages.size() ? source.range.end() : source.words[end - 1].range.end();
+        if (page_start < previous_end || page_end <= page_start) {
+          return ReflowResult::failure(
+              makeError(ReflowErrorCode::InsufficientCueDuration, cue_index,
+                        "word timing does not provide positive contiguous reflow ranges"));
+        }
+        CaptionCue cue = source;
+        cue.text = std::move(pages[page_index]);
+        cue.words.assign(source.words.begin() + static_cast<std::ptrdiff_t>(begin),
+                         source.words.begin() + static_cast<std::ptrdiff_t>(end));
+        cue.range = edit::TimeRange(page_start, page_end - page_start);
+        if (source.identifier) {
+          cue.identifier = splitIdentifier(*source.identifier, page_index);
+        }
+        result.cues.push_back(std::move(cue));
+        previous_end = page_end;
+        word_offset = end;
+      }
+      if (word_offset != source.words.size()) {
+        return ReflowResult::failure(makeError(ReflowErrorCode::InsufficientCueDuration, cue_index,
+                                               "not all timed words were consumed by reflow"));
+      }
+      continue;
+    }
+
     std::vector<std::size_t> weights;
     weights.reserve(pages.size());
     for (const auto& page : pages) {

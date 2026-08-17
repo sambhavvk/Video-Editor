@@ -181,9 +181,90 @@ struct EffectParameterView {
   QVector<KeyframeView> keyframes;
 };
 
+// Caption/transcription views deliberately contain only presentation values.
+// The controller converts these to edit-model entities after validating the
+// captured revision; the widget never mutates the project directly.
+struct CaptionWordView final {
+  QString id;
+  QString text;
+  qint64 start{0};
+  qint64 end{0};
+  double probability{1.0};
+};
+
+struct CaptionStyleView final {
+  QString fontFamily{QStringLiteral("sans-serif")};
+  double fontSize{48.0};
+  QColor textColor{Qt::white};
+  QColor backgroundColor{0, 0, 0, 178};
+  bool bold{false};
+  bool italic{false};
+  QString alignment{QStringLiteral("center")};
+  double verticalPosition{0.9};
+  double safeMargin{0.05};
+  double outlineWidth{0.0};
+  QColor outlineColor{Qt::black};
+};
+
+struct CaptionRowView final {
+  QString id;
+  QString timecode;
+  QString text;
+  QString language;
+  qint64 start{0};
+  qint64 end{0};
+  QVector<CaptionWordView> words;
+  CaptionStyleView style{};
+  double confidence{1.0};
+  bool suggested{false};
+};
+
+enum class TranscriptionState {
+  Idle,
+  ModelMissing,
+  Downloading,
+  Ready,
+  Running,
+  Cancelling,
+  Failed,
+};
+
+struct ModelDownloadView final {
+  QString modelId;
+  QString filename;
+  QString digestAlgorithm;
+  QString digest;
+  qint64 receivedBytes{0};
+  qint64 totalBytes{0};
+  QString status;
+  TranscriptionState state{TranscriptionState::ModelMissing};
+};
+
+struct TranscriptionOptionsView final {
+  QString modelId{QStringLiteral("base")};
+  QString language;
+  bool translate{false};
+  bool preferVulkan{false};
+  bool wordTimestamps{true};
+  int threadCount{0};
+};
+
+struct CaptionProposalView final {
+  QString id;
+  QString kind;
+  QString summary;
+  QString previewRange;
+  QString confidence;
+  bool selected{true};
+  bool accepted{false};
+  bool rejected{false};
+};
+
 } // namespace video_editor::desktop_ui
 
 Q_DECLARE_METATYPE(video_editor::desktop_ui::Workspace)
 Q_DECLARE_METATYPE(video_editor::desktop_ui::TrackKind)
 Q_DECLARE_METATYPE(video_editor::desktop_ui::TimelineSnapKind)
 Q_DECLARE_METATYPE(video_editor::desktop_ui::KeyframeInterpolationView)
+Q_DECLARE_METATYPE(video_editor::desktop_ui::TranscriptionState)
+Q_DECLARE_METATYPE(video_editor::desktop_ui::TranscriptionOptionsView)
