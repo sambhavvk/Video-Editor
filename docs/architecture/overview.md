@@ -7,6 +7,9 @@ and rebuildable artifacts. Typed edit commands produce immutable revisions; prev
 and export consume those revisions without allowing FFmpeg, Qt, SQLite, or GPU types into the edit
 model.
 
+The first public beta is Linux exclusive. Windows MSI signing and the Windows GPU/codec matrix are
+deferred; the architecture still compiles the Windows D3D11 GPU backend for source-build preview.
+
 ```mermaid
 flowchart LR
     UI["Qt desktop UI"] --> Controller["Application controller"]
@@ -32,10 +35,10 @@ flowchart LR
     Import --> Proxy["Proxy service"]
     Import --> MediaCache["Media cache: thumbs, waveforms, metadata, proxies"]
     MediaCache --> CacheStore["Content-addressed LRU store"]
-    Jobs["Protobuf job protocol"] --> Worker["Worker host: probe and proxy"]
-    Controller -->|"one framed job"| TranscribeWorker["Transcription worker"]
-    TranscribeWorker --> Whisper["Optional whisper.cpp"]
-    TranscribeWorker --> Captions["Timed caption proposal"]
+    Jobs["Protobuf job protocol"] --> Worker["Worker host: probe, proxy, export, transcribe"]
+    Controller -->|"one framed job"| Worker
+    Worker --> Whisper["Optional whisper.cpp"]
+    Worker --> Captions["Timed caption proposal"]
     AudioRender --> Silence["Measured-silence proposal"]
     Captions --> Edit
     Silence --> Edit
@@ -52,9 +55,9 @@ GPU effect parity. Forward 1× desktop transport connects the timeline audio ren
 pre-render ring and selected miniaudio output; its latency-compensated
 sample position, not the end of the submitted device buffer, drives video requests. Other shuttle
 rates and unavailable/failed devices use an explicit silent timer fallback. The worker host can
-execute probe, proxy, and typed transcription requests. The desktop launches a fresh framed worker
-process for each local transcription job; proxy/export remain in-process and the generic named-pipe
-or Unix-socket job service is not connected.
+execute probe, proxy, export, and typed transcription requests. The desktop launches a fresh framed
+worker process for each proxy, export, and transcription job. Kill is the cancellation and crash
+boundary. The generic named-pipe or Unix-socket job service is not connected.
 
 ## Module boundaries
 
@@ -75,7 +78,7 @@ or Unix-socket job service is not connected.
 | `caption_service` | SRT/WebVTT parse/serialize, timed-word reflow/search, deterministic caption and timeline-cut proposal planning | Speech recognition or caption rendering |
 | `transcription_service` | Pinned model manifest/verification, exact FFmpeg source-window seek and mono 16 kHz trim, optional whisper.cpp backend, typed errors and validated source-absolute word results | Model download UI, project mutation, or a cloud service |
 | `job_service` | Versioned Protobuf messages, framing, job IDs, and cancellation registry | Process spawning or a durable job scheduler |
-| `workers` | Framed worker executable with fail-closed probe, synchronous proxy, and typed transcription jobs plus versioned events | A durable multiprocess scheduler or network service |
+| `workers` | Framed worker executable with fail-closed probe, proxy, export, and typed transcription jobs plus versioned events | A durable multiprocess scheduler or network service |
 | `desktop_ui` | Qt Widgets shell, docks, workspaces, virtualized multi-selection timeline surface, professional tool/header interaction, panels, accessibility labels | Editorial truth or an independent snap algorithm |
 | `app` | Cross-module orchestration, transient selection, exact UI/model time conversion, current project lifecycle, async import/preview/proxy/export, view models | A reusable core contract |
 
@@ -133,17 +136,18 @@ Proxies, PTS sidecars, thumbnails, waveforms, decoded frames, render results, GP
 checksummed transcription models are rebuildable and stay outside `.veproj`. The desktop owns one
 `media_cache` `CacheStore` with a configurable LRU budget that also holds completed proxies and
 `.vepts` maps. Media-bin thumbnails, timeline waveforms, Inspector metadata, Relink, proxy
-rediscovery, and **File > Manage Media Cache…** are wired. Proxy generation remains in-process.
+rediscovery, and **File > Manage Media Cache…** are wired. Proxy and export generation run in a
+fresh `video_editor_worker_host` process.
 
 ## Concurrency and cancellation
 
 Import, preview, proxy generation, export, model verification, transcription, and silence analysis
 run away from the Qt UI thread. Preview uses request
-epochs. Proxy and export use C++ stop tokens and only atomically commit finished files. The present
-desktop runs proxy and export work in-process through QtConcurrent. Process isolation is represented
-by `job_service`; transcription uses one desktop-launched worker process and framed standard I/O so
-process termination is a truthful job cancellation boundary. Proxy/export do not yet use that
-process path, and proxy cancellation cannot be consumed during the blocking worker job.
+epochs. Proxy, export, and transcription use a fresh framed worker-host process; kill is the
+cancellation and crash boundary, and only atomically committed files replace destinations. The
+stdin/stdout host still dispatches one job synchronously, so it cannot consume a `CancelJob` frame
+while FFmpeg is running. Named-pipe/Unix-socket routing is not connected. Cache jobs, import, and
+preview remain in-process through QtConcurrent or request epochs.
 
 The realtime audio path has a dedicated pre-render worker and a fixed 48 kHz stereo float32 device
 boundary. Its callback performs ring reads, deterministic zero-fill, and atomic diagnostics only.

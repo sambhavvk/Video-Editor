@@ -2,8 +2,11 @@
 
 # Testing, quality, and release gates
 
-Passing the current unit and integration suite means the engineering slice is internally
-consistent; it does not satisfy the public-beta acceptance gates by itself.
+The **first public beta is Linux x86-64**. Windows remains an engineering preview: signed MSI
+identity, runtime bundling, and the Windows GPU/codec matrix are deferred because those packaging
+and GPU compatibility paths need more calendar time. Passing the current unit and integration suite
+means the engineering slice is internally consistent; it does not satisfy the Linux public-beta
+acceptance gates by itself.
 
 ## Local checks
 
@@ -16,7 +19,16 @@ ctest --preset dev
 tools/quality/format_changed_cpp.sh --check
 tools/quality/dependency_license_gate.sh --source-only
 python3 tools/quality/verify_corpus.py
+python3 tools/quality/validate_flatpak.py
+python3 tools/quality/linux_capability_matrix.py
 cmake --build build/dev --target sbom
+```
+
+Generate the 200+ synthetic corpus before a release-style check (requires ffmpeg; binaries stay gitignored):
+
+```sh
+python3 tools/quality/generate_corpus.py
+python3 tools/quality/verify_corpus.py --release
 ```
 
 For memory and undefined-behavior checks on a supported non-MSVC toolchain:
@@ -84,58 +96,67 @@ The repository currently includes tests for:
   digest cancellation and atomic-replacement failures, exact FFmpeg source-window seek and
   16/44.1/48-kHz-to-mono-16-kHz trim boundaries, malformed/oversized backend-word rejection,
   unavailable-backend behavior, and a real framed worker-host transcription integration fixture;
+- save/checkpoint faults (missing parent, parent-is-a-file, read-only overwrite leaves a good
+  `.veproj` unchanged), cache `put_file` over-budget Full without touching originals, GPU
+  `DeviceLost` keeping a CPU frame and the edit revision, controller preview without mutating
+  revision, and worker-host SIGKILL during `JOB_KIND_PROXY` without a complete `.vepts` commit;
 - Qt window/workspace/actions/accessibility basics, timeline interactions, and an end-to-end
   application import/edit/save/reopen/caption/export slice. Desktop coverage includes title,
   transition, speed, effect/keyframe/curve authoring, current-value mixer DSP controls,
   revision/target-bound normalization, lightweight encoder capabilities, hardware-to-software
-  VP9 fallback progress, and creator Deliver options. Timeline coverage includes
+  VP9 fallback progress, and creator Deliver options. Offscreen tests require non-empty accessible
+  names on interactive controls, keep professional transport/workspace shortcuts bound, and walk a
+  labeled Import → mixer/captions → Deliver beginner path without a full encode. Timeline coverage includes
   replace/toggle/range multi-selection, rich tool edge/body constraints, preview/single
   commit/Escape, canonical resolver and Shift bypass, exact frame-count nudging, marker/gap
   interaction, non-destructive context menus, track commands, linked split/delete, targeted
   insertion, atomic controller batches, caption style controls, model/review states, and proposal
-  defaults. Live model inference, worker death, and physical Vulkan transcription remain matrix
-  tests rather than ordinary local tests.
+  defaults. Live model inference and physical Vulkan transcription remain matrix
+  tests rather than ordinary local tests. Worker-host SIGKILL during proxy and stub-exit death
+  during desktop proxy generation are ordinary local tests.
 
 Always use `ctest -N` for the count in the current build; the number changes as beta work lands.
 
 ## Corpus status
 
-`tests/fixtures/corpus/manifest.json` is a scaffold with one small verifier fixture, not the required
-media corpus. Normal verification checks every present entry's safe path, length, and SHA-256 and
-reports missing coverage. `--release` additionally requires `status: complete`, at least 200 unique
-licensed files, and all required categories.
-
-The final corpus must cover VFR, B-frames, unusual starting PTS, rotation, interlacing, 8/10-bit,
-HDR input, alpha, image sequences, corrupt inputs, unusual channel layouts, SAR/field order, and
-damaged timestamps. Generated fixtures require deterministic recipes; third-party fixtures require
-documented redistribution rights.
+`tests/fixtures/corpus/manifest.json` remains a committed scaffold with one verifier fixture.
+`python3 tools/quality/verify_corpus.py` still checks that scaffold. `--generated` and `--release`
+validate `tests/fixtures/corpus/generated/` after `python3 tools/quality/generate_corpus.py` writes
+at least 200 tiny MPL-2.0 lavfi fixtures covering every required category (VFR, B-frames, unusual
+starting PTS, rotation, interlacing, 8/10-bit, HDR input, alpha, image sequences, corrupt inputs,
+unusual channel layouts, SAR/field order, and damaged timestamps). Generated binaries are
+gitignored; hashes are recorded in the same generation run. Third-party fixtures still require
+documented redistribution rights. The generator is not a hardware decode-lab sign-off.
 
 ## CI intent and current limits
 
-Repository workflows provide Linux CPU/core and sanitizer foundations. Public beta additionally
-requires nightly Windows/Linux codec and GPU matrices and weekly playback, memory-bound, recovery,
-and packaging endurance runs. Do not infer Windows or GPU support solely from a Linux CPU workflow.
+Repository workflows provide Linux CPU/core and sanitizer foundations plus a weekly
+`linux-capability-matrix` probe (ffmpeg encoder/decoder highlights, Vulkan ICDs, skip-friendly
+libplacebo). That workflow records skip/unavailable when a GitHub runner has no GPU; it is not a
+hardware-lab sign-off. Windows nightly GPU/codec matrices are deferred with the Windows beta. Do
+not infer Windows or GPU support solely from a Linux CPU workflow.
 
 The dependency source/license script checks MPL presence, declared versions, packaging SPDX
 markers, forbidden FFmpeg options, and release-source lock structure. An official run also examines
 the actual loaded FFmpeg runtime. Source declaration and SBOM generation do not prove binary license
 compliance.
 
-## Required public-beta acceptance gates
+## Required Linux-first public-beta acceptance gates
 
-No public beta should ship until all of the following are demonstrated on the supported matrix:
+No Linux public beta should ship until all of the following are demonstrated on the **Linux**
+supported matrix. Windows Intel/AMD/NVIDIA D3D11, signed MSI, and Windows Installer validation are
+**not** first-beta gates.
 
 - a first-time creator completes a captioned one-minute edit, dialogue adjustment, and creator
   export within 15 minutes without external documentation;
 - a one-hour project with 1,000 clips, 16 video tracks, and 32 audio tracks remains responsive with
   bounded memory;
 - one 4K30 proxy stream with basic color/transform plays without warm-state drops on baseline
-  hardware, proxy seek p95 is below 150 ms, and edit commit p95 is below 16 ms;
+  Linux hardware, proxy seek p95 is below 150 ms, and edit commit p95 is below 16 ms;
 - one hour has zero audio xruns, and A/V error stays below 10 ms without two-hour drift;
 - export frame and audio-sample counts are exact, cancellation never corrupts a destination, and
   recovery loses no completed edit command;
-- supported Windows Intel/AMD/NVIDIA and Linux Intel/AMD/NVIDIA combinations pass D3D11, Vulkan,
-  Wayland, and X11 checks;
+- supported Linux Intel/AMD/NVIDIA combinations pass Vulkan, Wayland, and X11 checks;
 - every migration, save phase, worker death, GPU loss, disk-full case, missing/unplugged medium, and
   corrupt recovery case passes fault injection;
 - accessibility review, beginner study, security review, dependency notices/source offers, and
@@ -144,21 +165,21 @@ No public beta should ship until all of the following are demonstrated on the su
 The current application does not meet these gates because physical-device xrun/drift and latency
 calibration, native event-driven hot-plug validation, non-1× realtime audio, native GPU
 presentation/effect-color parity, H.264/AAC approval, physical multilingual/Vulkan transcription,
-worker fault injection, corpus, and production-packaging paths are incomplete. See the
+worker fault injection, corpus, and production Flatpak paths are incomplete. See the
 [feature-status matrix](../beta-feature-status.md).
 
 ## Packaging gates
 
-The Flatpak manifest and WiX MSI are development skeletons.
+The Flatpak manifest is the first-beta packaging skeleton. The WiX MSI is deferred until after the
+Linux-first public beta.
 
 Before Flatpak distribution, replace the local directory source with immutable checksummed sources,
 resolve every release-source lock, select an owned application ID/homepage, bundle the approved ABI
-set, and pass `flatpak-builder-lint`, AppStream, dependency, codec, and GPU tests.
+set, and pass `flatpak-builder-lint`, AppStream, dependency, codec, and Linux GPU tests.
 
-Before MSI distribution, install every required DLL and notice, finalize product/manufacturer and
-upgrade identity, add file associations as approved, sign and timestamp, and pass clean-machine
-install/upgrade/uninstall plus Windows Installer validation and malware scanning. The current MSI is
-unsigned and the install rule only guarantees the application executable.
+Windows MSI work (DLL harvest, product identity, Authenticode signing, clean-machine
+install/upgrade/uninstall) is out of first-beta scope. The current MSI skeleton remains unsigned
+and the install rule only guarantees the application executable.
 
 AppImage remains best-effort and is not a public-beta release gate.
 

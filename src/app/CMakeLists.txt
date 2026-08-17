@@ -7,7 +7,9 @@ add_library(video_editor_app_controller
   editor_controller.hpp
   media_reconstruction.cpp
   media_reconstruction.hpp
-  path_utils.hpp)
+  path_utils.hpp
+  worker_host_session.cpp
+  worker_host_session.hpp)
 
 target_compile_features(video_editor_app_controller PUBLIC cxx_std_20)
 target_include_directories(video_editor_app_controller
@@ -22,6 +24,7 @@ target_link_libraries(
     video_editor::audio_engine
     video_editor::audio_render
     VideoEditor::CaptionService
+    video_editor::job_service
   PRIVATE
     video_editor::project_warnings
     video_editor::project_store

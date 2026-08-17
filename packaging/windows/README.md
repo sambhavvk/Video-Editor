@@ -1,8 +1,13 @@
 <!-- SPDX-License-Identifier: MPL-2.0 -->
 
-# Windows MSI packaging
+# Windows MSI packaging (deferred)
 
-This directory contains a WiX 5 skeleton. The packaging script first runs
+The first public beta is **Linux exclusive**. Signed Windows MSI identity, runtime DLL harvest,
+Authenticode, and clean-machine install/upgrade/uninstall are deferred until after that Linux beta.
+Windows packaging and GPU compatibility need more calendar time than the Linux release.
+
+This directory still contains a WiX 5 skeleton for later Windows work. Do not treat a successful
+local MSI build as a first-beta artifact. The packaging script first runs
 `cmake --install`, records every staged file and SHA-256 in
 `installed-files.json`, and lets WiX's `Files` element harvest that exact tree.
 It never reaches into a compiler output directory directly.

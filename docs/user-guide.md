@@ -2,8 +2,9 @@
 
 # User guide for the current desktop build
 
-This guide describes behavior implemented today. The application is an engineering preview, not a
-public beta. Save important work often and keep the original media files available.
+This guide describes behavior implemented today. The **first public beta is Linux exclusive**;
+Windows is an engineering preview and is not a first-beta distribution target. Save important work
+often and keep the original media files available.
 
 ## Important limitations
 
@@ -32,7 +33,8 @@ public beta. Save important work often and keep the original media files availab
   build with the pinned optional `whisper.cpp` backend. Builds without that backend keep manual
   captions available and report transcription as unavailable.
 - Relinking, cache management, thumbnails, and waveforms are connected in the current desktop slice.
-  Unplugged-media and disk-full fault matrices remain release work.
+  Unplugged-media and disk-full fault matrices remain Linux-first release work. Signed Windows MSI
+  and the Windows GPU matrix are deferred until after the Linux beta.
 - Project and internal schema compatibility are pre-beta and may change through migrations.
 
 See the [full status matrix](beta-feature-status.md) before relying on a capability.
@@ -282,7 +284,8 @@ and one undo step; edits made after analysis make the review stale and require r
 
 4K long-GOP video is marked **Proxy recommended** and queued automatically after import or reopen
 when the original is online. Right-click any other item and choose **Create editing proxy**. The
-same menu cancels an active generation. Jobs run one at a time in-process: a half-resolution ProRes
+same menu cancels an active generation by stopping the worker process. Jobs run one at a time in a
+restartable worker host: a half-resolution ProRes
 Proxy/MOV with 48 kHz PCM audio when available, or the predetermined FFV1/Matroska fallback.
 Completion updates playback to permit the proxy; export still uses the original.
 

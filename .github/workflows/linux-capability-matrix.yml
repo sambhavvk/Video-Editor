@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: MPL-2.0
+
+name: Linux GPU/codec capability matrix
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-capability-matrix-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  matrix:
+    name: Ubuntu 24.04 capability probe
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install probe tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            ca-certificates \
+            ffmpeg \
+            python3 \
+            vulkan-tools
+
+      - name: Record the Linux capability matrix
+        run: |
+          mkdir --parents artifacts/capability-matrix
+          python3 tools/quality/linux_capability_matrix.py \
+            --artifacts artifacts/capability-matrix
+
+      - name: Optional GPU backend ctest
+        run: |
+          if [[ -f build/CTestTestfile.cmake ]]; then
+            ctest --test-dir build -R 'GpuBackend' --output-on-failure || \
+              echo "GPU ctest skipped or reported unavailable"
+          else
+            echo "No VideoEditor build directory; Python+ffmpeg+vulkaninfo probe only."
+          fi
+
+      - name: Upload matrix artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: linux-capability-matrix
+          path: artifacts/capability-matrix
+          if-no-files-found: warn

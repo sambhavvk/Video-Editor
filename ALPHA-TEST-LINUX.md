@@ -1,16 +1,18 @@
 <!-- SPDX-License-Identifier: MPL-2.0 -->
 
-# Video Editor — Alpha Test Guide for Linux
+# Video Editor — Linux test guide (first public beta target)
 
 > **Version:** 0.1.0-alpha
 >
-> **Status:** Engineering preview; not for public distribution or irreplaceable work
+> **Status:** Linux engineering preview toward a Linux-exclusive first public beta; not for
+> irreplaceable work. Windows is out of first-beta scope.
 >
-> **Last updated:** 2026-08-14
+> **Last updated:** 2026-08-17
 
-Thank you for testing. This guide covers a source build and the current Linux alpha workflow. The
-editor is offline-first and does not require an account, but packaging and the supported hardware
-matrix are not complete. Keep original media and backups of important projects.
+Thank you for testing. This guide covers a source build and the current Linux workflow toward the
+**first public beta, which is Linux exclusive**. The editor is offline-first and does not require an
+account. Keep original media and backups of important projects. Windows MSI signing and the Windows
+GPU/codec matrix are deferred; do not treat a Linux test pass as Windows qualification.
 
 For precise implementation status, see [Beta feature status](docs/beta-feature-status.md). For
 normal application usage, see the [User guide](docs/user-guide.md).
@@ -394,15 +396,15 @@ Do not report these as regressions unless behavior is worse than described:
   zero-copy decode, complete GPU effect/color parity, or HDR mastering.
 - H.264/AAC export is disabled. Creator delivery currently uses FOSS VP9/Opus WebM.
 - Local transcription requires the separately built pinned whisper.cpp backend and an on-demand
-  approximately 141 MiB base model. Physical multilingual accuracy, Vulkan acceleration, and
-  worker-death validation are not release-qualified yet. The deterministic bitmap caption renderer
-  does not provide production font-family shaping or embedded subtitle streams.
+  approximately 141 MiB base model. Physical multilingual accuracy and Vulkan acceleration remain
+  lab checks. Worker death is covered by automated host SIGKILL/stub-exit tests.
 - Media-bin thumbnails, timeline waveforms, Inspector metadata, Relink, persistent proxy discovery,
-  and **File > Manage Media Cache…** are implemented. Physical unplug/disk-full matrices remain.
+  and **File > Manage Media Cache…** are implemented. Physical unplug remains a lab check.
 - Source-monitor insert/overwrite editing, shortcut remapping, full LUT/color breadth, and the
-  accessibility/beginner study remain incomplete.
-- Background worker process routing, release Flatpak packaging, signing, and the 200+ media corpus
-  are not complete.
+  timed human accessibility/beginner study remain incomplete.
+- Proxy, export, and transcription run in a restartable worker host. Release Flatpak identity and
+  checksummed sources remain. A synthetic 200+ corpus generator exists. Signed Windows MSI and the
+  Windows GPU matrix are deferred and should not be reported as Linux beta blockers.
 
 ## Reporting issues
 

@@ -2,6 +2,7 @@
 #include "editor_controller.hpp"
 #include "media_reconstruction.hpp"
 #include "path_utils.hpp"
+#include "worker_host_session.hpp"
 
 #include "video_editor/audio_engine/async_realtime_playback.h"
 #include "video_editor/audio_engine/miniaudio_output_device.h"
@@ -15,7 +16,7 @@
 #include "video_editor/desktop_ui/program_viewer.hpp"
 #include "video_editor/desktop_ui/timeline_widget.hpp"
 #include "video_editor/export_service/export_service.h"
-#include "video_editor/job_service/framing.h"
+#include "video_editor/job_service/job_id.h"
 #include "video_editor/job_service/protocol.h"
 #include "video_editor/media_cache/cache_store.h"
 #include "video_editor/media_cache/metadata_service.h"
@@ -35,6 +36,7 @@
 #include <QtConcurrent/QtConcurrentRun>
 
 #include <QCloseEvent>
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -49,6 +51,7 @@
 #include <QNetworkRequest>
 #include <QPointer>
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QSettings>
@@ -142,29 +145,6 @@ std::vector<edit::CaptionWord> mapTranscriptionWordsToTimeline(
     return lhs.range.end() < rhs.range.end();
   });
   return mapped;
-}
-
-QString resolveTranscriptionWorkerPath(const QString& application_directory,
-                                       const QString& configured_path) {
-  if (!configured_path.trimmed().isEmpty()) {
-    return configured_path;
-  }
-#ifdef Q_OS_WIN
-  constexpr auto executable = "video_editor_worker_host.exe";
-#else
-  constexpr auto executable = "video_editor_worker_host";
-#endif
-  const QDir app_dir(application_directory);
-  const QString same_directory = app_dir.filePath(QString::fromUtf8(executable));
-  if (QFileInfo(same_directory).isExecutable()) {
-    return QDir::cleanPath(QFileInfo(same_directory).absoluteFilePath());
-  }
-  const QString development_directory = QDir::cleanPath(
-      app_dir.filePath(QStringLiteral("../workers/%1").arg(QString::fromUtf8(executable))));
-  if (QFileInfo(development_directory).isExecutable()) {
-    return QDir::cleanPath(QFileInfo(development_directory).absoluteFilePath());
-  }
-  return QStandardPaths::findExecutable(QString::fromUtf8(executable));
 }
 
 bool modelDownloadSizeAllowed(const std::uintmax_t bytes_received,
@@ -990,9 +970,9 @@ EditorController::~EditorController() {
     model_verification_stop_source_.request_stop();
   if (model_verification_watcher_.isRunning())
     model_verification_watcher_.waitForFinished();
-  if (transcription_process_ != nullptr) {
-    transcription_process_->kill();
-    transcription_process_->waitForFinished(1'000);
+  if (transcription_session_ != nullptr) {
+    transcription_session_->cancel();
+    transcription_session_->waitUntilFinished();
   }
   caption_analysis_stop_source_.request_stop();
   if (caption_analysis_future_.isRunning())
@@ -1006,18 +986,19 @@ EditorController::~EditorController() {
     QDir(model_download_staging_).removeRecursively();
     model_download_staging_.clear();
   }
-  export_stop_source_.request_stop();
+  if (export_session_ != nullptr) {
+    export_cancel_requested_ = true;
+    export_session_->cancel();
+    export_session_->waitUntilFinished();
+  }
+  clearExportCheckpoint();
   waitForInFlightCacheJob(true);
-  for (const auto& [asset_id, cancellation] : proxy_jobs_) {
+  for (auto& [asset_id, job] : proxy_jobs_) {
     Q_UNUSED(asset_id)
-    cancellation->request_stop();
-  }
-  if (export_future_.isRunning()) {
-    export_future_.waitForFinished();
-  }
-  for (QFuture<ProxyOutcome>& future : proxy_futures_) {
-    if (future.isRunning()) {
-      future.waitForFinished();
+    job.cancel_requested = true;
+    if (job.session != nullptr) {
+      job.session->cancel();
+      job.session->waitUntilFinished();
     }
   }
   playback_timer_.stop();
@@ -1454,8 +1435,11 @@ bool EditorController::exportCaptionFile(const std::filesystem::path& destinatio
 
 void EditorController::chooseVideoExport(const QString& presetId) {
   if (export_in_flight_) {
-    export_stop_source_.request_stop();
-    window_.showTransientMessage(tr("Cancelling export after the current frame…"));
+    export_cancel_requested_ = true;
+    if (export_session_ != nullptr) {
+      export_session_->cancel();
+    }
+    window_.showTransientMessage(tr("Cancelling export…"));
     return;
   }
   bool numeric_preset = false;
@@ -1525,153 +1509,161 @@ bool EditorController::startVideoExport(const std::filesystem::path& destination
     return false;
   }
 
-  auto snapshot_result = editor_->snapshot(sequence->id, editor_->revision());
-  if (!snapshot_result) {
-    showError(tr("Could not export"), QString::fromStdString(snapshot_result.error().message));
+  const auto project = editor_->projectAt(editor_->revision());
+  if (!project) {
+    showError(tr("Could not export"), tr("The current project revision is unavailable."));
+    return false;
+  }
+  project_codec::ProjectBytes checkpoint_bytes;
+  try {
+    checkpoint_bytes = project_codec::serialize_project(*project);
+  } catch (const std::exception& exception) {
+    showError(tr("Could not export"), QString::fromStdString(exception.what()));
     return false;
   }
 
-  auto export_provider = std::make_shared<playback::FfmpegFrameProvider>(playback_registry_);
-  auto synchronized_provider = std::make_shared<EpochSyncFrameProvider>(export_provider);
-  auto export_renderer = std::make_shared<render::CpuRenderer>(synchronized_provider);
-  auto export_audio_renderer =
-      std::make_shared<audio_render::TimelineAudioRenderer>(audio_registry_);
-  auto snapshot = std::move(snapshot_result).value();
+  const auto checkpoint_path =
+      pathFromQString(QDir::temp().filePath(QStringLiteral("video-editor-export-%1.veproj")
+                                                .arg(QString::fromStdString(jobs::make_job_id()))));
+  {
+    QFile checkpoint_file(qStringFromPath(checkpoint_path));
+    if (!checkpoint_file.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
+        checkpoint_file.write(reinterpret_cast<const char*>(checkpoint_bytes.data()),
+                              static_cast<qint64>(checkpoint_bytes.size())) !=
+            static_cast<qint64>(checkpoint_bytes.size())) {
+      showError(tr("Could not export"), tr("The export checkpoint could not be written."));
+      return false;
+    }
+  }
+
   const auto panel = window_.deliverPanel();
-  const auto caption_mode_key = panel->captionModeKey();
-  const auto caption_mode = caption_mode_key == QStringLiteral("burn_in")
-                                ? export_service::CaptionExportMode::BurnIn
-                                : (caption_mode_key == QStringLiteral("sidecar")
-                                       ? export_service::CaptionExportMode::Sidecar
-                                       : (caption_mode_key == QStringLiteral("burn_in_and_sidecar")
-                                              ? export_service::CaptionExportMode::BurnInAndSidecar
-                                              : export_service::CaptionExportMode::None));
-  const auto sidecar_format = panel->sidecarFormatKey() == QStringLiteral("vtt")
-                                  ? export_service::SidecarFormat::WebVtt
-                                  : export_service::SidecarFormat::Srt;
-  const auto override_width = static_cast<std::uint32_t>(std::max(panel->overrideWidth(), 0));
-  const auto override_height = static_cast<std::uint32_t>(std::max(panel->overrideHeight(), 0));
-  const auto override_frame_rate_num = panel->overrideFrameRateNum();
-  const auto override_frame_rate_den = panel->overrideFrameRateDen();
-  const auto override_audio_bitrate = panel->overrideAudioBitrate();
-  const auto override_video_bitrate = panel->overrideVideoBitrate();
-  const auto video_quality = panel->overrideVideoQuality();
-  const bool prefer_hardware_encoder = panel->preferHardwareEncoder();
-  const auto captions = snapshot.sequence().captions;
-  const auto output_path = destination;
-  const QString output_display = qStringFromPath(destination);
-  export_stop_source_ = std::stop_source{};
-  const std::stop_token stop_token = export_stop_source_.get_token();
+  jobs::v1::ExportOptions options;
+  options.set_schema_version(1);
+  options.set_platform_preset(static_cast<std::int32_t>(platform));
+  options.set_caption_mode(panel->captionModeKey().toStdString());
+  options.set_sidecar_format(panel->sidecarFormatKey().toStdString());
+  options.set_override_width(static_cast<std::uint32_t>(std::max(panel->overrideWidth(), 0)));
+  options.set_override_height(static_cast<std::uint32_t>(std::max(panel->overrideHeight(), 0)));
+  options.set_override_frame_rate_num(panel->overrideFrameRateNum());
+  options.set_override_frame_rate_den(panel->overrideFrameRateDen());
+  options.set_override_audio_bitrate(panel->overrideAudioBitrate());
+  options.set_override_video_bitrate(panel->overrideVideoBitrate());
+  if (const auto video_quality = panel->overrideVideoQuality(); video_quality.has_value()) {
+    options.set_video_quality(*video_quality);
+  }
+  options.set_prefer_hardware(panel->preferHardwareEncoder());
+  options.set_include_audio(true);
+  options.set_overwrite_existing(overwriteExisting);
+  options.set_sequence_id(sequence->id.toString());
+
+  jobs::v1::JobSpec spec;
+  spec.set_job_id(jobs::make_job_id());
+  spec.set_kind(jobs::v1::JOB_KIND_EXPORT);
+  spec.set_project_revision(editor_->revision().value);
+  spec.set_project_checkpoint(utf8StringFromPath(checkpoint_path));
+  spec.set_output_uri(utf8StringFromPath(destination));
+  spec.set_preset_id("video-editor.export.creator.v1");
+  if (!options.SerializeToString(spec.mutable_options())) {
+    std::error_code ignored;
+    std::filesystem::remove(checkpoint_path, ignored);
+    showError(tr("Could not export"), tr("The export options could not be encoded."));
+    return false;
+  }
+
+  export_checkpoint_path_ = checkpoint_path;
+  export_destination_ = destination;
+  export_cancel_requested_ = false;
   export_in_flight_ = true;
   window_.deliverPanel()->setExportRunning(true, 0);
   window_.showTransientMessage(
       tr("Exporting full-quality video and 48 kHz audio from original media…"), 0);
 
-  QPointer<EditorController> guard(this);
-  auto* watcher = new QFutureWatcher<VideoExportOutcome>(this);
-  connect(watcher, &QFutureWatcher<VideoExportOutcome>::finished, this,
-          [this, watcher, output_display] {
-            const VideoExportOutcome outcome = watcher->result();
-            watcher->deleteLater();
-            export_in_flight_ = false;
-            window_.deliverPanel()->setExportRunning(false, 0);
-            if (outcome.succeeded) {
-              const QString message = tr("Export complete · %1 video frames · %2 audio samples")
-                                          .arg(outcome.frame_count)
-                                          .arg(outcome.audio_sample_count);
-              window_.showTransientMessage(message);
-              emit videoExportFinished(true, output_display, message);
-            } else if (outcome.cancelled) {
-              const QString message = tr("Export cancelled; the destination was left unchanged");
-              window_.showTransientMessage(message);
-              emit videoExportFinished(false, output_display, message);
-            } else {
-              showError(tr("Export failed"), outcome.error);
-              emit videoExportFinished(false, output_display, outcome.error);
-            }
-          });
-  auto future = QtConcurrent::run(
-      [snapshot = std::move(snapshot), export_renderer = std::move(export_renderer), output_path,
-       export_audio_renderer = std::move(export_audio_renderer), preset, platform, caption_mode,
-       sidecar_format, override_width, override_height, override_frame_rate_num,
-       override_frame_rate_den, override_audio_bitrate, override_video_bitrate, video_quality,
-       prefer_hardware_encoder, captions, stop_token, guard, overwriteExisting]() mutable {
-        int last_percent = -1;
-        export_service::ExportRequest request{
-            .snapshot = std::move(snapshot),
-            .renderer = std::move(export_renderer),
-            .audio_renderer = std::move(export_audio_renderer),
-            .destination = output_path,
-            .preset = preset,
-            .overwrite_existing = overwriteExisting,
-            .include_audio = true,
-            .prefer_hardware_encoder = prefer_hardware_encoder,
-            .cancellation = stop_token,
-            .progress =
-                [guard, &last_percent](const export_service::ExportProgress& progress) {
-                  if (progress.restarted_after_hardware_fallback) {
-                    last_percent = -1;
-                    if (guard) {
-                      QMetaObject::invokeMethod(
-                          guard.data(),
-                          [guard] {
-                            if (guard) {
-                              guard->window_.deliverPanel()->setExportRunning(true, 0);
-                              guard->window_.showTransientMessage(
-                                  QObject::tr(
-                                      "Hardware VP9 failed; restarting export in software…"),
-                                  0);
-                            }
-                          },
-                          Qt::QueuedConnection);
-                    }
-                    return;
-                  }
-                  const int percent =
-                      std::clamp(static_cast<int>(std::lround(progress.fraction * 100.0)), 0, 100);
-                  if (percent == last_percent || (percent != 100 && percent % 2 != 0)) {
-                    return;
-                  }
-                  last_percent = percent;
-                  if (guard) {
-                    QMetaObject::invokeMethod(
-                        guard.data(),
-                        [guard, percent] {
-                          if (guard) {
-                            guard->window_.deliverPanel()->setExportRunning(true, percent);
-                          }
-                        },
-                        Qt::QueuedConnection);
-                  }
-                },
-            .platform_preset = platform,
-            .caption_mode = caption_mode,
-            .sidecar_format = sidecar_format,
-            .override_width = override_width,
-            .override_height = override_height,
-            .override_frame_rate_num = override_frame_rate_num,
-            .override_frame_rate_den = override_frame_rate_den,
-            .override_audio_bitrate = override_audio_bitrate,
-            .override_video_bitrate = override_video_bitrate,
-            .video_quality = video_quality,
-            .captions = captions};
-        auto outcome = export_service::export_video(request);
-        if (!outcome) {
-          return VideoExportOutcome{.succeeded = false,
-                                    .cancelled = outcome.error().code ==
-                                                 export_service::ExportErrorCode::Cancelled,
-                                    .frame_count = 0,
-                                    .audio_sample_count = 0,
-                                    .error = QString::fromStdString(outcome.error().message)};
+  auto* session = new WorkerHostSession(this);
+  export_session_ = session;
+  session->setEventHandler([this](const jobs::v1::WorkerEvent& envelope) {
+    const auto& job = envelope.event();
+    if (job.state() == jobs::v1::JOB_STATE_ACCEPTED ||
+        job.state() == jobs::v1::JOB_STATE_RUNNING) {
+      if (job.state() == jobs::v1::JOB_STATE_RUNNING) {
+        const int percent =
+            std::clamp(static_cast<int>(std::lround(job.progress() * 100.0)), 0, 100);
+        window_.deliverPanel()->setExportRunning(true, percent);
+        const auto fallback = job.metadata().find("restarted_after_hardware_fallback");
+        if (job.phase() == "hardware-fallback" ||
+            (fallback != job.metadata().end() && fallback->second == "true")) {
+          window_.showTransientMessage(tr("Hardware VP9 failed; restarting export in software…"),
+                                       0);
         }
-        return VideoExportOutcome{.succeeded = true,
-                                  .cancelled = false,
-                                  .frame_count = outcome.value().frame_count,
-                                  .audio_sample_count = outcome.value().audio_sample_count,
-                                  .error = {}};
-      });
-  export_future_ = future;
-  watcher->setFuture(future);
+      }
+      return;
+    }
+    if (job.state() == jobs::v1::JOB_STATE_SUCCEEDED) {
+      const auto& metadata = job.metadata();
+      const auto parse_u64 = [&metadata](const char* key) -> std::uint64_t {
+        const auto found = metadata.find(key);
+        if (found == metadata.end()) {
+          return 0;
+        }
+        try {
+          return static_cast<std::uint64_t>(std::stoull(found->second));
+        } catch (...) {
+          return 0;
+        }
+      };
+      finishVideoExport(VideoExportOutcome{.succeeded = true,
+                                           .cancelled = false,
+                                           .frame_count = parse_u64("frame_count"),
+                                           .audio_sample_count = parse_u64("audio_sample_count"),
+                                           .error = {}});
+      return;
+    }
+    if (job.state() == jobs::v1::JOB_STATE_CANCELLED || export_cancel_requested_) {
+      finishVideoExport(VideoExportOutcome{.succeeded = false,
+                                           .cancelled = true,
+                                           .frame_count = 0,
+                                           .audio_sample_count = 0,
+                                           .error = {}});
+      return;
+    }
+    finishVideoExport(VideoExportOutcome{
+        .succeeded = false,
+        .cancelled = false,
+        .frame_count = 0,
+        .audio_sample_count = 0,
+        .error = job.has_error() ? QString::fromStdString(job.error().user_message())
+                                 : tr("Export failed.")});
+  });
+  session->setStartFailedHandler([this](const QString& message) {
+    finishVideoExport(VideoExportOutcome{.succeeded = false,
+                                         .cancelled = false,
+                                         .frame_count = 0,
+                                         .audio_sample_count = 0,
+                                         .error = message});
+  });
+  session->setFinishedHandler([this](const bool abnormal, int, QProcess::ExitStatus) {
+    if (!export_in_flight_) {
+      return;
+    }
+    finishVideoExport(VideoExportOutcome{
+        .succeeded = false,
+        .cancelled = export_cancel_requested_,
+        .frame_count = 0,
+        .audio_sample_count = 0,
+        .error = abnormal ? tr("The export worker stopped unexpectedly.")
+                          : tr("Export ended without a complete result.")});
+  });
+  WorkerHostSession::LaunchOptions launch;
+  launch.application_directory = QCoreApplication::applicationDirPath();
+  launch.configured_path = qEnvironmentVariable("VIDEO_EDITOR_WORKER_HOST");
+  if (!session->start(spec, launch)) {
+    export_session_ = nullptr;
+    session->deleteLater();
+    export_in_flight_ = false;
+    window_.deliverPanel()->setExportRunning(false, 0);
+    clearExportCheckpoint();
+    showError(tr("Could not export"), tr("The export worker request could not be started."));
+    return false;
+  }
   return true;
 }
 
@@ -1787,7 +1779,10 @@ void EditorController::addImportedAsset(assets::AssetRecord asset) {
 void EditorController::generateProxy(const QString& assetId) {
   const std::string key = assetId.toStdString();
   if (const auto running = proxy_jobs_.find(key); running != proxy_jobs_.end()) {
-    running->second->request_stop();
+    running->second.cancel_requested = true;
+    if (running->second.session != nullptr) {
+      running->second.session->cancel();
+    }
     window_.showTransientMessage(tr("Cancelling proxy generation…"));
     return;
   }
@@ -1826,103 +1821,190 @@ void EditorController::generateProxy(const QString& assetId) {
   const std::filesystem::path destination =
       proxyCacheDirectory() / pathFromQString(assetId + QStringLiteral(".proxy") + extension);
   const std::filesystem::path source = record->uri;
-  auto cancellation = std::make_shared<std::stop_source>();
-  const std::stop_token stop_token = cancellation->get_token();
-  proxy_jobs_.emplace(key, cancellation);
+  const bool ffv1_preset = resolved.value().video_codec == proxy::VideoCodec::Ffv1;
+  jobs::v1::JobSpec spec;
+  spec.set_job_id(jobs::make_job_id());
+  spec.set_kind(jobs::v1::JOB_KIND_PROXY);
+  spec.add_input_uris(utf8StringFromPath(source));
+  spec.set_output_uri(utf8StringFromPath(destination));
+  spec.set_preset_id(ffv1_preset ? "video-editor.proxy.ffv1-half.v1"
+                                 : "video-editor.proxy.prores-half.v1");
+
+  auto* session = new WorkerHostSession(this);
+  proxy_jobs_.emplace(key, ProxyJob{.session = session, .destination = destination});
   refreshMediaView();
   window_.showTransientMessage(tr("Creating a half-resolution editing proxy…"), 0);
 
-  auto* watcher = new QFutureWatcher<ProxyOutcome>(this);
-  connect(watcher, &QFutureWatcher<ProxyOutcome>::finished, this, [this, watcher] {
-    const ProxyOutcome outcome = watcher->result();
-    watcher->deleteLater();
-    proxy_jobs_.erase(outcome.asset_id);
-    auto imported = std::find_if(imported_assets_.begin(), imported_assets_.end(),
-                                 [&outcome](const assets::AssetRecord& candidate) {
-                                   return candidate.id == outcome.asset_id;
-                                 });
-    if (outcome.succeeded && imported != imported_assets_.end()) {
-      assets::ProxyProfile manifest_profile =
-          assets::AssetService::default_proxy_profile(*imported);
-      manifest_profile.codec =
-          outcome.ffv1 ? assets::ProxyCodec::Ffv1 : assets::ProxyCodec::ProResProxy;
-      imported->proxy = assets::ProxyManifest{.proxy_uri = outcome.destination,
-                                              .profile = manifest_profile,
-                                              .source_fingerprint = imported->fingerprint,
-                                              .engine_version = "proxy-service-v1",
-                                              .complete = true};
-      std::filesystem::path playback_proxy = outcome.destination;
-      if (media_cache_ != nullptr) {
-        if (cache_job_future_.isRunning()) {
-          cache_job_future_.waitForFinished();
-        }
-        const auto hash_profile = proxyProfileForHash(manifest_profile, outcome.ffv1);
-        const media_cache::CacheKey proxy_key{.asset_id = outcome.asset_id,
-                                              .kind = media_cache::CacheKind::Proxy,
-                                              .parameter_hash = proxy::proxy_parameter_hash(hash_profile)};
-        const auto stored = media_cache_->put_file(proxy_key, outcome.destination);
-        if (stored) {
-          if (auto path = media_cache_->path_for(proxy_key)) {
-            imported->proxy->proxy_uri = path.value();
-            playback_proxy = path.value();
-          }
-        } else if (stored.error().code == media_cache::CacheErrorCode::Full) {
-          cache_disk_full_ = true;
-          showError(tr("Media cache is full"), QString::fromStdString(stored.error().message));
-        }
-        const auto pts_source = proxy::default_pts_map_path(outcome.destination);
-        std::error_code exists_error;
-        if (std::filesystem::is_regular_file(pts_source, exists_error) && !exists_error) {
-          const media_cache::CacheKey pts_key{
-              .asset_id = outcome.asset_id,
-              .kind = media_cache::CacheKind::ProxyPtsMap,
-              .parameter_hash = proxy::proxy_parameter_hash(hash_profile)};
-          (void)media_cache_->put_file(pts_key, pts_source);
-        }
-      }
-      const auto model_id = edit::EntityId::parse(outcome.asset_id);
-      if (model_id.has_value()) {
-        playback::AssetPlaybackSources sources{
-            .original = {.path = imported->uri, .video_stream_index = -1},
-            .proxy = playback::AssetStreamLocation{.path = playback_proxy,
-                                                   .video_stream_index = -1}};
-        (void)playback_registry_->register_asset(*model_id, std::move(sources));
-        frame_provider_->invalidate(*model_id);
-      }
-      window_.showTransientMessage(outcome.ffv1 ? tr("Proxy ready (FFV1 compatibility profile)")
-                                                : tr("Proxy ready"));
-    } else if (outcome.cancelled) {
-      window_.showTransientMessage(tr("Proxy generation cancelled; the cache was left intact"));
-    } else if (!outcome.error.isEmpty()) {
-      showError(tr("Proxy generation failed"), outcome.error);
+  session->setEventHandler([this, key, destination](const jobs::v1::WorkerEvent& envelope) {
+    const auto& job = envelope.event();
+    if (job.state() == jobs::v1::JOB_STATE_ACCEPTED ||
+        job.state() == jobs::v1::JOB_STATE_RUNNING) {
+      return;
     }
-    refreshViews();
+    const bool cancelled =
+        job.state() == jobs::v1::JOB_STATE_CANCELLED ||
+        (proxy_jobs_.contains(key) && proxy_jobs_.at(key).cancel_requested);
+    if (job.state() == jobs::v1::JOB_STATE_SUCCEEDED) {
+      const auto& metadata = job.metadata();
+      const auto codec = metadata.find("video_codec");
+      finishProxyJob(key, ProxyOutcome{.asset_id = key,
+                                       .destination = destination,
+                                       .succeeded = true,
+                                       .cancelled = false,
+                                       .ffv1 = codec != metadata.end() && codec->second == "ffv1",
+                                       .error = {}});
+      return;
+    }
+    finishProxyJob(key, ProxyOutcome{
+                            .asset_id = key,
+                            .destination = destination,
+                            .succeeded = false,
+                            .cancelled = cancelled,
+                            .ffv1 = false,
+                            .error = job.has_error() ? QString::fromStdString(job.error().user_message())
+                                                     : tr("Proxy generation failed.")});
+  });
+  session->setStartFailedHandler([this, key, destination](const QString& message) {
+    finishProxyJob(key, ProxyOutcome{.asset_id = key,
+                                     .destination = destination,
+                                     .succeeded = false,
+                                     .cancelled = false,
+                                     .ffv1 = false,
+                                     .error = message});
+  });
+  session->setFinishedHandler([this, key, destination](const bool abnormal, int, QProcess::ExitStatus) {
+    if (!proxy_jobs_.contains(key)) {
+      return;
+    }
+    const bool cancelled = proxy_jobs_.at(key).cancel_requested;
+    finishProxyJob(key, ProxyOutcome{
+                            .asset_id = key,
+                            .destination = destination,
+                            .succeeded = false,
+                            .cancelled = cancelled,
+                            .ffv1 = false,
+                            .error = cancelled ? QString{}
+                                               : (abnormal ? tr("The proxy worker stopped unexpectedly.")
+                                                           : tr("Proxy generation ended without a complete result."))});
+  });
+  WorkerHostSession::LaunchOptions launch;
+  launch.application_directory = QCoreApplication::applicationDirPath();
+  launch.configured_path = qEnvironmentVariable("VIDEO_EDITOR_WORKER_HOST");
+  if (!session->start(spec, launch)) {
+    proxy_jobs_.erase(key);
+    session->deleteLater();
+    showError(tr("Could not create proxy"), tr("The proxy worker request could not be started."));
+    refreshMediaView();
     pumpProxyQueue();
-  });
+  }
+}
 
-  auto future = QtConcurrent::run([source, destination, profile, stop_token, key] {
-    const proxy::GenerateRequest request{.source = source,
-                                         .destination = destination,
-                                         .pts_map_destination = std::nullopt,
-                                         .profile = profile};
-    const auto generated = proxy::generate_proxy(request, stop_token);
-    if (!generated) {
-      return ProxyOutcome{.asset_id = key,
-                          .destination = destination,
-                          .succeeded = false,
-                          .cancelled = generated.error().code == proxy::ErrorCode::Cancelled,
-                          .ffv1 = false,
-                          .error = QString::fromStdString(generated.error().message)};
+void EditorController::finishProxyJob(const std::string& asset_id, const ProxyOutcome& outcome) {
+  const auto running = proxy_jobs_.find(asset_id);
+  if (running == proxy_jobs_.end()) {
+    return;
+  }
+  if (running->second.session != nullptr) {
+    running->second.session->deleteLater();
+  }
+  proxy_jobs_.erase(running);
+
+  auto imported = std::find_if(imported_assets_.begin(), imported_assets_.end(),
+                               [&outcome](const assets::AssetRecord& candidate) {
+                                 return candidate.id == outcome.asset_id;
+                               });
+  if (outcome.succeeded && imported != imported_assets_.end()) {
+    assets::ProxyProfile manifest_profile = assets::AssetService::default_proxy_profile(*imported);
+    manifest_profile.codec =
+        outcome.ffv1 ? assets::ProxyCodec::Ffv1 : assets::ProxyCodec::ProResProxy;
+    imported->proxy = assets::ProxyManifest{.proxy_uri = outcome.destination,
+                                            .profile = manifest_profile,
+                                            .source_fingerprint = imported->fingerprint,
+                                            .engine_version = "proxy-service-v1",
+                                            .complete = true};
+    std::filesystem::path playback_proxy = outcome.destination;
+    if (media_cache_ != nullptr) {
+      if (cache_job_future_.isRunning()) {
+        cache_job_future_.waitForFinished();
+      }
+      const auto hash_profile = proxyProfileForHash(manifest_profile, outcome.ffv1);
+      const media_cache::CacheKey proxy_key{.asset_id = outcome.asset_id,
+                                            .kind = media_cache::CacheKind::Proxy,
+                                            .parameter_hash = proxy::proxy_parameter_hash(hash_profile)};
+      const auto stored = media_cache_->put_file(proxy_key, outcome.destination);
+      if (stored) {
+        if (auto path = media_cache_->path_for(proxy_key)) {
+          imported->proxy->proxy_uri = path.value();
+          playback_proxy = path.value();
+        }
+      } else if (stored.error().code == media_cache::CacheErrorCode::Full) {
+        cache_disk_full_ = true;
+        showError(tr("Media cache is full"), QString::fromStdString(stored.error().message));
+      }
+      const auto pts_source = proxy::default_pts_map_path(outcome.destination);
+      std::error_code exists_error;
+      if (std::filesystem::is_regular_file(pts_source, exists_error) && !exists_error) {
+        const media_cache::CacheKey pts_key{
+            .asset_id = outcome.asset_id,
+            .kind = media_cache::CacheKind::ProxyPtsMap,
+            .parameter_hash = proxy::proxy_parameter_hash(hash_profile)};
+        (void)media_cache_->put_file(pts_key, pts_source);
+      }
     }
-    return ProxyOutcome{.asset_id = key,
-                        .destination = generated.value().destination,
-                        .succeeded = true,
-                        .cancelled = false,
-                        .ffv1 = generated.value().profile.video_codec == proxy::VideoCodec::Ffv1,
-                        .error = {}};
-  });
-  proxy_futures_.push_back(future);
-  watcher->setFuture(future);
+    const auto model_id = edit::EntityId::parse(outcome.asset_id);
+    if (model_id.has_value()) {
+      playback::AssetPlaybackSources sources{
+          .original = {.path = imported->uri, .video_stream_index = -1},
+          .proxy = playback::AssetStreamLocation{.path = playback_proxy, .video_stream_index = -1}};
+      (void)playback_registry_->register_asset(*model_id, std::move(sources));
+      frame_provider_->invalidate(*model_id);
+    }
+    window_.showTransientMessage(outcome.ffv1 ? tr("Proxy ready (FFV1 compatibility profile)")
+                                              : tr("Proxy ready"));
+  } else if (outcome.cancelled) {
+    window_.showTransientMessage(tr("Proxy generation cancelled; the cache was left intact"));
+  } else if (!outcome.error.isEmpty()) {
+    showError(tr("Proxy generation failed"), outcome.error);
+  }
+  refreshViews();
+  pumpProxyQueue();
+}
+
+void EditorController::finishVideoExport(const VideoExportOutcome& outcome) {
+  if (!export_in_flight_) {
+    return;
+  }
+  export_in_flight_ = false;
+  if (export_session_ != nullptr) {
+    export_session_->deleteLater();
+    export_session_ = nullptr;
+  }
+  const QString output_display = qStringFromPath(export_destination_);
+  clearExportCheckpoint();
+  window_.deliverPanel()->setExportRunning(false, 0);
+  if (outcome.succeeded) {
+    const QString message = tr("Export complete · %1 video frames · %2 audio samples")
+                                .arg(outcome.frame_count)
+                                .arg(outcome.audio_sample_count);
+    window_.showTransientMessage(message);
+    emit videoExportFinished(true, output_display, message);
+  } else if (outcome.cancelled) {
+    const QString message = tr("Export cancelled; the destination was left unchanged");
+    window_.showTransientMessage(message);
+    emit videoExportFinished(false, output_display, message);
+  } else {
+    showError(tr("Export failed"), outcome.error);
+    emit videoExportFinished(false, output_display, outcome.error);
+  }
+}
+
+void EditorController::clearExportCheckpoint() {
+  if (export_checkpoint_path_.empty()) {
+    return;
+  }
+  std::error_code ignored;
+  std::filesystem::remove(export_checkpoint_path_, ignored);
+  export_checkpoint_path_.clear();
 }
 
 void EditorController::insertAsset(const QString& assetId) {
@@ -2704,7 +2786,7 @@ void EditorController::refreshTranscriptionState() {
   connect(watcher, &QFutureWatcher<bool>::finished, this, [guard, watcher] {
     const bool ready = watcher->result();
     watcher->deleteLater();
-    if (guard && guard->transcription_process_ == nullptr &&
+    if (guard && guard->transcription_session_ == nullptr &&
         guard->model_download_reply_ == nullptr &&
         !guard->model_verification_watcher_.isRunning()) {
       guard->window_.captionsPanel()->setTranscriptionState(
@@ -2722,7 +2804,7 @@ void EditorController::refreshTranscriptionState() {
 }
 
 void EditorController::downloadTranscriptionModel(const QString& modelId) {
-  if (model_download_reply_ != nullptr || transcription_process_ != nullptr ||
+  if (model_download_reply_ != nullptr || transcription_session_ != nullptr ||
       model_verification_watcher_.isRunning()) {
     window_.showTransientMessage(tr("A transcription operation is already running"));
     return;
@@ -2958,7 +3040,7 @@ void EditorController::modelVerificationFinished() {
 }
 
 void EditorController::startTranscription(const desktop_ui::TranscriptionOptionsView& options) {
-  if (transcription_process_ != nullptr || model_download_reply_ != nullptr ||
+  if (transcription_session_ != nullptr || model_download_reply_ != nullptr ||
       model_verification_watcher_.isRunning())
     return;
   std::filesystem::path input;
@@ -3020,20 +3102,6 @@ void EditorController::startTranscription(const desktop_ui::TranscriptionOptions
     window_.showTransientMessage(tr("Could not encode transcription options."));
     return;
   }
-  jobs::v1::WorkerRequest request;
-  request.set_protocol_major(jobs::kProtocolMajor);
-  request.set_protocol_minor(jobs::kProtocolMinor);
-  *request.mutable_start()->mutable_spec() = spec;
-  std::string encoded;
-  if (!request.SerializeToString(&encoded) || encoded.size() > jobs::kMaximumFrameBytes) {
-    window_.showTransientMessage(tr("Could not start transcription."));
-    return;
-  }
-  QByteArray frame(4, Qt::Uninitialized);
-  const std::uint32_t size = static_cast<std::uint32_t>(encoded.size());
-  for (int i = 0; i < 4; ++i)
-    frame[i] = static_cast<char>((size >> (8 * i)) & 0xffU);
-  frame.append(encoded.data(), static_cast<qsizetype>(encoded.size()));
 
   // Publish every piece of request and revision state before starting the
   // process. QProcess start/failure signals can arrive as soon as control
@@ -3045,8 +3113,6 @@ void EditorController::startTranscription(const desktop_ui::TranscriptionOptions
   transcription_source_range_ = selected->source_range;
   transcription_playback_rate_ = selected->playback_rate;
   transcription_reversed_ = selected->reversed;
-  transcription_output_buffer_.clear();
-  transcription_request_frame_ = std::move(frame);
   pending_caption_additions_.clear();
   transcription_terminal_ = false;
   transcription_succeeded_ = false;
@@ -3058,48 +3124,33 @@ void EditorController::startTranscription(const desktop_ui::TranscriptionOptions
   window_.captionsPanel()->setTranscriptionState(desktop_ui::TranscriptionState::Running,
                                                  tr("Transcribing selected audio…"), 0);
 
-  transcription_process_ = new QProcess(this);
-  const QString worker = resolveTranscriptionWorkerPath(
-      QCoreApplication::applicationDirPath(), qEnvironmentVariable("VIDEO_EDITOR_WORKER_HOST"));
-  QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
-  environment.insert(QStringLiteral("VIDEO_EDITOR_TRANSCRIPTION_MODEL_DIR"), cache);
-  transcription_process_->setProcessEnvironment(environment);
-  connect(transcription_process_, &QProcess::readyReadStandardOutput, this,
-          &EditorController::transcriptionReadyRead);
-  connect(transcription_process_, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
-          &EditorController::transcriptionProcessFinished);
-  connect(transcription_process_, &QProcess::started, this, [this] {
-    if (transcription_process_ != nullptr && !transcription_request_frame_.isEmpty()) {
-      if (transcription_process_->write(transcription_request_frame_) !=
-          transcription_request_frame_.size()) {
-        transcription_terminal_ = true;
-        transcription_reported_failure_ = true;
-        window_.captionsPanel()->setTranscriptionState(
-            desktop_ui::TranscriptionState::Failed,
-            tr("Could not send the transcription request to the worker."));
-        transcription_process_->kill();
-        return;
-      }
-      transcription_request_frame_.clear();
-      transcription_process_->closeWriteChannel();
-    }
+  auto* session = new WorkerHostSession(this);
+  transcription_session_ = session;
+  session->setEventHandler([this](const jobs::v1::WorkerEvent& event) {
+    handleTranscriptionEvent(event);
   });
-  connect(transcription_process_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError) {
-    QProcess* process = transcription_process_;
-    if (process == nullptr)
-      return;
+  session->setStartFailedHandler([this](const QString&) {
     transcription_terminal_ = true;
     transcription_succeeded_ = false;
-    transcription_reported_failure_ = false;
-    transcription_output_buffer_.clear();
-    transcription_request_frame_.clear();
-    transcription_process_ = nullptr;
-    process->deleteLater();
+    transcription_reported_failure_ = true;
+    finishTranscriptionSession(true);
     window_.captionsPanel()->setTranscriptionState(
         desktop_ui::TranscriptionState::Failed,
         tr("The transcription worker could not be started."));
   });
-  transcription_process_->start(worker);
+  session->setFinishedHandler([this](const bool abnormal, int, QProcess::ExitStatus) {
+    finishTranscriptionSession(abnormal);
+  });
+  WorkerHostSession::LaunchOptions launch;
+  launch.application_directory = QCoreApplication::applicationDirPath();
+  launch.configured_path = qEnvironmentVariable("VIDEO_EDITOR_WORKER_HOST");
+  launch.environment = QProcessEnvironment::systemEnvironment();
+  launch.environment.insert(QStringLiteral("VIDEO_EDITOR_TRANSCRIPTION_MODEL_DIR"), cache);
+  if (!session->start(spec, launch)) {
+    transcription_session_ = nullptr;
+    session->deleteLater();
+    window_.showTransientMessage(tr("Could not start transcription."));
+  }
 }
 
 void EditorController::cancelTranscription() {
@@ -3112,47 +3163,16 @@ void EditorController::cancelTranscription() {
     model_download_reply_->abort();
     window_.captionsPanel()->setTranscriptionState(desktop_ui::TranscriptionState::Cancelling,
                                                    tr("Cancelling model download…"));
-  } else if (transcription_process_ != nullptr) {
+  } else if (transcription_session_ != nullptr) {
     window_.captionsPanel()->setTranscriptionState(desktop_ui::TranscriptionState::Cancelling,
                                                    tr("Cancelling transcription…"));
-    transcription_process_->kill();
+    transcription_session_->cancel();
   }
 }
 
-void EditorController::transcriptionReadyRead() {
-  if (transcription_process_ == nullptr)
+void EditorController::handleTranscriptionEvent(const jobs::v1::WorkerEvent& event) {
+  if (!event.has_event() || event.event().job_id() != transcription_job_id_.toStdString())
     return;
-  transcription_output_buffer_.append(transcription_process_->readAllStandardOutput());
-  while (transcription_output_buffer_.size() >= 4) {
-    const auto byte = [this](const int index) {
-      return static_cast<std::uint32_t>(
-          static_cast<unsigned char>(transcription_output_buffer_.at(index)));
-    };
-    const std::uint32_t size = byte(0) | (byte(1) << 8U) | (byte(2) << 16U) | (byte(3) << 24U);
-    if (size > jobs::kMaximumFrameBytes) {
-      transcription_process_->kill();
-      window_.showTransientMessage(tr("Transcription worker sent an oversized frame."));
-      return;
-    }
-    if (transcription_output_buffer_.size() < static_cast<qsizetype>(size) + 4)
-      return;
-    const QByteArray payload = transcription_output_buffer_.mid(4, static_cast<qsizetype>(size));
-    transcription_output_buffer_.remove(0, static_cast<qsizetype>(size) + 4);
-    handleTranscriptionEvent(payload);
-  }
-}
-
-void EditorController::handleTranscriptionEvent(const QByteArray& frame) {
-  jobs::v1::WorkerEvent event;
-  if (!event.ParseFromArray(frame.constData(), static_cast<int>(frame.size())) ||
-      !event.has_event() || event.event().job_id() != transcription_job_id_.toStdString())
-    return;
-  if (event.protocol_major() != jobs::kProtocolMajor ||
-      event.protocol_minor() > jobs::kProtocolMinor) {
-    if (transcription_process_ != nullptr)
-      transcription_process_->kill();
-    return;
-  }
   const auto& job = event.event();
   const int percent = std::clamp(static_cast<int>(std::lround(job.progress() * 100.0)), 0, 100);
   if (job.state() == jobs::v1::JOB_STATE_RUNNING) {
@@ -3308,17 +3328,12 @@ void EditorController::handleTranscriptionEvent(const QByteArray& frame) {
       100);
 }
 
-void EditorController::transcriptionProcessFinished(const int exitCode,
-                                                    const QProcess::ExitStatus exitStatus) {
-  if (transcription_process_ == nullptr)
+void EditorController::finishTranscriptionSession(const bool abnormal) {
+  if (transcription_session_ == nullptr)
     return;
-  transcriptionReadyRead();
-  transcription_output_buffer_.clear();
-  transcription_request_frame_.clear();
-  QProcess* process = transcription_process_;
-  transcription_process_ = nullptr;
-  process->deleteLater();
-  const bool abnormal = exitStatus != QProcess::NormalExit || exitCode != 0;
+  WorkerHostSession* session = transcription_session_;
+  transcription_session_ = nullptr;
+  session->deleteLater();
   if ((abnormal || !transcription_terminal_) && !transcription_reported_failure_ &&
       !transcription_succeeded_ && window_.captionsPanel() != nullptr) {
     window_.captionsPanel()->setTranscriptionState(
@@ -5945,9 +5960,12 @@ bool EditorController::reconstructMediaState() {
   cache_disk_full_ = false;
   proxy_auto_queue_.clear();
   selected_media_id_.clear();
-  for (const auto& [asset_id, cancellation] : proxy_jobs_) {
+  for (auto& [asset_id, job] : proxy_jobs_) {
     Q_UNUSED(asset_id)
-    cancellation->request_stop();
+    job.cancel_requested = true;
+    if (job.session != nullptr) {
+      job.session->cancel();
+    }
   }
 
   if (!editor_) {

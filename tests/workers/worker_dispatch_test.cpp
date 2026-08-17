@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "video_editor/workers/job_dispatch.h"
 
+#include "video_editor/edit_model/model.h"
+#include "video_editor/edit_model/timeline_editor.h"
+#include "video_editor/export_service/export_service.h"
 #include "video_editor/job_service/framing.h"
 #include "video_editor/job_service/job_id.h"
+#include "video_editor/project_codec/project_codec.h"
 #include "video_editor/proxy_service/proxy_service.h"
 #include "video_editor/transcription_service/transcription_service.h"
 
@@ -335,6 +339,188 @@ TEST(WorkerHost, FramedTranscriptionRequestReportsBackendUnavailable) {
   EXPECT_EQ(events.front().event().state(), protocol::JOB_STATE_ACCEPTED);
   EXPECT_EQ(events.back().event().state(), protocol::JOB_STATE_FAILED);
   EXPECT_EQ(events.back().event().error().category(), "backend-unavailable");
+#endif
+}
+
+[[nodiscard]] bool write_bytes(const std::filesystem::path& path, const std::vector<std::byte>& bytes) {
+  std::ofstream output(path, std::ios::binary | std::ios::trunc);
+  if (!output) {
+    return false;
+  }
+  output.write(reinterpret_cast<const char*>(bytes.data()),
+               static_cast<std::streamsize>(bytes.size()));
+  return static_cast<bool>(output);
+}
+
+[[nodiscard]] protocol::JobSpec valid_export_spec(const std::filesystem::path& checkpoint,
+                                                  const std::filesystem::path& destination,
+                                                  const std::string& sequence_id) {
+  protocol::JobSpec spec;
+  spec.set_job_id(jobs::make_job_id());
+  spec.set_kind(protocol::JOB_KIND_EXPORT);
+  spec.set_project_checkpoint(utf8_string(checkpoint));
+  spec.set_output_uri(utf8_string(destination));
+  spec.set_preset_id("video-editor.export.creator.v1");
+  protocol::ExportOptions options;
+  options.set_schema_version(1);
+  options.set_platform_preset(
+      static_cast<int>(export_service::PlatformPreset::ReferenceFfv1));
+  options.set_caption_mode("none");
+  options.set_sidecar_format("srt");
+  options.set_include_audio(true);
+  options.set_overwrite_existing(true);
+  options.set_prefer_hardware(false);
+  options.set_sequence_id(sequence_id);
+  EXPECT_TRUE(options.SerializeToString(spec.mutable_options()));
+  return spec;
+}
+
+[[nodiscard]] bool write_one_clip_checkpoint(const std::filesystem::path& source,
+                                             const std::filesystem::path& checkpoint,
+                                             std::string& sequence_id) {
+  edit::Project project;
+  edit::Asset asset;
+  asset.name = "fixture";
+  asset.source_uri = utf8_string(source);
+  asset.duration = edit::Time(2, 5);
+  asset.has_video = true;
+  asset.has_audio = true;
+  asset.width = 160;
+  asset.height = 90;
+  asset.nominal_frame_rate = edit::Rate(10, 1);
+  asset.audio_sample_rate = 48'000;
+  asset.audio_channels = 2;
+
+  edit::Clip clip;
+  clip.asset_id = asset.id;
+  clip.timeline_range = {edit::Time{}, asset.duration};
+  clip.source_range = clip.timeline_range;
+
+  edit::Track video_track;
+  video_track.kind = edit::TrackKind::Video;
+  video_track.clips.push_back(clip);
+
+  edit::Clip audio_clip = clip;
+  audio_clip.id = edit::EntityId::generate();
+  audio_clip.kind = edit::ClipKind::Audio;
+  edit::Track audio_track;
+  audio_track.kind = edit::TrackKind::Audio;
+  audio_track.clips.push_back(std::move(audio_clip));
+
+  edit::Sequence sequence;
+  sequence.name = "Export fixture";
+  sequence.width = 160;
+  sequence.height = 90;
+  sequence.frame_rate = edit::Rate(10, 1);
+  sequence.tracks.push_back(std::move(video_track));
+  sequence.tracks.push_back(std::move(audio_track));
+  sequence_id = sequence.id.toString();
+
+  project.assets.push_back(std::move(asset));
+  project.sequences.push_back(std::move(sequence));
+  try {
+    return write_bytes(checkpoint, project_codec::serialize_project(project));
+  } catch (...) {
+    return false;
+  }
+}
+
+TEST(WorkerExportDispatch, ExportsTinyLavfiProjectSnapshot) {
+  if (!export_service::preset_info(export_service::VideoPreset::Ffv1Matroska).available) {
+    GTEST_SKIP() << "FFV1 encoder is unavailable";
+  }
+  TemporaryDirectory directory;
+  const auto source = directory.path() / "source.mkv";
+  if (!create_fixture(source)) {
+    GTEST_SKIP() << "ffmpeg fixture generator is unavailable";
+  }
+  const auto checkpoint = directory.path() / "project.veproj";
+  std::string sequence_id;
+  ASSERT_TRUE(write_one_clip_checkpoint(source, checkpoint, sequence_id));
+  const auto destination = directory.path() / "export.mkv";
+  const protocol::JobSpec spec = valid_export_spec(checkpoint, destination, sequence_id);
+
+  std::vector<protocol::WorkerEvent> events;
+  ASSERT_TRUE(dispatch_job(spec, [&events](const protocol::WorkerEvent& event) {
+    events.push_back(event);
+    return true;
+  }));
+
+  ASSERT_GE(events.size(), 2U);
+  EXPECT_EQ(events.front().event().state(), protocol::JOB_STATE_ACCEPTED);
+  ASSERT_EQ(events.back().event().state(), protocol::JOB_STATE_SUCCEEDED)
+      << events.back().event().error().category() << ": "
+      << events.back().event().error().user_message() << " / "
+      << events.back().event().error().diagnostic();
+  EXPECT_EQ(events.back().event().result_uri(), utf8_string(destination));
+  EXPECT_EQ(events.back().event().metadata().at("contract_version"), "1");
+  EXPECT_FALSE(events.back().event().metadata().at("frame_count").empty());
+  EXPECT_TRUE(std::filesystem::is_regular_file(destination));
+}
+
+TEST(WorkerExportDispatch, RejectsUnknownOptionsWithoutTouchingDestination) {
+  TemporaryDirectory directory;
+  const auto source = directory.path() / "source.mkv";
+  if (!create_fixture(source)) {
+    GTEST_SKIP() << "ffmpeg fixture generator is unavailable";
+  }
+  const auto checkpoint = directory.path() / "project.veproj";
+  std::string sequence_id;
+  ASSERT_TRUE(write_one_clip_checkpoint(source, checkpoint, sequence_id));
+  const auto destination = directory.path() / "export.mkv";
+  protocol::JobSpec spec = valid_export_spec(checkpoint, destination, sequence_id);
+  spec.set_options("not-a-protobuf");
+
+  std::vector<protocol::WorkerEvent> events;
+  ASSERT_TRUE(dispatch_job(spec, [&events](const protocol::WorkerEvent& event) {
+    events.push_back(event);
+    return true;
+  }));
+  ASSERT_EQ(events.size(), 2U);
+  EXPECT_EQ(events.back().event().state(), protocol::JOB_STATE_FAILED);
+  EXPECT_EQ(events.back().event().error().category(), "invalid-argument");
+  EXPECT_FALSE(std::filesystem::exists(destination));
+}
+
+TEST(WorkerHost, FramedProxyRequestGeneratesProxy) {
+#ifndef VIDEO_EDITOR_WORKER_HOST
+  GTEST_SKIP() << "worker host path is not configured";
+#else
+  TemporaryDirectory directory;
+  const auto source = directory.path() / "source.mkv";
+  if (!create_fixture(source)) {
+    GTEST_SKIP() << "ffmpeg fixture generator is unavailable";
+  }
+  const auto destination = directory.path() / "proxy.mkv";
+  const auto input = directory.path() / "request.bin";
+  const auto output = directory.path() / "events.bin";
+  {
+    std::ofstream stream(input, std::ios::binary | std::ios::trunc);
+    protocol::WorkerRequest request;
+    request.set_protocol_major(jobs::kProtocolMajor);
+    request.set_protocol_minor(jobs::kProtocolMinor);
+    *request.mutable_start()->mutable_spec() = valid_proxy_spec(source, destination);
+    ASSERT_TRUE(jobs::write_frame(stream, request).ok);
+  }
+  const std::string command = shell_quote(VIDEO_EDITOR_WORKER_HOST) + " < " +
+                              shell_quote(input.string()) + " > " + shell_quote(output.string());
+  ASSERT_EQ(std::system(command.c_str()), 0);
+
+  std::ifstream stream(output, std::ios::binary);
+  ASSERT_TRUE(stream);
+  std::vector<protocol::WorkerEvent> events;
+  while (true) {
+    protocol::WorkerEvent event;
+    const auto result = jobs::read_frame(stream, event);
+    if (result.status == jobs::ReadStatus::EndOfStream)
+      break;
+    ASSERT_TRUE(result.ok) << result.message;
+    events.push_back(std::move(event));
+  }
+  ASSERT_GE(events.size(), 2U);
+  EXPECT_EQ(events.front().event().state(), protocol::JOB_STATE_ACCEPTED);
+  EXPECT_EQ(events.back().event().state(), protocol::JOB_STATE_SUCCEEDED);
+  EXPECT_TRUE(std::filesystem::is_regular_file(destination));
 #endif
 }
 

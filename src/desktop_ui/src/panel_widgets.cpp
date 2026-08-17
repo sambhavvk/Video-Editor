@@ -114,6 +114,7 @@ MediaBinWidget::MediaBinWidget(QWidget* parent) : QWidget(parent) {
   search_->setAccessibleName(tr("Search media"));
   search_->setPlaceholderText(tr("Search media…"));
   search_->setClearButtonEnabled(true);
+  search_->setFocusPolicy(Qt::StrongFocus);
   tools->addWidget(search_, 1);
 
   auto* import = new QToolButton(this);
@@ -1132,10 +1133,13 @@ AudioMixerWidget::AudioMixerWidget(QWidget* parent) : QWidget(parent) {
       new QLabel(tr("Analyze the sequence to review integrated LUFS."), normalize);
   normalization_status_->setObjectName(QStringLiteral("normalizationStatus"));
   normalization_status_->setWordWrap(true);
+  normalize->setAccessibleName(tr("Loudness normalization"));
   normalization_analyze_ = new QPushButton(tr("Analyze"), normalize);
   normalization_analyze_->setObjectName(QStringLiteral("normalizationAnalyze"));
+  normalization_analyze_->setAccessibleName(tr("Analyze loudness"));
   normalization_apply_ = new QPushButton(tr("Apply"), normalize);
   normalization_apply_->setObjectName(QStringLiteral("normalizationApply"));
+  normalization_apply_->setAccessibleName(tr("Apply loudness normalization"));
   normalization_apply_->setEnabled(false);
   normalization_target_ = new QDoubleSpinBox(normalize);
   normalization_target_->setObjectName(QStringLiteral("normalizationTargetLufs"));

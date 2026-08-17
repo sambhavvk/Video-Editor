@@ -30,9 +30,14 @@ def parse_arguments() -> argparse.Namespace:
         help="manifest path (defaults to tests/fixtures/corpus/manifest.json)",
     )
     parser.add_argument(
+        "--generated",
+        action="store_true",
+        help="validate tests/fixtures/corpus/generated/manifest.json",
+    )
+    parser.add_argument(
         "--release",
         action="store_true",
-        help="require complete beta corpus coverage",
+        help="require the generated corpus to be complete (status, 200+ files, categories)",
     )
     return parser.parse_args()
 
@@ -146,13 +151,34 @@ def validate_assets(manifest_directory: Path, assets: list[dict[str, Any]]) -> s
     return covered_categories
 
 
+GENERATED_HINT = (
+    "generated corpus is missing. Run:\n"
+    "  python3 tools/quality/generate_corpus.py\n"
+    "then re-run:\n"
+    "  python3 tools/quality/verify_corpus.py --release"
+)
+
+
+def resolve_manifest_path(arguments: argparse.Namespace, repository_root: Path) -> Path:
+    if arguments.manifest is not None:
+        return arguments.manifest.resolve()
+    if arguments.release or arguments.generated:
+        return (repository_root / "tests/fixtures/corpus/generated/manifest.json").resolve()
+    return (repository_root / "tests/fixtures/corpus/manifest.json").resolve()
+
+
 def main() -> int:
     arguments = parse_arguments()
     repository_root = Path(__file__).resolve().parents[2]
-    manifest_path = arguments.manifest or (
-        repository_root / "tests/fixtures/corpus/manifest.json"
+    manifest_path = resolve_manifest_path(arguments, repository_root)
+    using_generated = arguments.release or arguments.generated or (
+        arguments.manifest is not None
+        and manifest_path.parent.name == "generated"
     )
-    manifest_path = manifest_path.resolve()
+
+    if using_generated and arguments.manifest is None and not manifest_path.is_file():
+        print(f"ERROR: {GENERATED_HINT}", file=sys.stderr)
+        return 1
 
     try:
         data = load_manifest(manifest_path)

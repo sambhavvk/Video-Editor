@@ -7,6 +7,7 @@
 #include <array>
 #include <map>
 #include <memory>
+#include <variant>
 #include <vector>
 
 namespace video_editor::render {
@@ -369,6 +370,77 @@ TEST(GpuTimelineRenderer, RejectsStaleEpochBeforeDecode) {
   ASSERT_FALSE(result);
   EXPECT_EQ(result.error->code, RenderErrorCode::StaleRequest);
   EXPECT_TRUE(provider->requests.empty());
+}
+
+TEST(GpuTimelineRenderer, DeviceLostKeepsCpuFrameAndLeavesRevisionUnchanged) {
+  auto gpu = std::shared_ptr<GpuRenderer>(GpuRenderer::create({.allow_software = true}));
+  ASSERT_NE(gpu, nullptr);
+  if (!gpu->capabilities().available()) {
+    GTEST_SKIP() << gpu->capabilities().diagnostic;
+  }
+
+  edit::Project project;
+  edit::Asset asset;
+  asset.id = edit::EntityId::generate();
+  asset.name = "device-lost fixture";
+  asset.source_uri = "memory://device-lost";
+  asset.duration = edit::Time(10, 1);
+  asset.has_video = true;
+  asset.width = 8;
+  asset.height = 8;
+  project.assets.push_back(asset);
+
+  edit::Sequence sequence;
+  sequence.width = 8;
+  sequence.height = 8;
+  sequence.frame_rate = edit::Rate(30, 1);
+  edit::Track track;
+  track.kind = edit::TrackKind::Video;
+  edit::Clip clip;
+  clip.asset_id = asset.id;
+  clip.kind = edit::ClipKind::Video;
+  clip.timeline_range = {edit::Time(2, 1), edit::Time(4, 1)};
+  clip.source_range = {edit::Time(5, 1), edit::Time(4, 1)};
+  track.clips.push_back(clip);
+  sequence.tracks.push_back(track);
+  const edit::EntityId sequence_id = sequence.id;
+  project.sequences.push_back(sequence);
+
+  edit::TimelineEditor editor(project);
+  const auto revision = editor.revision();
+  auto snapshot = editor.snapshot(sequence_id, revision);
+  ASSERT_TRUE(snapshot) << (snapshot ? "" : snapshot.error().message);
+
+  auto provider = std::make_shared<RecordingProvider>();
+  provider->frames[asset.id] = pattern();
+  CpuRenderer cpu(provider);
+  GpuTimelineRenderer timeline(provider, gpu);
+  cpu.begin_epoch(3);
+  timeline.begin_epoch(3);
+  const edit::Time requested_time(5, 2);
+  const auto cpu_before = cpu.request_frame(snapshot.value(), requested_time, {}, 3);
+  ASSERT_TRUE(cpu_before) << cpu_before.error->message;
+  const auto* cpu_storage =
+      std::get_if<std::shared_ptr<const CpuFrame>>(&cpu_before.value->storage);
+  ASSERT_NE(cpu_storage, nullptr);
+  ASSERT_TRUE(*cpu_storage);
+
+  gpu->notify_device_lost("injected device loss for preview fallback");
+  EXPECT_EQ(gpu->capabilities().state, GpuRuntimeState::DeviceLost);
+  const auto gpu_after = timeline.request_frame(snapshot.value(), requested_time, {}, 3);
+  ASSERT_FALSE(gpu_after);
+  EXPECT_EQ(gpu_after.error->code, RenderErrorCode::GpuDeviceLost);
+
+  cpu.begin_epoch(4);
+  const auto cpu_after = cpu.request_frame(snapshot.value(), requested_time, {}, 4);
+  ASSERT_TRUE(cpu_after) << cpu_after.error->message;
+  const auto* cpu_after_storage =
+      std::get_if<std::shared_ptr<const CpuFrame>>(&cpu_after.value->storage);
+  ASSERT_NE(cpu_after_storage, nullptr);
+  ASSERT_TRUE(*cpu_after_storage);
+  EXPECT_EQ((*cpu_after_storage)->width(), (*cpu_storage)->width());
+  EXPECT_EQ((*cpu_after_storage)->height(), (*cpu_storage)->height());
+  EXPECT_EQ(editor.revision(), revision);
 }
 
 } // namespace

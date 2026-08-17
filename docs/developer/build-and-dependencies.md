@@ -77,9 +77,9 @@ frame. The desktop
 requests that path before CPU and downloads the result for Qt; backend/device/upload/render/readback
 failures preserve a CPU result and latch CPU preview for the session. A native Windows `HWND` or caller-owned Linux `VkInstance`/
 `VkSurfaceKHR` is supported by the engine contract but is not yet supplied by the desktop. There is
-no zero-copy decoder import. Official beta packages must contain and validate both the pinned
-miniaudio adapter and the platform GPU backend; the fallbacks keep project open/edit/recovery and CPU
-export usable, not release-ready.
+no zero-copy decoder import. Official Linux-first beta packages must contain and validate both the pinned
+miniaudio adapter and the Linux Vulkan backend; the fallbacks keep project open/edit/recovery and CPU
+export usable, not release-ready. Windows GPU packaging is deferred with the Windows beta.
 
 ### Optional local transcription backend
 

@@ -1,15 +1,18 @@
 <!-- SPDX-License-Identifier: MPL-2.0 -->
 
-# Video Editor — Alpha Test Guide for Windows
+# Video Editor — Windows source-build preview (not first public beta)
 
 > **Version:** 0.1.0-alpha
 >
-> **Status:** Engineering preview; not for public distribution or irreplaceable work
+> **Status:** Engineering preview only. The **first public beta is Linux exclusive**. Signed MSI,
+> Windows GPU/D3D11 matrix work, and Windows codec qualification are deferred because packaging
+> and GPU compatibility need more calendar time than the Linux beta.
 >
-> **Last updated:** 2026-08-14
+> **Last updated:** 2026-08-17
 
-This guide covers the current Windows source build and interactive alpha workflow. The editor is
-offline-first and needs no account. Keep original media and backups of important projects.
+This guide covers the current Windows source build and interactive workflow for contributors. It is
+**not** the first public-beta distribution path. Testers who need a first-beta candidate should use
+the [Linux guide](ALPHA-TEST-LINUX.md). Keep original media and backups of important projects.
 
 See [Beta feature status](docs/beta-feature-status.md) for exact implementation state and the
 [User guide](docs/user-guide.md) for normal workflows.
@@ -217,4 +220,6 @@ For transcription include whether whisper/Vulkan were enabled, model state, sele
 worker error, and whether project state changed. For playback include output device and GPU/CPU
 status. For export include preset, actual encoder/fallback, caption mode, and destination safety.
 
-This alpha is intended to find correctness, reliability, and usability defects before public beta.
+This alpha is intended to find correctness, reliability, and usability defects. Windows findings do
+not gate the Linux-first public beta. Signed MSI, Windows GPU matrix, and Windows codec
+qualification remain deferred.

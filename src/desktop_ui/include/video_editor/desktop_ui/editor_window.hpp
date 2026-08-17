@@ -143,6 +143,7 @@ private:
   void createToolBars();
   void createStatusBar();
   void connectControllerSurface();
+  void labelInteractiveChrome();
   void applyDefaultLayout(Workspace workspace);
   void updateWorkspaceActions();
   void updateWorkspaceLabel();

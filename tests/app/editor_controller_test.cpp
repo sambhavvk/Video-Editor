@@ -9,19 +9,23 @@
 #include "video_editor/desktop_ui/program_viewer.hpp"
 #include "video_editor/desktop_ui/timeline_widget.hpp"
 
+#include <QApplication>
 #include <QDataStream>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QMessageBox>
 #include <QProcess>
 #include <QPushButton>
+#include <QTimer>
 #include <QSettings>
 #include <QSignalSpy>
 #include <QStandardPaths>
 #include <QTableWidget>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QToolButton>
 
 #include <algorithm>
 #include <memory>
@@ -125,6 +129,7 @@ private slots:
   void rollEditsUseTheGestureEdge();
   void presentsFramesContinuouslyWhilePlaybackIsRunning();
   void importsSearchesAndExportsCaptions();
+  void beginnerFifteenMinutePathWithoutFullEncode();
   void normalizationOnlyAdjustsAudibleContributingTracks();
   void realAudioDeviceUsesTheSampleCounterAsMasterClock();
   void audioDevicePollSteadyConnectedIsNotRecovered();
@@ -134,6 +139,8 @@ private slots:
   void mapsAndClampsReversedTranscriptWordsInPlaybackOrder();
   void rejectsOversizedModelDownloadBoundaries();
   void reconstructsMediaRecordsFromPersistedAssets();
+  void cancellingProxyDoesNotRegisterCompleteProxy();
+  void proxyWorkerDeathReportsFailureWithoutHanging();
 
 private:
   std::unique_ptr<QTemporaryDir> application_data_;
@@ -169,6 +176,9 @@ void EditorControllerTest::initTestCase() {
   application_data_ = std::make_unique<QTemporaryDir>();
   QVERIFY(application_data_->isValid());
   qputenv("XDG_DATA_HOME", application_data_->path().toUtf8());
+#ifdef VIDEO_EDITOR_APP_TEST_WORKER_HOST
+  qputenv("VIDEO_EDITOR_WORKER_HOST", VIDEO_EDITOR_APP_TEST_WORKER_HOST);
+#endif
   QStandardPaths::setTestModeEnabled(true);
 }
 
@@ -737,6 +747,59 @@ void EditorControllerTest::importsSearchesAndExportsCaptions() {
            0U);
 }
 
+void EditorControllerTest::beginnerFifteenMinutePathWithoutFullEncode() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString wave_path = directory.filePath(QStringLiteral("dialogue.wav"));
+  writeSilentWave(wave_path);
+
+  QSettings settings(directory.filePath(QStringLiteral("beginner-controller-ui.ini")),
+                     QSettings::IniFormat);
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+
+  controller.importPaths({wave_path});
+  QTRY_COMPARE_WITH_TIMEOUT(
+      controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
+  QCOMPARE(window.mediaBin()->items().size(), 1);
+  window.mediaActivated(window.mediaBin()->items().front().id);
+  QCOMPARE(audioClipCount(*controller.editor().projectAt(controller.editor().revision())), 1U);
+
+  window.captionsPanel()->addCaptionRequested();
+  QCOMPARE(controller.editor()
+               .projectAt(controller.editor().revision())
+               ->sequences.front()
+               .captions.size(),
+           1U);
+  QCOMPARE(controller.editor()
+               .projectAt(controller.editor().revision())
+               ->sequences.front()
+               .captions.front()
+               .text,
+           std::string("New caption"));
+
+  window.audioMixer()->gainEdited(0, -3.0);
+  const auto gained = controller.editor().projectAt(controller.editor().revision());
+  const auto gained_track = std::find_if(
+      gained->sequences.front().tracks.begin(), gained->sequences.front().tracks.end(),
+      [](const auto& track) { return track.kind == video_editor::edit::TrackKind::Audio; });
+  QVERIFY(gained_track != gained->sequences.front().tracks.end());
+  QCOMPARE(gained_track->audio_gain_db, -3.0);
+
+  window.setWorkspace(video_editor::desktop_ui::Workspace::Deliver);
+  auto* export_button = window.deliverPanel()->findChild<QToolButton*>(QStringLiteral("exportButton"));
+  QVERIFY(export_button != nullptr);
+  QVERIFY(!export_button->accessibleName().trimmed().isEmpty());
+  QVERIFY(!window.deliverPanel()->selectedPresetId().isEmpty());
+
+  for (const auto* name :
+       {"importMediaButton", "addCaptionButton", "exportButton", "normalizationAnalyze"}) {
+    auto* widget = window.findChild<QWidget*>(QString::fromLatin1(name));
+    QVERIFY2(widget != nullptr, name);
+    QVERIFY2(!widget->accessibleName().trimmed().isEmpty(), name);
+  }
+}
+
 void EditorControllerTest::normalizationOnlyAdjustsAudibleContributingTracks() {
   QTemporaryDir directory;
   QVERIFY(directory.isValid());
@@ -895,6 +958,103 @@ void EditorControllerTest::reconstructsMediaRecordsFromPersistedAssets() {
   QCOMPARE(batch.size(), std::size_t{2});
   QCOMPARE(batch.front().availability, video_editor::assets::AssetAvailability::Online);
   QCOMPARE(batch.back().availability, video_editor::assets::AssetAvailability::Online);
+}
+
+bool writeShortProxyVideo(const QString& path) {
+  const QStringList arguments{
+      QStringLiteral("-hide_banner"),
+      QStringLiteral("-loglevel"),
+      QStringLiteral("error"),
+      QStringLiteral("-nostdin"),
+      QStringLiteral("-y"),
+      QStringLiteral("-f"),
+      QStringLiteral("lavfi"),
+      QStringLiteral("-i"),
+      QStringLiteral("testsrc2=size=320x180:rate=10:duration=2"),
+      QStringLiteral("-c:v"),
+      QStringLiteral("mpeg4"),
+      QStringLiteral("-q:v"),
+      QStringLiteral("4"),
+      QStringLiteral("-pix_fmt"),
+      QStringLiteral("yuv420p"),
+      path,
+  };
+  return QProcess::execute(QStringLiteral(VIDEO_EDITOR_APP_TEST_FFMPEG), arguments) == 0 &&
+         QFileInfo::exists(path);
+}
+
+void dismissMessageBoxes() {
+  for (QWidget* widget : QApplication::topLevelWidgets()) {
+    if (auto* box = qobject_cast<QMessageBox*>(widget)) {
+      box->accept();
+    }
+  }
+}
+
+void EditorControllerTest::cancellingProxyDoesNotRegisterCompleteProxy() {
+#ifdef VIDEO_EDITOR_APP_TEST_WORKER_HOST
+  qputenv("VIDEO_EDITOR_WORKER_HOST", VIDEO_EDITOR_APP_TEST_WORKER_HOST);
+#endif
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString video_path = directory.filePath(QStringLiteral("proxy-source.mkv"));
+  QVERIFY(writeShortProxyVideo(video_path));
+
+  QSettings settings(directory.filePath(QStringLiteral("proxy-cancel.ini")), QSettings::IniFormat);
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+  controller.importPaths({video_path});
+  QTRY_COMPARE_WITH_TIMEOUT(
+      controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
+  QVERIFY(!window.mediaBin()->items().isEmpty());
+  const QString asset_id = window.mediaBin()->items().front().id;
+
+  QVERIFY(QMetaObject::invokeMethod(window.mediaBin(), "proxyRequested", Qt::DirectConnection,
+                                    Q_ARG(QString, asset_id)));
+  QTRY_VERIFY_WITH_TIMEOUT(window.mediaBin()->items().front().proxyGenerating, 5'000);
+  QVERIFY(QMetaObject::invokeMethod(window.mediaBin(), "proxyRequested", Qt::DirectConnection,
+                                    Q_ARG(QString, asset_id)));
+  QTRY_VERIFY_WITH_TIMEOUT(!window.mediaBin()->items().front().proxyGenerating, 15'000);
+  QVERIFY(!window.mediaBin()->items().front().proxyAvailable);
+}
+
+void EditorControllerTest::proxyWorkerDeathReportsFailureWithoutHanging() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString stub = directory.filePath(QStringLiteral("failing-worker"));
+  QFile stub_file(stub);
+  QVERIFY(stub_file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+  QVERIFY(stub_file.write("#!/bin/sh\nexit 1\n") > 0);
+  stub_file.close();
+  QVERIFY(QFile::setPermissions(stub, QFileDevice::ExeOwner | QFileDevice::ReadOwner |
+                                          QFileDevice::WriteOwner));
+  qputenv("VIDEO_EDITOR_WORKER_HOST", stub.toUtf8());
+
+  const QString video_path = directory.filePath(QStringLiteral("death-source.mkv"));
+  QVERIFY(writeShortProxyVideo(video_path));
+
+  QSettings settings(directory.filePath(QStringLiteral("proxy-death.ini")), QSettings::IniFormat);
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+  controller.importPaths({video_path});
+  QTRY_COMPARE_WITH_TIMEOUT(
+      controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
+  const QString asset_id = window.mediaBin()->items().front().id;
+
+  QTimer dismiss;
+  dismiss.setInterval(20);
+  QObject::connect(&dismiss, &QTimer::timeout, &dismissMessageBoxes);
+  dismiss.start();
+
+  QVERIFY(QMetaObject::invokeMethod(window.mediaBin(), "proxyRequested", Qt::DirectConnection,
+                                    Q_ARG(QString, asset_id)));
+  QTRY_VERIFY_WITH_TIMEOUT(!window.mediaBin()->items().front().proxyGenerating, 10'000);
+  QVERIFY(!window.mediaBin()->items().front().proxyAvailable);
+#ifdef VIDEO_EDITOR_APP_TEST_WORKER_HOST
+  qputenv("VIDEO_EDITOR_WORKER_HOST", VIDEO_EDITOR_APP_TEST_WORKER_HOST);
+#else
+  qunsetenv("VIDEO_EDITOR_WORKER_HOST");
+#endif
 }
 
 QTEST_MAIN(EditorControllerTest)

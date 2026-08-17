@@ -2,21 +2,25 @@
 
 # Video Editor documentation
 
-Video Editor is an offline-first Windows and Linux editor under active development. The current
-repository is an engineering vertical slice, **not a public beta**. It already proves
+Video Editor is an offline-first editor under active development. The **first public beta is
+Linux exclusive**; Windows remains a source-build engineering preview. The current
+repository is not yet that Linux beta. It already proves
 exact edits, transactional projects, software preview, local proxies, captions, safe reference
-masters, and FOSS VP9/Opus creator delivery. A capability-gated libplacebo D3D11/Vulkan engine composes
+masters, and FOSS VP9/Opus creator delivery. A capability-gated libplacebo Vulkan (Linux) / D3D11
+(Windows preview) engine composes
 supported active clips on the GPU before the CPU fallback; the current viewer downloads an offscreen
 image rather than using native-swapchain presentation. Realtime 48 kHz audio
 device/master-clock playback is connected for forward 1× transport in builds with the pinned
 miniaudio adapter; it reports submitted versus latency-compensated positions and uncertainty.
 The CPU reference graph renders titles, transitions, typed effect curves, color/crop/blur nodes,
-and the ordered track-audio DSP chain. FOSS creator delivery can use QSV/VAAPI VP9 with complete
+and the ordered track-audio DSP chain. FOSS creator delivery can use VAAPI VP9 on Linux (QSV on
+Windows preview) with complete
 libvpx retry. Track/master meters, worker-owned EBU-R128 loudness, editable normalization, and
 polled audio-device recovery are connected. Local transcription has an explicitly downloaded,
 checksummed base model, a restartable typed worker, exact timed words, styled captions, and
 reviewable silence/filler cuts; builds without the pinned optional whisper.cpp backend report that
-capability truthfully. H.264/AAC approval and physical audio/GPU/transcription matrices remain.
+capability truthfully. H.264/AAC approval, Linux physical audio/GPU/transcription matrices, and
+Windows MSI/GPU distribution remain.
 
 The desktop timeline now exposes atomic multi-selection edits, linked A/V split/delete,
 normal/ripple/overwrite trims, roll/slip/slide tools, track management, marker/gap interaction, and

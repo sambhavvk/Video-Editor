@@ -25,16 +25,40 @@ Each asset entry must include:
 - Optional media expectations that remain descriptive; decode golden data
   belongs beside the owning test rather than in this index.
 
-Run the integrity check with:
+The committed tree stays a scaffold (`manifest.json` plus
+`files/manifest-smoke.txt`). The 200+ synthetic media files are generated
+locally or in CI under `generated/` (gitignored) by deterministic ffmpeg
+recipes. Those fixtures are MPL-2.0 generated media, not copyrighted footage.
+
+Generate and verify:
+
+```sh
+python3 tools/quality/generate_corpus.py
+python3 tools/quality/verify_corpus.py --generated
+python3 tools/quality/verify_corpus.py --release
+```
+
+`generate_corpus.py` requires `ffmpeg` and `ffprobe` on `PATH` (or `FFMPEG` /
+`FFPROBE`). It writes `tests/fixtures/corpus/generated/files/` plus a
+`generated/manifest.json` that records exact byte lengths, SHA-256 digests, and
+the generation recipe used for each asset. Encoders are not always bit-exact
+across ffmpeg builds, so hashes are taken after generation in the same run.
+
+The default verifier still checks only the committed scaffold:
 
 ```sh
 python3 tools/quality/verify_corpus.py
 ```
 
-Use `--release` in a release gate. That mode requires `status: complete`, at
-least 200 assets, all required categories, and no missing or mismatched files.
-The default scaffold mode still validates every entry that is present and
-prints the outstanding coverage.
+`--generated` validates `tests/fixtures/corpus/generated/manifest.json`.
+`--release` uses that generated manifest and requires `status: complete`, at
+least 200 unique files, and every `requiredCategories` entry. If the generated
+tree is missing, the command prints an instruction to run `generate_corpus.py`
+instead of failing opaquely.
+
+CMake exposes `verify-corpus` and `generate-corpus` custom targets, plus a cheap
+`quality.verify_corpus_scaffold` ctest. Do not add hundreds of decode tests
+against this corpus.
 
 Do not add copyrighted sample footage without explicit redistribution rights.
 Never silently regenerate an existing fixture: a byte change requires a new

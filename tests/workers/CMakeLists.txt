@@ -12,6 +12,9 @@ target_link_libraries(
     video_editor::transcription_service
     video_editor::job_service
     video_editor::proxy_service
+    video_editor::project_codec
+    VideoEditor::EditModel
+    VideoEditor::ExportService
     video_editor::project_warnings
     GTest::gtest_main)
 
@@ -29,3 +32,5 @@ endif()
 
 include(GoogleTest)
 gtest_discover_tests(video_editor_worker_tests)
+
+target_sources(video_editor_worker_tests PRIVATE worker_death_test.cpp)

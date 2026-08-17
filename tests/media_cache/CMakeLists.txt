@@ -24,3 +24,5 @@ endif()
 
 include(GoogleTest)
 gtest_discover_tests(video_editor_media_cache_tests)
+
+target_sources(video_editor_media_cache_tests PRIVATE cache_disk_full_test.cpp)

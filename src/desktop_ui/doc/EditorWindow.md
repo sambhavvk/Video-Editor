@@ -125,6 +125,15 @@ controller. Cache-browser budget/remove/evict/clear signals are emitted by `cach
 Persists UI state and then delegates normal window-close handling. The controller event filter may
 still ask the user about unsaved project edits.
 
+## Accessibility
+
+Interactive chrome (transport, toolbars, dock tab bars, menus, and panel search fields) receives a
+stable `accessibleName` and, where helpful, `accessibleDescription`. Names are user-facing English
+strings such as `Search media` and `Export video master`. Tab focus includes the timeline
+(`StrongFocus`) and at least one panel search field. Shortcuts are not remappable; J/K/L, Space,
+and Ctrl+1…4 remain window shortcuts. Screen-reader announcement quality beyond these names is not
+automated.
+
 ## Ownership and lifecycle
 
 Every panel, dock, toolbar, viewer, and timeline is QObject-parent-owned by the window. Getter

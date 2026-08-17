@@ -27,10 +27,19 @@ large checksum work on the Qt thread; the worker authoritatively verifies the in
 returns a typed failure if it is missing or corrupt. The controller captures the base project
 revision and the clip's source/timeline/rate/reverse
 mapping, sends a conservatively rounded source window rather than decoding the entire asset, creates
-one typed `JOB_KIND_TRANSCRIBE` request, and launches a fresh worker host through `QProcess`.
-Requests and events are four-byte little-endian length-prefixed Protobuf frames bounded by
-`jobs::kMaximumFrameBytes`. The worker has no network implementation. Cancellation terminates that
-job process; abnormal termination or malformed results cannot mutate the project.
+one typed `JOB_KIND_TRANSCRIBE` request, and launches a fresh worker host through
+`WorkerHostSession`. Requests and events are four-byte little-endian length-prefixed Protobuf frames
+bounded by `jobs::kMaximumFrameBytes`. The worker has no network implementation. Cancellation
+terminates that job process; abnormal termination or malformed results cannot mutate the project.
+
+Proxy generation and creator export use the same process boundary. `generateProxy` sends
+`JOB_KIND_PROXY` with one absolute source path, an absolute cache destination, and the resolved
+FFV1 or ProRes half-resolution preset. `startVideoExport` serializes the current project revision
+to a unique temp checkpoint and sends `JOB_KIND_EXPORT` with typed `ExportOptions`. Deliver-panel
+progress comes from `RUNNING` events, including the hardware-fallback phase. In every case
+`WorkerHostSession::cancel()` kills the host; worker death or a missing terminal `SUCCEEDED` is a
+failure that leaves the destination unchanged and does not register a complete proxy. The temp
+export checkpoint is deleted when the process finishes.
 
 ## Timed results and review
 
@@ -50,9 +59,10 @@ conflict, invalid result, cancellation, or discard leaves the authoritative proj
 
 ## Lifetime and threading
 
-The controller is GUI-thread-affine. Network replies and `QProcess` objects are QObject children.
-Audio analysis, model verification, import, preview, proxy, and export work execute off the GUI
-thread and return owned outcomes through Qt watchers. Destruction requests cancellation and waits
-for owned futures before releasing the project and registries.
+The controller is GUI-thread-affine. Network replies and `WorkerHostSession` / `QProcess` objects
+are QObject children. Audio analysis, model verification, import, preview, and cache work execute
+off the GUI thread and return owned outcomes through Qt watchers. Proxy, export, and transcription
+run in a restartable worker-host process. Destruction kills those processes and waits for owned
+futures before releasing the project and registries.
 
 AI assistance has been used to create this output.

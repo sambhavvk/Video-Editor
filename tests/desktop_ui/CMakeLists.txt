@@ -23,12 +23,36 @@ add_executable(video_editor_desktop_ui_tests
     editor_window_test.cpp
 )
 
+add_executable(video_editor_desktop_ui_accessibility_tests
+    accessibility_test.cpp
+)
+
+add_executable(video_editor_desktop_ui_beginner_walkthrough_tests
+    beginner_walkthrough_test.cpp
+)
+
 add_executable(video_editor_deliver_panel_tests
     deliver_panel_test.cpp
 )
 
 target_compile_features(video_editor_desktop_ui_tests PRIVATE cxx_std_20)
 target_link_libraries(video_editor_desktop_ui_tests
+    PRIVATE
+        video_editor_desktop_ui
+        Qt6::Test
+        Qt6::Widgets
+)
+
+target_compile_features(video_editor_desktop_ui_accessibility_tests PRIVATE cxx_std_20)
+target_link_libraries(video_editor_desktop_ui_accessibility_tests
+    PRIVATE
+        video_editor_desktop_ui
+        Qt6::Test
+        Qt6::Widgets
+)
+
+target_compile_features(video_editor_desktop_ui_beginner_walkthrough_tests PRIVATE cxx_std_20)
+target_link_libraries(video_editor_desktop_ui_beginner_walkthrough_tests
     PRIVATE
         video_editor_desktop_ui
         Qt6::Test
@@ -47,13 +71,30 @@ target_link_libraries(video_editor_deliver_panel_tests
         Qt6::Widgets
 )
 
-set_target_properties(video_editor_desktop_ui_tests video_editor_deliver_panel_tests PROPERTIES
-    AUTOMOC ON
-    CXX_EXTENSIONS OFF
+set_target_properties(
+    video_editor_desktop_ui_tests
+    video_editor_desktop_ui_accessibility_tests
+    video_editor_desktop_ui_beginner_walkthrough_tests
+    video_editor_deliver_panel_tests
+    PROPERTIES
+        AUTOMOC ON
+        CXX_EXTENSIONS OFF
 )
 
 add_test(NAME desktop_ui.editor_window COMMAND video_editor_desktop_ui_tests)
 set_tests_properties(desktop_ui.editor_window PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+    TIMEOUT 30
+)
+
+add_test(NAME desktop_ui.accessibility COMMAND video_editor_desktop_ui_accessibility_tests)
+set_tests_properties(desktop_ui.accessibility PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+    TIMEOUT 30
+)
+
+add_test(NAME desktop_ui.beginner_walkthrough COMMAND video_editor_desktop_ui_beginner_walkthrough_tests)
+set_tests_properties(desktop_ui.beginner_walkthrough PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     TIMEOUT 30
 )

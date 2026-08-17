@@ -25,3 +25,25 @@ endif()
 set_tests_properties(app.import_edit_undo PROPERTIES
   ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
   TIMEOUT ${VIDEO_EDITOR_APP_TEST_TIMEOUT})
+
+add_executable(video_editor_app_fault_injection_tests fault_injection_test.cpp)
+target_compile_features(video_editor_app_fault_injection_tests PRIVATE cxx_std_20)
+target_link_libraries(video_editor_app_fault_injection_tests
+  PRIVATE
+    video_editor_app_controller
+    video_editor::render_engine
+    video_editor::project_warnings
+    Qt6::Test
+    Qt6::Widgets)
+set_target_properties(video_editor_app_fault_injection_tests PROPERTIES AUTOMOC ON CXX_EXTENSIONS OFF)
+add_test(NAME app.fault_injection COMMAND video_editor_app_fault_injection_tests)
+set_tests_properties(app.fault_injection PROPERTIES
+  ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+  TIMEOUT ${VIDEO_EDITOR_APP_TEST_TIMEOUT})
+
+if(TARGET video_editor_worker_host)
+  add_dependencies(video_editor_app_tests video_editor_worker_host)
+  target_compile_definitions(video_editor_app_tests PRIVATE
+    VIDEO_EDITOR_APP_TEST_WORKER_HOST="$<TARGET_FILE:video_editor_worker_host>")
+endif()
+set_tests_properties(app.import_edit_undo PROPERTIES TIMEOUT 180)

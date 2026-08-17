@@ -1,18 +1,31 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "video_editor/workers/job_dispatch.h"
 
+#include "video_editor/audio_render/original_audio_registry.h"
+#include "video_editor/audio_render/timeline_audio_renderer.h"
+#include "video_editor/edit_model/model.h"
+#include "video_editor/edit_model/timeline_editor.h"
+#include "video_editor/export_service/export_service.h"
 #include "video_editor/job_service/job_id.h"
 #include "video_editor/media_codec/probe.h"
+#include "video_editor/playback/asset_registry.h"
+#include "video_editor/playback/ffmpeg_frame_provider.h"
+#include "video_editor/project_codec/project_codec.h"
 #include "video_editor/proxy_service/proxy_service.h"
+#include "video_editor/render_engine/cpu_renderer.h"
 #include "video_editor/transcription_service/transcription_service.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
+#include <optional>
+#include <span>
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace video_editor::workers {
 namespace {
@@ -26,6 +39,8 @@ namespace protocol = jobs::v1;
 constexpr std::string_view kProResHalfPreset{"video-editor.proxy.prores-half.v1"};
 constexpr std::string_view kFfv1HalfPreset{"video-editor.proxy.ffv1-half.v1"};
 constexpr std::string_view kTranscribePreset{"video-editor.transcribe.whisper-base.v1"};
+constexpr std::string_view kExportPreset{"video-editor.export.creator.v1"};
+constexpr std::uint32_t kExportSchemaVersion = 1;
 
 protocol::WorkerEvent event_for(const protocol::JobSpec& spec, const protocol::JobState state,
                                 const double progress, const std::string_view phase) {
@@ -503,6 +518,399 @@ struct ParsedTranscribeRequest final {
   return sink(event);
 }
 
+[[nodiscard]] std::optional<export_service::PlatformPreset>
+platform_preset_from_int(const int value) {
+  if (value < static_cast<int>(export_service::PlatformPreset::ReferenceFfv1) ||
+      value > static_cast<int>(export_service::PlatformPreset::PodcastAudioOnly)) {
+    return std::nullopt;
+  }
+  return static_cast<export_service::PlatformPreset>(value);
+}
+
+[[nodiscard]] std::optional<export_service::CaptionExportMode>
+caption_mode_from_string(const std::string_view value) {
+  if (value.empty() || value == "none") {
+    return export_service::CaptionExportMode::None;
+  }
+  if (value == "burn_in") {
+    return export_service::CaptionExportMode::BurnIn;
+  }
+  if (value == "sidecar") {
+    return export_service::CaptionExportMode::Sidecar;
+  }
+  if (value == "burn_in_and_sidecar") {
+    return export_service::CaptionExportMode::BurnInAndSidecar;
+  }
+  return std::nullopt;
+}
+
+[[nodiscard]] std::optional<export_service::SidecarFormat>
+sidecar_format_from_string(const std::string_view value) {
+  if (value.empty() || value == "srt") {
+    return export_service::SidecarFormat::Srt;
+  }
+  if (value == "vtt") {
+    return export_service::SidecarFormat::WebVtt;
+  }
+  return std::nullopt;
+}
+
+struct ParsedExportRequest final {
+  std::filesystem::path checkpoint;
+  std::filesystem::path destination;
+  protocol::ExportOptions options;
+  export_service::PlatformPreset platform{};
+  export_service::CaptionExportMode caption_mode{export_service::CaptionExportMode::None};
+  export_service::SidecarFormat sidecar_format{export_service::SidecarFormat::Srt};
+  edit::EntityId sequence_id{};
+};
+
+[[nodiscard]] bool parse_export_request(const protocol::JobSpec& spec, ParsedExportRequest& parsed,
+                                        std::string& error) {
+  if (!jobs::valid_job_id(spec.job_id())) {
+    error = "job_id must be a canonical UUID job identifier";
+    return false;
+  }
+  if (spec.input_uris_size() != 0) {
+    error = "input_uris must be empty for export; media paths come from the project checkpoint";
+    return false;
+  }
+  if (spec.project_checkpoint().empty() || spec.output_uri().empty()) {
+    error = "project_checkpoint and output_uri must not be empty";
+    return false;
+  }
+  if (has_embedded_nul(spec.project_checkpoint()) || has_embedded_nul(spec.output_uri())) {
+    error = "checkpoint and output paths must not contain NUL bytes";
+    return false;
+  }
+  if (!valid_utf8(spec.project_checkpoint()) || !valid_utf8(spec.output_uri())) {
+    error = "checkpoint and output paths must be well-formed UTF-8";
+    return false;
+  }
+  if (spec.preset_id() != kExportPreset) {
+    error = "preset_id must be video-editor.export.creator.v1";
+    return false;
+  }
+  parsed.checkpoint = utf8_path(spec.project_checkpoint());
+  parsed.destination = utf8_path(spec.output_uri());
+  if (!parsed.checkpoint.is_absolute() || !parsed.destination.is_absolute()) {
+    error = "checkpoint and output must be absolute local filesystem paths";
+    return false;
+  }
+  std::error_code filesystem_error;
+  if (!std::filesystem::is_regular_file(parsed.checkpoint, filesystem_error)) {
+    error = filesystem_error
+                ? "checkpoint path could not be inspected: " + filesystem_error.message()
+                : "project_checkpoint is not a regular file";
+    return false;
+  }
+  filesystem_error.clear();
+  const bool destination_exists = std::filesystem::exists(parsed.destination, filesystem_error);
+  if (filesystem_error) {
+    error = "output path could not be inspected: " + filesystem_error.message();
+    return false;
+  }
+  if (destination_exists && std::filesystem::is_directory(parsed.destination, filesystem_error)) {
+    error = "output path refers to a directory";
+    return false;
+  }
+  if (filesystem_error) {
+    error = "output path could not be inspected: " + filesystem_error.message();
+    return false;
+  }
+  if (!parsed.options.ParseFromString(spec.options())) {
+    error = "options is not a valid ExportOptions protobuf";
+    return false;
+  }
+  if (parsed.options.GetReflection()->GetUnknownFields(parsed.options).field_count() != 0) {
+    error = "options contains unknown fields";
+    return false;
+  }
+  if (parsed.options.schema_version() != kExportSchemaVersion) {
+    error = "schema_version must be 1";
+    return false;
+  }
+  const auto platform = platform_preset_from_int(parsed.options.platform_preset());
+  if (!platform.has_value()) {
+    error = "platform_preset is not a recognized export preset";
+    return false;
+  }
+  const auto caption_mode = caption_mode_from_string(parsed.options.caption_mode());
+  if (!caption_mode.has_value()) {
+    error = "caption_mode must be none, burn_in, sidecar, or burn_in_and_sidecar";
+    return false;
+  }
+  const auto sidecar_format = sidecar_format_from_string(parsed.options.sidecar_format());
+  if (!sidecar_format.has_value()) {
+    error = "sidecar_format must be srt or vtt";
+    return false;
+  }
+  if (has_embedded_nul(parsed.options.sequence_id()) || !valid_utf8(parsed.options.sequence_id())) {
+    error = "sequence_id must be well-formed UTF-8 without NUL bytes";
+    return false;
+  }
+  const auto sequence_id = edit::EntityId::parse(parsed.options.sequence_id());
+  if (!sequence_id.has_value() || sequence_id->isNil()) {
+    error = "sequence_id must be a canonical entity identifier";
+    return false;
+  }
+  parsed.platform = *platform;
+  parsed.caption_mode = *caption_mode;
+  parsed.sidecar_format = *sidecar_format;
+  parsed.sequence_id = *sequence_id;
+  return true;
+}
+
+[[nodiscard]] bool emit_export_invalid(const protocol::JobSpec& spec, const EventSink& sink,
+                                       const std::string_view diagnostic) {
+  auto event = event_for(spec, protocol::JOB_STATE_FAILED, 0.0, "validating");
+  fail(event, "invalid-argument", 0, "The export job settings are not valid.", diagnostic);
+  return sink(event);
+}
+
+struct ExportErrorDescription {
+  std::string_view category;
+  std::string_view user_message;
+  bool retryable{false};
+};
+
+[[nodiscard]] ExportErrorDescription describe(const export_service::ExportErrorCode code) {
+  using export_service::ExportErrorCode;
+  switch (code) {
+  case ExportErrorCode::InvalidRequest:
+    return {"invalid-argument", "The export settings are not valid."};
+  case ExportErrorCode::AudioRendererRequired:
+    return {"invalid-argument", "This export needs an audio renderer."};
+  case ExportErrorCode::AudioRenderFailed:
+    return {"audio-render", "The timeline audio could not be rendered."};
+  case ExportErrorCode::DestinationExists:
+    return {"destination-exists", "The export destination already exists."};
+  case ExportErrorCode::EncoderUnavailable:
+    return {"encoder-unavailable", "The selected export encoder is not available."};
+  case ExportErrorCode::HardwareEncoderFailed:
+    return {"hardware-encoder", "Hardware encoding failed."};
+  case ExportErrorCode::Cancelled:
+    return {"cancelled", "Export was cancelled."};
+  case ExportErrorCode::RenderFailed:
+    return {"render", "A timeline frame could not be rendered."};
+  case ExportErrorCode::EncodingFailed:
+    return {"media-encode", "The export could not be encoded."};
+  case ExportErrorCode::IoFailed:
+    return {"io-write", "The export could not be written.", true};
+  case ExportErrorCode::CommitFailed:
+    return {"io-commit", "The export could not be saved.", true};
+  case ExportErrorCode::ProgressCallbackFailed:
+    return {"internal", "Export progress reporting failed."};
+  }
+  return {"internal", "Export failed unexpectedly."};
+}
+
+[[nodiscard]] bool load_checkpoint_bytes(const std::filesystem::path& path,
+                                         std::vector<std::byte>& bytes, std::string& error) {
+  std::error_code filesystem_error;
+  const auto size = std::filesystem::file_size(path, filesystem_error);
+  if (filesystem_error) {
+    error = "checkpoint could not be read: " + filesystem_error.message();
+    return false;
+  }
+  if (size == 0 || size > project_codec::kMaximumSnapshotBytes) {
+    error = "checkpoint size is outside the supported snapshot range";
+    return false;
+  }
+  std::ifstream input(path, std::ios::binary);
+  if (!input) {
+    error = "checkpoint could not be opened";
+    return false;
+  }
+  bytes.resize(static_cast<std::size_t>(size));
+  input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(size));
+  if (!input || input.gcount() != static_cast<std::streamsize>(size)) {
+    error = "checkpoint could not be read completely";
+    return false;
+  }
+  return true;
+}
+
+[[nodiscard]] bool register_export_media(const edit::Project& project,
+                                         playback::AssetRegistry& playback_registry,
+                                         audio_render::OriginalAudioRegistry& audio_registry,
+                                         std::string& error) {
+  for (const edit::Asset& asset : project.assets) {
+    if (asset.source_uri.empty()) {
+      continue;
+    }
+    if (has_embedded_nul(asset.source_uri) || !valid_utf8(asset.source_uri)) {
+      error = "asset source_uri must be well-formed UTF-8 without NUL bytes";
+      return false;
+    }
+    const std::filesystem::path source = utf8_path(asset.source_uri);
+    if (!source.is_absolute()) {
+      error = "asset source_uri must be an absolute local filesystem path";
+      return false;
+    }
+    std::error_code filesystem_error;
+    if (!std::filesystem::is_regular_file(source, filesystem_error)) {
+      error = filesystem_error ? "asset source could not be inspected: " + filesystem_error.message()
+                               : "asset source_uri is not a regular file";
+      return false;
+    }
+    if (asset.has_video || !asset.has_audio) {
+      if (!playback_registry.register_asset(
+              asset.id, playback::AssetPlaybackSources{
+                            .original = {.path = source, .video_stream_index = -1},
+                            .proxy = std::nullopt})) {
+        error = "could not register an original playback source";
+        return false;
+      }
+    }
+    if (asset.has_audio &&
+        !audio_registry.register_original(
+            asset.id, audio_render::OriginalAudioMedia{.path = source, .audio_stream_index = -1})) {
+      error = "could not register an original audio source";
+      return false;
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] bool run_export(const protocol::JobSpec& spec, const EventSink& sink) {
+  ParsedExportRequest parsed;
+  std::string validation_error;
+  if (!parse_export_request(spec, parsed, validation_error)) {
+    return emit_export_invalid(spec, sink, validation_error);
+  }
+
+  std::vector<std::byte> checkpoint_bytes;
+  if (!load_checkpoint_bytes(parsed.checkpoint, checkpoint_bytes, validation_error)) {
+    return emit_export_invalid(spec, sink, validation_error);
+  }
+  auto decoded = project_codec::deserialize_project(std::span<const std::byte>(checkpoint_bytes));
+  if (!decoded) {
+    return emit_export_invalid(spec, sink, decoded.error().message);
+  }
+
+  edit::TimelineEditor editor(std::move(decoded).value());
+  auto snapshot_result = editor.snapshot(parsed.sequence_id, editor.revision());
+  if (!snapshot_result) {
+    return emit_export_invalid(spec, sink, snapshot_result.error().message);
+  }
+  auto snapshot = std::move(snapshot_result).value();
+
+  auto playback_registry = std::make_shared<playback::AssetRegistry>();
+  auto audio_registry = std::make_shared<audio_render::OriginalAudioRegistry>();
+  if (!register_export_media(snapshot.project(), *playback_registry, *audio_registry,
+                             validation_error)) {
+    return emit_export_invalid(spec, sink, validation_error);
+  }
+
+  const auto video_preset = export_service::reference_video_preset_for(parsed.platform);
+  if (!video_preset.has_value()) {
+    return emit_export_invalid(spec, sink, "platform_preset has no FOSS export mapping");
+  }
+
+  class EpochSyncFrameProvider final : public render::FrameProvider {
+  public:
+    explicit EpochSyncFrameProvider(std::shared_ptr<playback::FfmpegFrameProvider> provider)
+        : provider_(std::move(provider)) {}
+
+    render::RenderResult<std::shared_ptr<const render::CpuFrame>>
+    request(const render::AssetFrameRequest& request) override {
+      provider_->begin_epoch(request.request_epoch);
+      return provider_->request(request);
+    }
+
+  private:
+    std::shared_ptr<playback::FfmpegFrameProvider> provider_;
+  };
+
+  auto frame_provider = std::make_shared<playback::FfmpegFrameProvider>(playback_registry);
+  auto synchronized_provider = std::make_shared<EpochSyncFrameProvider>(frame_provider);
+  auto renderer = std::make_shared<render::CpuRenderer>(synchronized_provider);
+  auto audio_renderer = std::make_shared<audio_render::TimelineAudioRenderer>(audio_registry);
+  const auto captions = snapshot.sequence().captions;
+
+  std::stop_source internal_stop;
+  double last_progress = 0.0;
+  bool sink_available = true;
+  const auto progress = [&](const export_service::ExportProgress& update) {
+    if (!sink_available) {
+      return;
+    }
+    if (update.restarted_after_hardware_fallback) {
+      last_progress = 0.0;
+      auto event = event_for(spec, protocol::JOB_STATE_RUNNING, 0.0, "hardware-fallback");
+      auto* metadata = event.mutable_event()->mutable_metadata();
+      (*metadata)["restarted_after_hardware_fallback"] = "true";
+      sink_available = sink(event);
+      if (!sink_available) {
+        internal_stop.request_stop();
+      }
+      return;
+    }
+    const double next = std::max(last_progress, std::clamp(update.fraction, 0.0, 1.0));
+    auto event = event_for(spec, protocol::JOB_STATE_RUNNING, next, "exporting");
+    sink_available = sink(event);
+    last_progress = next;
+    if (!sink_available) {
+      internal_stop.request_stop();
+    }
+  };
+
+  export_service::ExportRequest request{
+      .snapshot = std::move(snapshot),
+      .renderer = std::move(renderer),
+      .audio_renderer = std::move(audio_renderer),
+      .destination = parsed.destination,
+      .preset = *video_preset,
+      .overwrite_existing = parsed.options.overwrite_existing(),
+      .include_audio = parsed.options.include_audio(),
+      .prefer_hardware_encoder = parsed.options.prefer_hardware(),
+      .cancellation = internal_stop.get_token(),
+      .progress = progress,
+      .platform_preset = parsed.platform,
+      .caption_mode = parsed.caption_mode,
+      .sidecar_format = parsed.sidecar_format,
+      .override_width = parsed.options.override_width(),
+      .override_height = parsed.options.override_height(),
+      .override_frame_rate_num = parsed.options.override_frame_rate_num(),
+      .override_frame_rate_den = parsed.options.override_frame_rate_den(),
+      .override_audio_bitrate = parsed.options.override_audio_bitrate(),
+      .override_video_bitrate = parsed.options.override_video_bitrate(),
+      .video_quality = parsed.options.has_video_quality()
+                           ? std::optional<int>{parsed.options.video_quality()}
+                           : std::nullopt,
+      .captions = captions};
+
+  const auto exported = export_service::export_video(request);
+  if (!sink_available) {
+    return false;
+  }
+  if (!exported) {
+    const ExportErrorDescription description = describe(exported.error().code);
+    auto event = event_for(spec, protocol::JOB_STATE_FAILED, last_progress, "failed");
+    fail(event, description.category, 0, description.user_message, exported.error().message,
+         description.retryable);
+    if (exported.error().code == export_service::ExportErrorCode::Cancelled) {
+      event.mutable_event()->set_state(protocol::JOB_STATE_CANCELLED);
+      event.mutable_event()->set_phase("cancelled");
+    }
+    return sink(event);
+  }
+
+  const export_service::ExportResult& result = exported.value();
+  auto event = event_for(spec, protocol::JOB_STATE_SUCCEEDED, 1.0, "complete");
+  protocol::JobEvent* job_event = event.mutable_event();
+  job_event->set_result_uri(utf8_string(result.destination));
+  auto* metadata = job_event->mutable_metadata();
+  (*metadata)["contract_version"] = "1";
+  (*metadata)["preset_id"] = std::string(kExportPreset);
+  (*metadata)["frame_count"] = std::to_string(result.frame_count);
+  (*metadata)["audio_sample_count"] = std::to_string(result.audio_sample_count);
+  (*metadata)["video_encoder"] = result.video_encoder;
+  (*metadata)["hardware_encoder_used"] = result.hardware_encoder_used ? "true" : "false";
+  return sink(event);
+}
+
 } // namespace
 
 bool dispatch_job(const protocol::JobSpec& spec, const EventSink& sink) {
@@ -527,9 +935,13 @@ bool dispatch_job(const protocol::JobSpec& spec, const EventSink& sink,
   if (spec.kind() == protocol::JOB_KIND_TRANSCRIBE) {
     return run_transcribe(spec, sink, dependencies);
   }
+  if (spec.kind() == protocol::JOB_KIND_EXPORT) {
+    return run_export(spec, sink);
+  }
   auto event = event_for(spec, protocol::JOB_STATE_FAILED, 0.0, "unsupported");
   fail(event, "unsupported-job", 0, "This worker does not implement that job yet.",
-       "only JOB_KIND_PROBE, JOB_KIND_PROXY, and JOB_KIND_TRANSCRIBE are enabled in this worker");
+       "only JOB_KIND_PROBE, JOB_KIND_PROXY, JOB_KIND_TRANSCRIBE, and JOB_KIND_EXPORT are enabled "
+       "in this worker");
   return sink(event);
 }
 

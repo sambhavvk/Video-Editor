@@ -30,6 +30,11 @@ Thumbs.db
 Testing/
 test-results/
 coverage/
+__pycache__/
+
+# Synthetic media corpus (generated locally / in CI; do not commit binaries)
+/tests/fixtures/corpus/generated/*
+!/tests/fixtures/corpus/generated/.gitkeep
 
 priority.md
 

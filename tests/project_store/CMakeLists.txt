@@ -13,3 +13,5 @@ target_link_libraries(video_editor_project_store_tests
 
 include(GoogleTest)
 gtest_discover_tests(video_editor_project_store_tests)
+
+target_sources(video_editor_project_store_tests PRIVATE checkpoint_fault_test.cpp)

@@ -71,3 +71,21 @@ endif()
 if(TARGET video_editor_app_controller AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/app/CMakeLists.txt")
   add_subdirectory(app)
 endif()
+
+find_program(VIDEO_EDITOR_PYTHON3 NAMES python3 python)
+if(VIDEO_EDITOR_PYTHON3)
+  add_test(
+    NAME quality.verify_corpus_scaffold
+    COMMAND ${VIDEO_EDITOR_PYTHON3} "${CMAKE_SOURCE_DIR}/tools/quality/verify_corpus.py"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+  add_custom_target(
+    verify-corpus
+    COMMAND ${VIDEO_EDITOR_PYTHON3} "${CMAKE_SOURCE_DIR}/tools/quality/verify_corpus.py"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    COMMENT "Verify the checked-in corpus scaffold")
+  add_custom_target(
+    generate-corpus
+    COMMAND ${VIDEO_EDITOR_PYTHON3} "${CMAKE_SOURCE_DIR}/tools/quality/generate_corpus.py"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    COMMENT "Generate the synthetic media compatibility corpus")
+endif()

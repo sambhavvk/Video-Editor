@@ -6,14 +6,13 @@
 #include "video_editor/audio_render/silence_detector.h"
 #include "video_editor/desktop_ui/ui_types.hpp"
 #include "video_editor/edit_model/edit_model.h"
+#include "video_editor/job_service/protocol.h"
 
-#include <QByteArray>
 #include <QElapsedTimer>
 #include <QFuture>
 #include <QFutureWatcher>
 #include <QImage>
 #include <QObject>
-#include <QProcess>
 #include <QString>
 #include <QStringList>
 #include <QTimer>
@@ -35,7 +34,6 @@ class QEvent;
 class QFile;
 class QNetworkAccessManager;
 class QNetworkReply;
-class QProcess;
 class QVariant;
 
 namespace video_editor::desktop_ui {
@@ -73,6 +71,8 @@ class AsyncRealtimeAudioPlayback;
 
 namespace video_editor::app {
 
+class WorkerHostSession;
+
 struct AudioDevicePollDecision final {
   bool selected_missing{false};
   bool default_missing{false};
@@ -91,9 +91,6 @@ evaluateAudioDevicePoll(std::span<const audio::AudioDeviceInfo> previous,
 mapTranscriptionWordsToTimeline(std::span<const edit::CaptionWord> source_words,
                                 edit::TimeRange source_range, edit::TimeRange timeline_range,
                                 edit::Rate playback_rate, bool reversed);
-
-[[nodiscard]] QString resolveTranscriptionWorkerPath(const QString& application_directory,
-                                                     const QString& configured_path = {});
 
 // Validates both a known Content-Length and the bytes already staged for the
 // pinned model. A negative content length means that the server omitted it.
@@ -194,8 +191,6 @@ private slots:
   void applyCaptionReview();
   void discardCaptionReview();
   void captionStyleEdited(const QString& captionId, const desktop_ui::CaptionStyleView& style);
-  void transcriptionReadyRead();
-  void transcriptionProcessFinished(int exitCode, QProcess::ExitStatus status);
   void updateSelectedClipProperty(const QString& parameterId, const QVariant& value);
   void toggleSelectedClipKeyframe(const QString& parameterId);
   void addEffect(const QString& effectId);
@@ -323,6 +318,9 @@ private:
   void selectMedia(const QString& mediaId);
   void saveAssetMetadata(const desktop_ui::AssetMetadataView& metadata);
   void showMediaCacheBrowser();
+  void finishProxyJob(const std::string& asset_id, const ProxyOutcome& outcome);
+  void finishVideoExport(const VideoExportOutcome& outcome);
+  void clearExportCheckpoint();
   void refreshCacheInventory();
   void handleCacheBudgetChanged(qint64 budgetBytes);
   void removeCacheEntry(const QString& assetId, const QString& kindText);
@@ -343,7 +341,8 @@ private:
   void refreshTranscriptionState();
   [[nodiscard]] bool selectedAudioInput(std::filesystem::path& path, edit::TimeRange& range,
                                         edit::EntityId& clipId) const;
-  void handleTranscriptionEvent(const QByteArray& frame);
+  void handleTranscriptionEvent(const jobs::v1::WorkerEvent& event);
+  void finishTranscriptionSession(bool abnormal);
   void launchCaptionReviewAnalysis();
   void captionAnalysisFinished();
   void modelVerificationFinished();
@@ -418,8 +417,12 @@ private:
   std::stop_source cache_job_stop_source_;
   QFuture<CacheJobOutcome> cache_job_future_;
   std::uint64_t cache_job_generation_{0};
-  std::unordered_map<std::string, std::shared_ptr<std::stop_source>> proxy_jobs_;
-  std::vector<QFuture<ProxyOutcome>> proxy_futures_;
+  struct ProxyJob {
+    WorkerHostSession* session{nullptr};
+    std::filesystem::path destination;
+    bool cancel_requested{false};
+  };
+  std::unordered_map<std::string, ProxyJob> proxy_jobs_;
   std::vector<std::size_t> visible_caption_indices_;
   QString caption_search_;
   // Timeline selection is deliberately transient. It is never stored in a
@@ -451,8 +454,10 @@ private:
   AudioControlIntent audio_control_intent_{AudioControlIntent::None};
   std::uint64_t audio_command_version_{0};
   std::uint64_t last_audio_xrun_count_{0};
-  std::stop_source export_stop_source_;
-  QFuture<VideoExportOutcome> export_future_;
+  WorkerHostSession* export_session_{nullptr};
+  std::filesystem::path export_checkpoint_path_;
+  std::filesystem::path export_destination_;
+  bool export_cancel_requested_{false};
   struct NormalizationReview {
     bool valid{false};
     edit::Revision revision{};
@@ -480,14 +485,12 @@ private:
   std::uint64_t model_verification_generation_{0};
   QString model_download_staging_;
   QString model_download_cache_root_;
-  QProcess* transcription_process_{nullptr};
+  WorkerHostSession* transcription_session_{nullptr};
   QFile* model_download_file_{nullptr};
   bool model_download_write_failed_{false};
   std::uintmax_t model_download_bytes_written_{0};
   bool model_download_size_rejected_{false};
   bool model_download_user_cancelled_{false};
-  QByteArray transcription_output_buffer_;
-  QByteArray transcription_request_frame_;
   QString transcription_job_id_;
   bool transcription_terminal_{false};
   bool transcription_succeeded_{false};

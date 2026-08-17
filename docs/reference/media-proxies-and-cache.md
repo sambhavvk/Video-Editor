@@ -66,8 +66,9 @@ or failure removes incomplete temporary output and does not commit an invalid pr
 Successful completion installs both outputs, verifies the result, updates the session's asset
 manifest, registers the proxy for playback, and invalidates existing decoded state.
 
-Desktop generation currently runs in-process with QtConcurrent. The worker executable also accepts
-`JOB_KIND_PROXY` with unchanged V1 Protobuf fields and two preset IDs:
+Desktop generation launches a fresh `video_editor_worker_host` with `JOB_KIND_PROXY`. Kill is the
+cancellation and crash boundary; a dead worker does not commit a proxy/map pair. The worker
+executable accepts unchanged V1 Protobuf fields and two preset IDs:
 
 - `video-editor.proxy.prores-half.v1` requests the default half-resolution ProRes profile and allows
   the FFV1 fallback;
@@ -77,8 +78,8 @@ A proxy worker request requires exactly one absolute input and one absolute outp
 to `<output>.vepts`. Validation fails closed and events advance monotonically through the versioned
 accepted/running/terminal states. The current stdin/stdout loop is synchronous, so it cannot consume
 a `CancelJob` while transcode work is running and reports idle cancellation as unsupported. The
-desktop is not routed through this worker or through the planned named-pipe/Unix-socket supervisor,
-so restartable isolation and worker-death recovery remain incomplete.
+desktop uses process kill rather than in-flight `CancelJob` for that reason. Named-pipe/Unix-socket
+supervision is not connected. `.vepts`-driven VFR seek remains a later playback gate.
 
 ## Playback selection
 
@@ -146,9 +147,9 @@ thumbnail/waveform jobs and is reported to the user.
 
 Current limitations:
 
-- proxy generation still runs in-process; restartable worker isolation is a later gate;
 - playback does not yet consume `.vepts` for every VFR seek decision;
-- unplugged-media and disk-full behavior has not passed the required physical fault matrix.
+- unplugged-media behavior has not passed a physical-device lab matrix. Automated cache Full and
+  save/checkpoint fault tests exist.
 
 Deleting the cache should never destroy project edits or original media, but users should close the
 application before manual cleanup because an active proxy or preview job may be using it.

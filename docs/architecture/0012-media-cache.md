@@ -115,5 +115,5 @@ produces the `AssetRecord` and fingerprint used as the cache key).
 
 ## Open items
 
-- Physical unplug/disk-full fault-injection matrix (priority 7).
-- Restartable proxy worker IPC (priority 7); generation remains in-process.
+- Physical unplug matrix (priority 7).
+- `.vepts`-driven VFR seek in playback.

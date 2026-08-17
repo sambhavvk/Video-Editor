@@ -20,12 +20,14 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QSettings>
 #include <QSplitter>
 #include <QStatusBar>
 #include <QStyle>
+#include <QTabBar>
 #include <QToolBar>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -40,12 +42,57 @@ constexpr int kUiStateVersion = 1;
 constexpr auto kOrganization = "VideoEditor";
 constexpr auto kApplication = "VideoEditor";
 
+QString strippedActionText(const QAction* action) {
+  return action == nullptr ? QString{} : action->text().remove(u'&').trimmed();
+}
+
 QToolButton* makeActionButton(QAction* action, QWidget* parent) {
   auto* button = new QToolButton(parent);
   button->setDefaultAction(action);
   button->setAutoRaise(true);
   button->setToolButtonStyle(Qt::ToolButtonIconOnly);
+  if (action != nullptr) {
+    const auto name = strippedActionText(action);
+    if (!name.isEmpty()) {
+      button->setAccessibleName(name);
+    }
+    if (!action->toolTip().isEmpty()) {
+      button->setAccessibleDescription(action->toolTip());
+    }
+    const auto commandId = action->property("commandId").toString();
+    if (!commandId.isEmpty()) {
+      button->setObjectName(QStringLiteral("button.%1").arg(commandId));
+    }
+  }
   return button;
+}
+
+void labelToolButtonsFromActions(QWidget* root) {
+  for (auto* button : root->findChildren<QToolButton*>()) {
+    if (auto* action = button->defaultAction()) {
+      if (button->accessibleName().trimmed().isEmpty()) {
+        const auto name = strippedActionText(action);
+        if (!name.isEmpty()) {
+          button->setAccessibleName(name);
+        }
+      }
+      if (button->accessibleDescription().trimmed().isEmpty() && !action->toolTip().isEmpty()) {
+        button->setAccessibleDescription(action->toolTip());
+      }
+      if (button->objectName().isEmpty()) {
+        const auto commandId = action->property("commandId").toString();
+        if (!commandId.isEmpty()) {
+          button->setObjectName(QStringLiteral("button.%1").arg(commandId));
+        }
+      }
+      continue;
+    }
+    if (button->accessibleName().trimmed().isEmpty() &&
+        qobject_cast<QToolBar*>(button->parentWidget()) != nullptr &&
+        button->text().trimmed().isEmpty()) {
+      button->setAccessibleName(QObject::tr("More toolbar actions"));
+    }
+  }
 }
 
 QDockWidget* makeDock(const QString& objectName, const QString& title, QWidget* panel,
@@ -101,6 +148,7 @@ EditorWindow::EditorWindow(QSettings* settings, QWidget* parent) : QMainWindow(p
 
   initialized_ = true;
   restoreUiState();
+  labelInteractiveChrome();
   setProjectDisplayName(project_display_name_);
 }
 
@@ -173,6 +221,7 @@ void EditorWindow::setWorkspace(Workspace workspace) {
   }
   updateWorkspaceActions();
   updateWorkspaceLabel();
+  labelInteractiveChrome();
   emit workspaceChanged(workspace_);
 }
 
@@ -274,6 +323,7 @@ void EditorWindow::createCentralArea() {
 
   auto* viewerSplitter = new QSplitter(Qt::Horizontal, viewerArea);
   viewerSplitter->setObjectName(QStringLiteral("monitorSplitter"));
+  viewerSplitter->setAccessibleName(tr("Source and program monitors"));
   viewerSplitter->setChildrenCollapsible(false);
 
   source_container_ = new QFrame(viewerSplitter);
@@ -555,8 +605,10 @@ void EditorWindow::createActions() {
 }
 
 void EditorWindow::createMenus() {
+  menuBar()->setAccessibleName(tr("Application menu"));
   auto* file = menuBar()->addMenu(tr("&File"));
   file->setObjectName(QStringLiteral("fileMenu"));
+  file->setAccessibleName(tr("File"));
   file->addAction(action(QStringLiteral("newProject")));
   file->addAction(action(QStringLiteral("openProject")));
   file->addSeparator();
@@ -571,6 +623,7 @@ void EditorWindow::createMenus() {
 
   auto* edit = menuBar()->addMenu(tr("&Edit"));
   edit->setObjectName(QStringLiteral("editMenu"));
+  edit->setAccessibleName(tr("Edit"));
   edit->addAction(action(QStringLiteral("undo")));
   edit->addAction(action(QStringLiteral("redo")));
   edit->addSeparator();
@@ -582,6 +635,7 @@ void EditorWindow::createMenus() {
 
   auto* timelineMenu = menuBar()->addMenu(tr("&Timeline"));
   timelineMenu->setObjectName(QStringLiteral("timelineMenu"));
+  timelineMenu->setAccessibleName(tr("Timeline"));
   timelineMenu->addAction(action(QStringLiteral("previousFrame")));
   timelineMenu->addAction(action(QStringLiteral("reverse")));
   timelineMenu->addAction(action(QStringLiteral("stop")));
@@ -600,7 +654,10 @@ void EditorWindow::createMenus() {
 
   auto* view = menuBar()->addMenu(tr("&View"));
   view->setObjectName(QStringLiteral("viewMenu"));
+  view->setAccessibleName(tr("View"));
   auto* workspaces = view->addMenu(tr("Workspaces"));
+  workspaces->setObjectName(QStringLiteral("workspacesMenu"));
+  workspaces->setAccessibleName(tr("Workspaces"));
   for (const auto workspace :
        {Workspace::Import, Workspace::Edit, Workspace::AudioCaptions, Workspace::Deliver}) {
     workspaces->addAction(workspace_actions_.value(workspace));
@@ -610,6 +667,8 @@ void EditorWindow::createMenus() {
   view->addAction(action(QStringLiteral("precisionTrim")));
   view->addAction(action(QStringLiteral("safeGuides")));
   auto* panels = view->addMenu(tr("Panels"));
+  panels->setObjectName(QStringLiteral("panelsMenu"));
+  panels->setAccessibleName(tr("Panels"));
   for (auto* dock :
        {media_dock_, inspector_dock_, effects_dock_, mixer_dock_, captions_dock_, deliver_dock_}) {
     panels->addAction(dock->toggleViewAction());
@@ -617,6 +676,7 @@ void EditorWindow::createMenus() {
 
   auto* help = menuBar()->addMenu(tr("&Help"));
   help->setObjectName(QStringLiteral("helpMenu"));
+  help->setAccessibleName(tr("Help"));
   auto* gettingStarted = help->addAction(tr("Getting Started"));
   gettingStarted->setObjectName(QStringLiteral("action.gettingStarted"));
   connect(gettingStarted, &QAction::triggered, this, [this] {
@@ -768,6 +828,25 @@ void EditorWindow::connectControllerSurface() {
   });
 }
 
+void EditorWindow::labelInteractiveChrome() {
+  labelToolButtonsFromActions(this);
+  int tabIndex = 0;
+  for (auto* tabBar : findChildren<QTabBar*>()) {
+    if (tabBar->objectName().startsWith(QLatin1String("qt_"))) {
+      continue;
+    }
+    if (tabBar->objectName().isEmpty()) {
+      tabBar->setObjectName(QStringLiteral("editorPanelTabBar.%1").arg(tabIndex));
+    }
+    if (tabBar->accessibleName().trimmed().isEmpty()) {
+      tabBar->setAccessibleName(tr("Editor panel tabs"));
+      tabBar->setAccessibleDescription(
+          tr("Switch between inspector, effects, captions, and deliver panels"));
+    }
+    ++tabIndex;
+  }
+}
+
 void EditorWindow::applyDefaultLayout(Workspace workspace) {
   for (auto* dock :
        {media_dock_, inspector_dock_, effects_dock_, mixer_dock_, captions_dock_, deliver_dock_}) {
@@ -812,6 +891,7 @@ void EditorWindow::applyDefaultLayout(Workspace workspace) {
     resizeDocks({deliver_dock_}, {380}, Qt::Horizontal);
     break;
   }
+  labelInteractiveChrome();
 }
 
 void EditorWindow::updateWorkspaceActions() {

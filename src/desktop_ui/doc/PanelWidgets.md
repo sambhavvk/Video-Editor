@@ -77,6 +77,14 @@ used/budget bytes and the Name/Kind/Size/Last accessed table. Budget changes emi
 Remove selected, remove asset, evict unused, and clear-all (after confirmation) emit intent only;
 the controller mutates `CacheStore`. Clearing never claims to delete projects or originals.
 
+## Accessibility
+
+Primary interactive controls set `accessibleName` (and often `accessibleDescription`) with stable
+user-facing strings: media search is `Search media`, mixer faders are `Gain for <track>`, caption
+add is `Add a caption at the playhead`, and deliver export is `Export video master`. Analyze/Apply
+loudness buttons are `Analyze loudness` and `Apply loudness normalization`. Qt-internal clear and
+spin arrows are unnamed by design.
+
 ## Ownership and thread safety
 
 All widgets are QObject-parent-owned and GUI-thread only. View objects and strings are copied. They

@@ -17,6 +17,12 @@ target_link_libraries(
     video_editor::media_codec
     video_editor::proxy_service
     video_editor::transcription_service
+    VideoEditor::ExportService
+    video_editor::playback
+    video_editor::render_engine
+    video_editor::audio_render
+    video_editor::project_codec
+    VideoEditor::EditModel
     video_editor::project_warnings
   PUBLIC
     video_editor::job_service

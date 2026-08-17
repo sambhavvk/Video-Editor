@@ -75,6 +75,26 @@ message TranscriptionResult {
   int64 source_duration_centiseconds = 12;
 }
 
+// Typed payload carried in JobSpec.options for JOB_KIND_EXPORT. Unknown fields
+// are rejected by the worker until a schema version is explicitly supported.
+message ExportOptions {
+  uint32 schema_version = 1;
+  int32 platform_preset = 2;
+  string caption_mode = 3;
+  string sidecar_format = 4;
+  uint32 override_width = 5;
+  uint32 override_height = 6;
+  uint32 override_frame_rate_num = 7;
+  uint32 override_frame_rate_den = 8;
+  uint32 override_audio_bitrate = 9;
+  uint64 override_video_bitrate = 10;
+  optional int32 video_quality = 11;
+  bool prefer_hardware = 12;
+  bool include_audio = 13;
+  bool overwrite_existing = 14;
+  string sequence_id = 15;
+}
+
 message StartJob { JobSpec spec = 1; }
 message CancelJob { string job_id = 1; }
 message Shutdown { bool finish_active_jobs = 1; }

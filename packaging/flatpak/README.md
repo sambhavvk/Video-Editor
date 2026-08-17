@@ -2,6 +2,27 @@
 
 # Flatpak packaging
 
+Flatpak is the **Linux-first public beta packaging target**. This directory is
+a development skeleton, not a store-ready submission. Immutable checksummed
+release archives, a reviewed LGPL dependency lock, and a stable Flathub /
+reverse-DNS identity remain blockers. Do not invent an owned homepage URL; the
+AppStream file omits one until the project actually has a public page.
+
+Validate the skeleton (no network permission, metadata files, source lock):
+
+```sh
+python3 tools/quality/validate_flatpak.py
+```
+
+That command is allowed to warn about `releaseBlocking` and unpinned sources.
+`--store` promotes those warnings to failures. If `flatpak-builder-lint` is
+installed it is run and its known identity/homepage findings stay warnings for
+the Linux-first check:
+
+```sh
+flatpak-builder-lint manifest packaging/flatpak/org.videoeditor.VideoEditor.yml
+```
+
 `org.videoeditor.VideoEditor.yml` is a development packaging skeleton for the
 current KDE 6.11 runtime branch. It intentionally has no network permission and
 uses Wayland with X11 fallback, PulseAudio, DRI, creator folders, and common
