@@ -20,6 +20,7 @@ class QGroupBox;
 class QLabel;
 class QLineEdit;
 class QListWidget;
+class QPlainTextEdit;
 class QProgressBar;
 class QPushButton;
 class QSlider;
@@ -48,6 +49,7 @@ signals:
   void relinkRequested(const QString& mediaId);
   void proxyRequested(const QString& mediaId);
   void mediaActivated(const QString& mediaId);
+  void mediaSelectionChanged(const QString& mediaId);
   void searchChanged(const QString& query);
 
 private slots:
@@ -56,6 +58,8 @@ private slots:
 
 private:
   void rebuildTable();
+  void emitCurrentMediaSelection();
+  [[nodiscard]] QString mediaIdAtRow(int row) const;
 
   QLineEdit* search_{nullptr};
   QStackedWidget* content_{nullptr};
@@ -69,6 +73,9 @@ class InspectorWidget final : public QWidget {
 public:
   explicit InspectorWidget(QWidget* parent = nullptr);
 
+  void setAssetMetadata(const AssetMetadataView& metadata);
+  void clearAssetMetadata();
+
 public slots:
   void setSelectionName(const QString& name);
   void setClipCapabilities(bool visual, bool audio);
@@ -80,6 +87,7 @@ public slots:
   void clearSelection();
 
 signals:
+  void assetMetadataEdited(const AssetMetadataView& metadata);
   void parameterEdited(const QString& parameterId, const QVariant& value);
   void keyframeToggleRequested(const QString& parameterId);
   void effectParameterEdited(const QString& effectId, const QString& parameterId,
@@ -103,8 +111,15 @@ private:
   void selectEffectParameter(int index);
   void selectKeyframe(int index);
   void refreshKeyframeEditor();
+  void publishAssetMetadata();
 
   QLabel* selection_name_{nullptr};
+  QGroupBox* asset_group_{nullptr};
+  QLineEdit* asset_title_{nullptr};
+  QLineEdit* asset_tags_{nullptr};
+  QPlainTextEdit* asset_notes_{nullptr};
+  QSpinBox* asset_rating_{nullptr};
+  AssetMetadataView asset_metadata_{};
   QStackedWidget* content_{nullptr};
   QFormLayout* transform_form_{nullptr};
   QWidget* visual_controls_{nullptr};

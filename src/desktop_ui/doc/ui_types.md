@@ -26,7 +26,7 @@ the desktop library.
 
 | Type | Significant fields | Description |
 | --- | --- | --- |
-| `MediaItemView` | identity/name/path/duration/format plus offline/proxy flags | One searchable media-bin row. |
+| `MediaItemView` | identity/name/path/duration/format, optional metadata title/thumbnail, offline/changed/proxy flags | One searchable media-bin row. |
 | `TimelineTrackView` | identity/name/kind plus mute/solo/lock/visible/targeted | One painted track header and its output/editor state. Visibility and targeting default true. |
 | `TimelineMarkerView` | identity/name/start/duration/color/selected | Point or ranged marker on the ruler. |
 | `TimelineGapView` | revision-local key, track identity/index, start/duration, selected | Derived empty timeline range; the key must be re-resolved by the controller before editing. |
@@ -34,7 +34,11 @@ the desktop library.
 | `TimelineSnapResult` | resolved time, kind, label | Resolver response. `snapped()` is true for every kind except `None`. |
 | `AudioTrackView` | stable ID, display name, mute/solo, gain/pan, meter state, current typed effect values | One mixer strip's authoritative presentation state. Nested effects preserve stable IDs and current parameters across rebuilds. |
 | `AudioTrackMeterView` | stable track ID, stereo peak/RMS, active/stale flags | One audio-master-position meter update; identity prevents reorder/removal misrouting. |
-| `TimelineClipView` | identity/name, track/start/duration, color, selection/offline/proxy flags | One virtualized painted clip. |
+| `WaveformBucketView` | minimum/maximum amplitude | One painted waveform column; skip when `minimum > maximum`. |
+| `TimelineClipView` | identity/name, track/start/duration, color, selection/offline/proxy flags, optional waveform buckets | One virtualized painted clip. |
+| `AssetMetadataView` | asset identity, title, tags, notes, rating 0–5 | Inspector Asset-group presentation and edit payload. |
+| `CacheEntryView` | asset identity/name, kind text, bytes, last-access UTC ms | One media-cache table row. |
+| `CacheInventoryView` | total/budget bytes plus entries | Complete cache-browser inventory. |
 | `EffectView` | identity/name/category/accelerated | One effects-browser row. |
 | `KeyframeView` | identity, clip-local time/value, interpolation, incoming/outgoing offsets | One editable curve sample. |
 | `EffectParameterView` | effect/parameter identity and names, base value, clip duration, keyframes | Complete Inspector view for one effect parameter. |

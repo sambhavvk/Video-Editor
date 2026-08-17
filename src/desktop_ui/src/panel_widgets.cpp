@@ -16,13 +16,17 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMenu>
+#include <QPixmap>
+#include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSize>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QSpinBox>
@@ -37,6 +41,24 @@
 
 namespace video_editor::desktop_ui {
 namespace {
+
+constexpr int kMediaIconColumn = 0;
+constexpr int kMediaNameColumn = 1;
+constexpr int kMediaFormatColumn = 3;
+constexpr int kMediaStatusColumn = 4;
+
+QStringList splitCommaSeparatedTags(const QString& text) {
+  const auto parts = text.split(QLatin1Char(','), Qt::SkipEmptyParts);
+  QStringList tags;
+  tags.reserve(parts.size());
+  for (const auto& part : parts) {
+    const auto trimmed = part.trimmed();
+    if (!trimmed.isEmpty()) {
+      tags.push_back(trimmed);
+    }
+  }
+  return tags;
+}
 
 QLabel* makeMutedLabel(const QString& text, QWidget* parent) {
   auto* label = new QLabel(text, parent);
@@ -132,12 +154,17 @@ MediaBinWidget::MediaBinWidget(QWidget* parent) : QWidget(parent) {
   table_ = new QTableWidget(content_);
   table_->setObjectName(QStringLiteral("mediaTable"));
   table_->setAccessibleName(tr("Imported media"));
-  table_->setColumnCount(4);
-  table_->setHorizontalHeaderLabels({tr("Name"), tr("Duration"), tr("Format"), tr("Status")});
-  table_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
-  table_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+  table_->setColumnCount(5);
+  table_->setHorizontalHeaderLabels(
+      {QString{}, tr("Name"), tr("Duration"), tr("Format"), tr("Status")});
+  table_->setIconSize(QSize{40, 40});
+  table_->verticalHeader()->setDefaultSectionSize(48);
+  table_->horizontalHeader()->setSectionResizeMode(kMediaIconColumn, QHeaderView::Fixed);
+  table_->setColumnWidth(kMediaIconColumn, 48);
+  table_->horizontalHeader()->setSectionResizeMode(kMediaNameColumn, QHeaderView::Stretch);
   table_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
-  table_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+  table_->horizontalHeader()->setSectionResizeMode(kMediaFormatColumn, QHeaderView::ResizeToContents);
+  table_->horizontalHeader()->setSectionResizeMode(kMediaStatusColumn, QHeaderView::ResizeToContents);
   table_->verticalHeader()->hide();
   table_->setSelectionBehavior(QAbstractItemView::SelectRows);
   table_->setSelectionMode(QAbstractItemView::ExtendedSelection);
@@ -152,18 +179,22 @@ MediaBinWidget::MediaBinWidget(QWidget* parent) : QWidget(parent) {
   connect(emptyImport, &QPushButton::clicked, this, &MediaBinWidget::importRequested);
   connect(search_, &QLineEdit::textChanged, this, &MediaBinWidget::applyFilter);
   connect(table_, &QTableWidget::itemDoubleClicked, this, [this] { activateCurrent(); });
+  connect(table_, &QTableWidget::itemSelectionChanged, this,
+          &MediaBinWidget::emitCurrentMediaSelection);
+  connect(table_, &QTableWidget::currentCellChanged, this,
+          [this](int, int, int, int) { emitCurrentMediaSelection(); });
   connect(table_, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& point) {
     const auto row = table_->rowAt(point.y());
-    if (row < 0 || table_->item(row, 0) == nullptr) {
+    const auto id = mediaIdAtRow(row);
+    if (id.isEmpty()) {
       return;
     }
-    const auto id = table_->item(row, 0)->data(Qt::UserRole).toString();
-    QMenu menu(this);
-    auto* relink = menu.addAction(tr("Relink media…"));
-    relink->setEnabled(table_->item(row, 3)->text() == tr("Offline"));
     const auto item =
         std::find_if(items_.cbegin(), items_.cend(),
                      [&id](const MediaItemView& candidate) { return candidate.id == id; });
+    QMenu menu(this);
+    auto* relink = menu.addAction(tr("Relink media…"));
+    relink->setEnabled(item != items_.cend() && (item->offline || item->contentChanged));
     QAction* proxy = nullptr;
     if (item != items_.cend() && !item->offline && !item->proxyAvailable) {
       proxy = menu.addAction(item->proxyGenerating ? tr("Cancel proxy generation")
@@ -186,8 +217,8 @@ void MediaBinWidget::setItems(const QVector<MediaItemView>& items) {
 
 void MediaBinWidget::applyFilter(const QString& query) {
   for (int row = 0; row < table_->rowCount(); ++row) {
-    const auto* name = table_->item(row, 0);
-    const auto* format = table_->item(row, 2);
+    const auto* name = table_->item(row, kMediaNameColumn);
+    const auto* format = table_->item(row, kMediaFormatColumn);
     const auto matches = query.trimmed().isEmpty() ||
                          (name != nullptr && name->text().contains(query, Qt::CaseInsensitive)) ||
                          (format != nullptr && format->text().contains(query, Qt::CaseInsensitive));
@@ -197,10 +228,30 @@ void MediaBinWidget::applyFilter(const QString& query) {
 }
 
 void MediaBinWidget::activateCurrent() {
-  const auto row = table_->currentRow();
-  if (row >= 0 && table_->item(row, 0) != nullptr) {
-    emit mediaActivated(table_->item(row, 0)->data(Qt::UserRole).toString());
+  const auto id = mediaIdAtRow(table_->currentRow());
+  if (!id.isEmpty()) {
+    emit mediaActivated(id);
   }
+}
+
+void MediaBinWidget::emitCurrentMediaSelection() {
+  emit mediaSelectionChanged(mediaIdAtRow(table_->currentRow()));
+}
+
+QString MediaBinWidget::mediaIdAtRow(const int row) const {
+  if (table_ == nullptr || row < 0) {
+    return {};
+  }
+  if (const auto* name = table_->item(row, kMediaNameColumn)) {
+    const auto id = name->data(Qt::UserRole).toString();
+    if (!id.isEmpty()) {
+      return id;
+    }
+  }
+  if (const auto* icon = table_->item(row, kMediaIconColumn)) {
+    return icon->data(Qt::UserRole).toString();
+  }
+  return {};
 }
 
 void MediaBinWidget::rebuildTable() {
@@ -208,25 +259,48 @@ void MediaBinWidget::rebuildTable() {
   table_->setRowCount(items_.size());
   for (int row = 0; row < items_.size(); ++row) {
     const auto& item = items_.at(row);
-    auto* name = new QTableWidgetItem(item.displayName);
+    auto* icon = new QTableWidgetItem();
+    if (!item.thumbnail.isNull()) {
+      icon->setIcon(QIcon{QPixmap::fromImage(item.thumbnail)});
+    }
+    icon->setData(Qt::UserRole, item.id);
+    icon->setTextAlignment(Qt::AlignCenter);
+    table_->setItem(row, kMediaIconColumn, icon);
+
+    const QString visible_name =
+        item.metadataTitle.isEmpty() ? item.displayName : item.metadataTitle;
+    auto* name = new QTableWidgetItem(visible_name);
     name->setData(Qt::UserRole, item.id);
     name->setToolTip(item.filePath);
-    table_->setItem(row, 0, name);
-    table_->setItem(row, 1, new QTableWidgetItem(item.durationText));
-    table_->setItem(row, 2, new QTableWidgetItem(item.formatText));
-    const QString status_text = item.offline            ? tr("Offline")
-                                : item.proxyGenerating  ? tr("Creating proxy…")
-                                : item.proxyAvailable   ? tr("Proxy ready")
-                                : item.proxyRecommended ? tr("Proxy recommended")
-                                                        : tr("Original");
+    table_->setItem(row, kMediaNameColumn, name);
+    table_->setItem(row, 2, new QTableWidgetItem(item.durationText));
+    table_->setItem(row, kMediaFormatColumn, new QTableWidgetItem(item.formatText));
+
+    QString status_text;
+    QColor status_color{164, 193, 168};
+    if (item.offline) {
+      status_text = tr("Offline");
+      status_color = QColor{235, 126, 126};
+    } else if (item.contentChanged) {
+      status_text = tr("Changed");
+      status_color = QColor{225, 183, 98};
+    } else if (item.proxyGenerating) {
+      status_text = tr("Creating proxy…");
+    } else if (item.proxyAvailable) {
+      status_text = tr("Proxy ready");
+    } else if (item.proxyRecommended) {
+      status_text = tr("Proxy recommended");
+      status_color = QColor{225, 183, 98};
+    } else {
+      status_text = tr("Original");
+    }
     auto* status = new QTableWidgetItem(status_text);
-    status->setForeground(item.offline                                    ? QColor{235, 126, 126}
-                          : item.proxyRecommended && !item.proxyAvailable ? QColor{225, 183, 98}
-                                                                          : QColor{164, 193, 168});
-    if (item.proxyRecommended && !item.proxyAvailable && !item.proxyGenerating) {
+    status->setForeground(status_color);
+    if (item.proxyRecommended && !item.proxyAvailable && !item.proxyGenerating &&
+        !item.contentChanged) {
       status->setToolTip(tr("Right-click this item to create a smoother editing proxy"));
     }
-    table_->setItem(row, 3, status);
+    table_->setItem(row, kMediaStatusColumn, status);
   }
   table_->setSortingEnabled(true);
   content_->setCurrentIndex(items_.isEmpty() ? 0 : 1);
@@ -245,6 +319,43 @@ InspectorWidget::InspectorWidget(QWidget* parent) : QWidget(parent) {
   titleFont.setWeight(QFont::DemiBold);
   selection_name_->setFont(titleFont);
   layout->addWidget(selection_name_);
+
+  asset_group_ = new QGroupBox(tr("Asset"), this);
+  asset_group_->setObjectName(QStringLiteral("inspectorAssetGroup"));
+  asset_group_->setAccessibleName(tr("Asset metadata"));
+  auto* assetForm = new QFormLayout(asset_group_);
+  assetForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+  asset_title_ = new QLineEdit(asset_group_);
+  asset_title_->setObjectName(QStringLiteral("inspector.assetTitle"));
+  asset_title_->setAccessibleName(tr("Asset title"));
+  assetForm->addRow(tr("Title"), asset_title_);
+  asset_tags_ = new QLineEdit(asset_group_);
+  asset_tags_->setObjectName(QStringLiteral("inspector.assetTags"));
+  asset_tags_->setAccessibleName(tr("Asset tags"));
+  asset_tags_->setPlaceholderText(tr("comma-separated"));
+  assetForm->addRow(tr("Tags"), asset_tags_);
+  asset_notes_ = new QPlainTextEdit(asset_group_);
+  asset_notes_->setObjectName(QStringLiteral("inspector.assetNotes"));
+  asset_notes_->setAccessibleName(tr("Asset notes"));
+  asset_notes_->setTabChangesFocus(true);
+  asset_notes_->setFixedHeight(asset_notes_->fontMetrics().lineSpacing() * 4 + 14);
+  assetForm->addRow(tr("Notes"), asset_notes_);
+  asset_rating_ = new QSpinBox(asset_group_);
+  asset_rating_->setObjectName(QStringLiteral("inspector.assetRating"));
+  asset_rating_->setAccessibleName(tr("Asset rating"));
+  asset_rating_->setRange(0, 5);
+  asset_rating_->setKeyboardTracking(false);
+  assetForm->addRow(tr("Rating"), asset_rating_);
+  setTabOrder(asset_title_, asset_tags_);
+  setTabOrder(asset_tags_, asset_notes_);
+  setTabOrder(asset_notes_, asset_rating_);
+  connect(asset_title_, &QLineEdit::textEdited, this, &InspectorWidget::publishAssetMetadata);
+  connect(asset_tags_, &QLineEdit::textEdited, this, &InspectorWidget::publishAssetMetadata);
+  connect(asset_notes_, &QPlainTextEdit::textChanged, this, &InspectorWidget::publishAssetMetadata);
+  connect(asset_rating_, &QSpinBox::valueChanged, this, &InspectorWidget::publishAssetMetadata);
+  asset_group_->setVisible(false);
+  asset_group_->setEnabled(false);
+  layout->addWidget(asset_group_);
 
   content_ = new QStackedWidget(this);
   auto* empty =
@@ -617,6 +728,38 @@ InspectorWidget::InspectorWidget(QWidget* parent) : QWidget(parent) {
   layout->addWidget(content_, 1);
 }
 
+void InspectorWidget::setAssetMetadata(const AssetMetadataView& metadata) {
+  asset_metadata_ = metadata;
+  const QSignalBlocker titleBlocker(asset_title_);
+  const QSignalBlocker tagsBlocker(asset_tags_);
+  const QSignalBlocker notesBlocker(asset_notes_);
+  const QSignalBlocker ratingBlocker(asset_rating_);
+  asset_title_->setText(metadata.title);
+  asset_tags_->setText(metadata.tags.join(QStringLiteral(", ")));
+  asset_notes_->setPlainText(metadata.notes);
+  asset_rating_->setValue(std::clamp(metadata.rating, 0, 5));
+  const bool has_asset = !metadata.assetId.isEmpty();
+  asset_group_->setVisible(has_asset);
+  asset_group_->setEnabled(has_asset);
+}
+
+void InspectorWidget::clearAssetMetadata() {
+  setAssetMetadata({});
+}
+
+void InspectorWidget::publishAssetMetadata() {
+  if (asset_metadata_.assetId.isEmpty()) {
+    return;
+  }
+  AssetMetadataView view = asset_metadata_;
+  view.title = asset_title_->text();
+  view.tags = splitCommaSeparatedTags(asset_tags_->text());
+  view.notes = asset_notes_->toPlainText();
+  view.rating = asset_rating_->value();
+  asset_metadata_ = view;
+  emit assetMetadataEdited(view);
+}
+
 void InspectorWidget::setSelectionName(const QString& name) {
   selection_name_->setText(name.isEmpty() ? tr("No selection") : name);
   content_->setCurrentIndex(name.isEmpty() ? 0 : 1);
@@ -857,6 +1000,7 @@ void InspectorWidget::refreshKeyframeEditor() {
 void InspectorWidget::clearSelection() {
   setEffectParameters({});
   setSelectionName({});
+  clearAssetMetadata();
 }
 
 EffectsPanelWidget::EffectsPanelWidget(QWidget* parent) : QWidget(parent) {

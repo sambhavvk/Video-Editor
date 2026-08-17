@@ -196,8 +196,9 @@ exit.
   model. Physical multilingual accuracy, Vulkan inference, and worker-death matrices remain open.
 - Caption burn-in uses deterministic bitmap glyphs, not production font shaping; embedded subtitle
   streams are not implemented.
-- Relinking, persistent proxy discovery, complete media reconstruction, desktop thumbnails/
-  waveforms/metadata, unified cache UI, packaging/signing, and the 200+ media corpus remain partial.
+- Relinking, persistent proxy discovery, media reconstruction, desktop thumbnails/
+  waveforms/metadata, and the cache browser are implemented in this slice. Physical
+  unplug/disk-full matrices, packaging/signing, and the 200+ media corpus remain.
 
 ## Reporting issues
 

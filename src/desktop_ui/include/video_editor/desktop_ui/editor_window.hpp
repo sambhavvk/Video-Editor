@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "video_editor/desktop_ui/cache_browser_dialog.hpp"
 #include "video_editor/desktop_ui/ui_types.hpp"
 
 #include <QHash>
@@ -69,6 +70,9 @@ public:
   [[nodiscard]] DeliverPanelWidget* deliverPanel() const noexcept {
     return deliver_panel_;
   }
+  [[nodiscard]] CacheBrowserDialog* cacheBrowser() const noexcept {
+    return cache_browser_;
+  }
 
   void setProjectDisplayName(const QString& displayName);
   void setProjectDirty(bool dirty);
@@ -94,6 +98,7 @@ signals:
   void saveProjectRequested();
   void saveProjectAsRequested();
   void importMediaRequested();
+  void manageMediaCacheRequested();
   void exportRequested(const QString& presetId);
   void undoRequested();
   void redoRequested();
@@ -102,6 +107,8 @@ signals:
   void playbackRateRequested(double rate);
   void seekRequested(qint64 position);
   void mediaActivated(const QString& mediaId);
+  void mediaSelectionChanged(const QString& mediaId);
+  void assetMetadataEdited(const AssetMetadataView& metadata);
   void effectAddRequested(const QString& effectId);
   void parameterEdited(const QString& parameterId, const QVariant& value);
   void keyframeToggleRequested(const QString& parameterId);
@@ -170,6 +177,7 @@ private:
   AudioMixerWidget* audio_mixer_{nullptr};
   CaptionsPanelWidget* captions_panel_{nullptr};
   DeliverPanelWidget* deliver_panel_{nullptr};
+  CacheBrowserDialog* cache_browser_{nullptr};
 
   QDockWidget* media_dock_{nullptr};
   QDockWidget* inspector_dock_{nullptr};

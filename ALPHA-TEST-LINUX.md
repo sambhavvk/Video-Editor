@@ -239,9 +239,9 @@ Record whether each item passed, failed, or was unavailable on the test machine.
 
 **Expected:** Canonical project and timeline edits survive save/reopen. A valid newer recovery
 candidate is explained in plain language and can be opened without corrupting the saved checkpoint.
-Media is referenced, not embedded, so original paths must remain available. Full reconstruction of
-the imported runtime media registry is still partial; include any offline or missing-bin state in
-the test report.
+Media is referenced, not embedded, so original paths must remain available. Reopen rebuilds
+offline/changed/proxy status, rediscovers matching cached proxies, and shows thumbnails/waveforms
+when the cache still has them. Include any remaining offline or missing-bin state in the test report.
 
 ### 2. Media import
 
@@ -347,8 +347,8 @@ failure, discard, or a stale revision leaves the project unchanged. A build conf
 
 **Expected:** A half-resolution ProRes Proxy/MOV with PCM audio is produced when available, otherwise
 the configured FFV1/Matroska fallback is used. Partial canceled output is not committed. Preview may
-use the proxy, but export remains authoritative to originals. Proxy discovery is session-local; a
-reopened project does not yet rediscover the previous proxy automatically.
+use the proxy, but export remains authoritative to originals. Reopening the project rediscovers a
+matching cached proxy. 4K long-GOP media may start proxy generation automatically.
 
 ### 9. Reference and creator export
 
@@ -397,8 +397,8 @@ Do not report these as regressions unless behavior is worse than described:
   approximately 141 MiB base model. Physical multilingual accuracy, Vulkan acceleration, and
   worker-death validation are not release-qualified yet. The deterministic bitmap caption renderer
   does not provide production font-family shaping or embedded subtitle streams.
-- Media-bin thumbnails, timeline waveforms, metadata editing, relinking, persistent proxy discovery,
-  and a unified cache browser are incomplete.
+- Media-bin thumbnails, timeline waveforms, Inspector metadata, Relink, persistent proxy discovery,
+  and **File > Manage Media Cache…** are implemented. Physical unplug/disk-full matrices remain.
 - Source-monitor insert/overwrite editing, shortcut remapping, full LUT/color breadth, and the
   accessibility/beginner study remain incomplete.
 - Background worker process routing, release Flatpak packaging, signing, and the 200+ media corpus

@@ -260,17 +260,17 @@ void EditorWindowTest::mediaBinShowsProxyLifecycle() {
                                                .proxyRecommended = true,
                                                .proxyGenerating = false};
   media_bin.setItems({item});
-  QCOMPARE(table->item(0, 3)->text(), QStringLiteral("Proxy recommended"));
-  QVERIFY(!table->item(0, 3)->toolTip().isEmpty());
+  QCOMPARE(table->item(0, 4)->text(), QStringLiteral("Proxy recommended"));
+  QVERIFY(!table->item(0, 4)->toolTip().isEmpty());
 
   item.proxyGenerating = true;
   media_bin.setItems({item});
-  QCOMPARE(table->item(0, 3)->text(), QStringLiteral("Creating proxy…"));
+  QCOMPARE(table->item(0, 4)->text(), QStringLiteral("Creating proxy…"));
 
   item.proxyGenerating = false;
   item.proxyAvailable = true;
   media_bin.setItems({item});
-  QCOMPARE(table->item(0, 3)->text(), QStringLiteral("Proxy ready"));
+  QCOMPARE(table->item(0, 4)->text(), QStringLiteral("Proxy ready"));
 }
 
 void EditorWindowTest::inspectorExposesKeyframeAuthoring() {

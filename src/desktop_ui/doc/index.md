@@ -7,8 +7,8 @@ the application controller owns conversion to exact edit-model commands.
 
 - [TimelineWidget](TimelineWidget.md) — virtualized timeline selection, gestures, tools, markers,
   gaps, track controls, snapping boundary, keyboard input, and accessibility.
-- [EditorWindow](EditorWindow.md) — workspace shell, public panel access, actions, and controller
-  signals.
+- [EditorWindow](EditorWindow.md) — workspace shell, public panel access, actions, media-cache
+  dialog, and controller signals.
 - [Presentation types](ui_types.md) — Qt-only media, timeline, snap, mixer, and effect view values.
 - [Panel widgets](PanelWidgets.md) — Inspector/effect authoring, professional mixer, timed
   captions/transcription review, and creator delivery presentation contracts.

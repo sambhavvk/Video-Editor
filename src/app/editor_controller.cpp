@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "editor_controller.hpp"
+#include "media_reconstruction.hpp"
 #include "path_utils.hpp"
 
 #include "video_editor/audio_engine/async_realtime_playback.h"
@@ -8,6 +9,7 @@
 #include "video_editor/audio_render/original_audio_registry.h"
 #include "video_editor/audio_render/timeline_audio_renderer.h"
 #include "video_editor/caption_service/caption_service.h"
+#include "video_editor/desktop_ui/cache_browser_dialog.hpp"
 #include "video_editor/desktop_ui/editor_window.hpp"
 #include "video_editor/desktop_ui/panel_widgets.hpp"
 #include "video_editor/desktop_ui/program_viewer.hpp"
@@ -15,6 +17,10 @@
 #include "video_editor/export_service/export_service.h"
 #include "video_editor/job_service/framing.h"
 #include "video_editor/job_service/protocol.h"
+#include "video_editor/media_cache/cache_store.h"
+#include "video_editor/media_cache/metadata_service.h"
+#include "video_editor/media_cache/thumbnail_service.h"
+#include "video_editor/media_cache/waveform_service.h"
 #include "video_editor/playback/asset_registry.h"
 #include "video_editor/playback/ffmpeg_frame_provider.h"
 #include "video_editor/project_codec/project_codec.h"
@@ -58,6 +64,8 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <system_error>
+#include <unordered_set>
 #include <utility>
 
 namespace video_editor::app {
@@ -181,6 +189,132 @@ constexpr qint64 kModelNetworkReadBufferBytes = 1'048'576;
 using desktop_ui::MediaItemView;
 using desktop_ui::TimelineClipView;
 using desktop_ui::TimelineTrackView;
+
+constexpr qint64 kDefaultMediaCacheBudgetBytes = 100LL * 1024 * 1024 * 1024;
+constexpr int kCacheJobThumbnail = 0;
+constexpr int kCacheJobWaveform = 1;
+
+[[nodiscard]] assets::AssetRecord* findImported(std::vector<assets::AssetRecord>& records,
+                                                const std::string& id) {
+  const auto found =
+      std::find_if(records.begin(), records.end(),
+                   [&id](const assets::AssetRecord& record) { return record.id == id; });
+  return found == records.end() ? nullptr : &*found;
+}
+
+[[nodiscard]] bool recordHasVideo(const assets::AssetRecord& record) {
+  if (record.descriptor.best_video_stream >= 0) {
+    return true;
+  }
+  return std::any_of(record.descriptor.streams.begin(), record.descriptor.streams.end(),
+                     [](const media::StreamDescriptor& stream) { return stream.video.has_value(); });
+}
+
+[[nodiscard]] bool recordHasAudio(const assets::AssetRecord& record) {
+  if (record.descriptor.best_audio_stream >= 0) {
+    return true;
+  }
+  return std::any_of(record.descriptor.streams.begin(), record.descriptor.streams.end(),
+                     [](const media::StreamDescriptor& stream) { return stream.audio.has_value(); });
+}
+
+[[nodiscard]] bool storeErrorLooksFull(const std::string& message) {
+  return message.find("budget") != std::string::npos || message.find("Full") != std::string::npos ||
+         message.find("exceeds") != std::string::npos;
+}
+
+[[nodiscard]] QImage imageFromJpeg(const std::vector<std::byte>& jpeg) {
+  QImage image;
+  if (jpeg.empty()) {
+    return image;
+  }
+  image.loadFromData(QByteArray(reinterpret_cast<const char*>(jpeg.data()),
+                                static_cast<int>(jpeg.size())),
+                     "JPEG");
+  return image;
+}
+
+[[nodiscard]] QVector<desktop_ui::WaveformBucketView>
+waveformBucketsForUi(const media_cache::Waveform& waveform) {
+  if (waveform.levels.empty()) {
+    return {};
+  }
+  const media_cache::WaveformLevel* chosen = &waveform.levels.front();
+  std::int64_t best_diff = std::numeric_limits<std::int64_t>::max();
+  for (const auto& level : waveform.levels) {
+    const auto diff = level.bucket_count > 200 ? level.bucket_count - 200 : 200 - level.bucket_count;
+    if (diff < best_diff) {
+      best_diff = diff;
+      chosen = &level;
+    }
+  }
+  QVector<desktop_ui::WaveformBucketView> buckets;
+  buckets.reserve(static_cast<qsizetype>(chosen->buckets.size()));
+  for (const auto& bucket : chosen->buckets) {
+    buckets.push_back({.minimum = bucket.minimum, .maximum = bucket.maximum});
+  }
+  return buckets;
+}
+
+[[nodiscard]] QString cacheKindText(const media_cache::CacheKind kind) {
+  switch (kind) {
+  case media_cache::CacheKind::Thumbnail:
+    return QStringLiteral("Thumbnail");
+  case media_cache::CacheKind::Waveform:
+    return QStringLiteral("Waveform");
+  case media_cache::CacheKind::Metadata:
+    return QStringLiteral("Metadata");
+  case media_cache::CacheKind::Proxy:
+    return QStringLiteral("Proxy");
+  case media_cache::CacheKind::ProxyPtsMap:
+    return QStringLiteral("PTS map");
+  }
+  return QStringLiteral("Thumbnail");
+}
+
+[[nodiscard]] std::optional<media_cache::CacheKind> cacheKindFromText(const QString& text) {
+  if (text == QLatin1String("Thumbnail")) {
+    return media_cache::CacheKind::Thumbnail;
+  }
+  if (text == QLatin1String("Waveform")) {
+    return media_cache::CacheKind::Waveform;
+  }
+  if (text == QLatin1String("Metadata")) {
+    return media_cache::CacheKind::Metadata;
+  }
+  if (text == QLatin1String("Proxy")) {
+    return media_cache::CacheKind::Proxy;
+  }
+  if (text == QLatin1String("PTS map")) {
+    return media_cache::CacheKind::ProxyPtsMap;
+  }
+  return std::nullopt;
+}
+
+[[nodiscard]] proxy::ProxyProfile proxyProfileForHash(const assets::ProxyProfile& profile,
+                                                      const bool ffv1) {
+  return {.video_codec = ffv1 || profile.codec == assets::ProxyCodec::Ffv1
+                             ? proxy::VideoCodec::Ffv1
+                             : proxy::VideoCodec::ProResProxy,
+          .scale_numerator = 1,
+          .scale_denominator = 2,
+          .maximum_width = profile.maximum_width,
+          .maximum_height = profile.maximum_height,
+          .include_pcm_audio = profile.include_pcm_audio,
+          .allow_ffv1_fallback = true};
+}
+
+void appendUniqueSearchDirectory(std::vector<std::filesystem::path>& directories,
+                                 std::unordered_set<std::string>& seen,
+                                 const std::filesystem::path& directory) {
+  if (directory.empty()) {
+    return;
+  }
+  const std::string key = utf8_from_path(directory);
+  if (seen.insert(key).second) {
+    directories.push_back(directory);
+  }
+}
 
 QString durationText(const edit::Time duration) {
   const double seconds =
@@ -504,6 +638,21 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
       audio_registry_(std::make_shared<audio_render::OriginalAudioRegistry>()),
       frame_provider_(std::make_shared<playback::FfmpegFrameProvider>(playback_registry_)),
       renderer_(std::make_shared<render::CpuRenderer>(frame_provider_)) {
+  try {
+    media_cache_ = std::make_unique<media_cache::CacheStore>(mediaCacheDirectory());
+    QSettings cache_settings;
+    const qint64 budget =
+        cache_settings
+            .value(QStringLiteral("mediaCache/budgetBytes"), kDefaultMediaCacheBudgetBytes)
+            .toLongLong();
+    media_cache_->set_budget_bytes(
+        static_cast<std::uint64_t>(std::max<qint64>(0, budget)));
+    (void)media_cache_->evict_to_budget();
+  } catch (const std::exception& exception) {
+    media_cache_.reset();
+    window_.showTransientMessage(
+        tr("Media cache could not be opened: %1").arg(QString::fromUtf8(exception.what())));
+  }
   transcription_network_ = new QNetworkAccessManager(this);
   if (auto gpu = render::GpuRenderer::create(); gpu != nullptr) {
     const render::GpuCapabilities capabilities = gpu->capabilities();
@@ -716,6 +865,26 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::removeTrack);
   connect(window_.mediaBin(), &desktop_ui::MediaBinWidget::proxyRequested, this,
           &EditorController::generateProxy);
+  connect(window_.mediaBin(), &desktop_ui::MediaBinWidget::relinkRequested, this,
+          &EditorController::relinkMedia);
+  connect(&window_, &desktop_ui::EditorWindow::mediaSelectionChanged, this,
+          &EditorController::selectMedia);
+  connect(&window_, &desktop_ui::EditorWindow::assetMetadataEdited, this,
+          &EditorController::saveAssetMetadata);
+  connect(&window_, &desktop_ui::EditorWindow::manageMediaCacheRequested, this,
+          &EditorController::showMediaCacheBrowser);
+  if (auto* browser = window_.cacheBrowser(); browser != nullptr) {
+    connect(browser, &desktop_ui::CacheBrowserDialog::budgetChanged, this,
+            &EditorController::handleCacheBudgetChanged);
+    connect(browser, &desktop_ui::CacheBrowserDialog::removeEntryRequested, this,
+            &EditorController::removeCacheEntry);
+    connect(browser, &desktop_ui::CacheBrowserDialog::removeAssetRequested, this,
+            &EditorController::removeCacheAsset);
+    connect(browser, &desktop_ui::CacheBrowserDialog::evictToBudgetRequested, this,
+            &EditorController::evictCacheToBudget);
+    connect(browser, &desktop_ui::CacheBrowserDialog::clearAllRequested, this,
+            &EditorController::clearMediaCache);
+  }
 
   playback_timer_.setTimerType(Qt::PreciseTimer);
   playback_timer_.setInterval(16);
@@ -838,6 +1007,7 @@ EditorController::~EditorController() {
     model_download_staging_.clear();
   }
   export_stop_source_.request_stop();
+  waitForInFlightCacheJob(true);
   for (const auto& [asset_id, cancellation] : proxy_jobs_) {
     Q_UNUSED(asset_id)
     cancellation->request_stop();
@@ -916,6 +1086,16 @@ std::filesystem::path EditorController::proxyCacheDirectory() {
   const QString proxies = QDir(root).filePath(QStringLiteral("proxies"));
   QDir().mkpath(proxies);
   return pathFromQString(proxies);
+}
+
+std::filesystem::path EditorController::mediaCacheDirectory() {
+  QString root = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+  if (root.isEmpty()) {
+    root = QDir::tempPath() + QStringLiteral("/VideoEditor-cache");
+  }
+  const QString cache = QDir(root).filePath(QStringLiteral("media_cache"));
+  QDir().mkpath(cache);
+  return pathFromQString(cache);
 }
 
 std::filesystem::path EditorController::newWorkingPath(const edit::EntityId& projectId) const {
@@ -1080,7 +1260,7 @@ bool EditorController::loadCheckpoint(const std::filesystem::path& checkpoint) {
       throw std::runtime_error(decoded.error().message);
     }
     installProject(std::move(decoded).value(), working, std::move(opened_store), checkpoint);
-    setDirty(false);
+    setDirty(media_paths_updated_on_install_);
     window_.showTransientMessage(tr("Project opened"));
     return true;
   } catch (const std::exception& exception) {
@@ -1106,7 +1286,6 @@ void EditorController::installProject(edit::Project project, std::filesystem::pa
   store_ = std::move(projectStore);
   working_path_ = std::move(workingPath);
   checkpoint_path_ = std::move(checkpoint);
-  imported_assets_.clear();
   visible_caption_indices_.clear();
   caption_search_.clear();
   selected_clip_ids_.clear();
@@ -1115,7 +1294,7 @@ void EditorController::installProject(edit::Project project, std::filesystem::pa
   selected_gap_key_.clear();
   timeline_time_scale_ = static_cast<std::uint32_t>(kUiTimescale);
   playhead_ = 0;
-  rebuildPlaybackRegistry();
+  media_paths_updated_on_install_ = reconstructMediaState();
   refreshViews();
 }
 
@@ -1600,6 +1779,8 @@ void EditorController::addImportedAsset(assets::AssetRecord asset) {
       }
     }
     imported_assets_.push_back(std::move(asset));
+    enqueueMediaCacheJobs(imported_assets_.back());
+    scheduleRecommendedProxies();
   }
 }
 
@@ -1670,11 +1851,40 @@ void EditorController::generateProxy(const QString& assetId) {
                                               .source_fingerprint = imported->fingerprint,
                                               .engine_version = "proxy-service-v1",
                                               .complete = true};
+      std::filesystem::path playback_proxy = outcome.destination;
+      if (media_cache_ != nullptr) {
+        if (cache_job_future_.isRunning()) {
+          cache_job_future_.waitForFinished();
+        }
+        const auto hash_profile = proxyProfileForHash(manifest_profile, outcome.ffv1);
+        const media_cache::CacheKey proxy_key{.asset_id = outcome.asset_id,
+                                              .kind = media_cache::CacheKind::Proxy,
+                                              .parameter_hash = proxy::proxy_parameter_hash(hash_profile)};
+        const auto stored = media_cache_->put_file(proxy_key, outcome.destination);
+        if (stored) {
+          if (auto path = media_cache_->path_for(proxy_key)) {
+            imported->proxy->proxy_uri = path.value();
+            playback_proxy = path.value();
+          }
+        } else if (stored.error().code == media_cache::CacheErrorCode::Full) {
+          cache_disk_full_ = true;
+          showError(tr("Media cache is full"), QString::fromStdString(stored.error().message));
+        }
+        const auto pts_source = proxy::default_pts_map_path(outcome.destination);
+        std::error_code exists_error;
+        if (std::filesystem::is_regular_file(pts_source, exists_error) && !exists_error) {
+          const media_cache::CacheKey pts_key{
+              .asset_id = outcome.asset_id,
+              .kind = media_cache::CacheKind::ProxyPtsMap,
+              .parameter_hash = proxy::proxy_parameter_hash(hash_profile)};
+          (void)media_cache_->put_file(pts_key, pts_source);
+        }
+      }
       const auto model_id = edit::EntityId::parse(outcome.asset_id);
       if (model_id.has_value()) {
         playback::AssetPlaybackSources sources{
             .original = {.path = imported->uri, .video_stream_index = -1},
-            .proxy = playback::AssetStreamLocation{.path = outcome.destination,
+            .proxy = playback::AssetStreamLocation{.path = playback_proxy,
                                                    .video_stream_index = -1}};
         (void)playback_registry_->register_asset(*model_id, std::move(sources));
         frame_provider_->invalidate(*model_id);
@@ -1687,6 +1897,7 @@ void EditorController::generateProxy(const QString& assetId) {
       showError(tr("Proxy generation failed"), outcome.error);
     }
     refreshViews();
+    pumpProxyQueue();
   });
 
   auto future = QtConcurrent::run([source, destination, profile, stop_token, key] {
@@ -4867,20 +5078,24 @@ void EditorController::refreshMediaView() {
     if (asset.has_video) {
       format += QStringLiteral(" %1×%2").arg(asset.width).arg(asset.height);
     }
-    const auto proxy = std::find_if(
-        imported_assets_.begin(), imported_assets_.end(),
-        [&asset](const assets::AssetRecord& record) { return record.id == asset.id.toString(); });
+    const auto* record = findImported(imported_assets_, asset.id.toString());
     const bool proxy_available =
-        proxy != imported_assets_.end() && proxy->proxy.has_value() && proxy->proxy->complete;
+        record != nullptr && record->proxy.has_value() && record->proxy->complete;
     const bool proxy_recommended =
-        proxy != imported_assets_.end() && assets::AssetService::should_recommend_proxy(*proxy);
+        record != nullptr && assets::AssetService::should_recommend_proxy(*record);
+    const auto title = media_metadata_titles_.find(asset.id.toString());
+    const auto thumbnail = media_thumbnails_.find(asset.id.toString());
     items.push_back({
         .id = QString::fromStdString(asset.id.toString()),
         .displayName = QString::fromStdString(asset.name),
         .filePath = qStringFromPath(pathFromUtf8String(asset.source_uri)),
         .durationText = durationText(asset.duration),
         .formatText = format.trimmed(),
-        .offline = !QFileInfo::exists(qStringFromPath(pathFromUtf8String(asset.source_uri))),
+        .metadataTitle = title == media_metadata_titles_.end() ? QString{} : title->second,
+        .thumbnail = thumbnail == media_thumbnails_.end() ? QImage{} : thumbnail->second,
+        .offline = record == nullptr || record->availability == assets::AssetAvailability::Missing,
+        .contentChanged =
+            record != nullptr && record->availability == assets::AssetAvailability::Changed,
         .proxyAvailable = proxy_available,
         .proxyRecommended = proxy_recommended,
         .proxyGenerating = proxy_jobs_.contains(asset.id.toString()),
@@ -4917,9 +5132,8 @@ void EditorController::refreshTimelineView() {
         .targeted = track.targeted,
     });
     for (const edit::Clip& clip : track.clips) {
-      const auto proxy = std::find_if(
-          imported_assets_.begin(), imported_assets_.end(),
-          [&clip](const assets::AssetRecord& item) { return item.id == clip.asset_id.toString(); });
+      const auto* record = findImported(imported_assets_, clip.asset_id.toString());
+      const auto waveform = media_waveforms_.find(clip.asset_id.toString());
       clips.push_back({
           .id = QString::fromStdString(clip.id.toString()),
           .displayName = QString::fromStdString(clip.name),
@@ -4928,9 +5142,11 @@ void EditorController::refreshTimelineView() {
           .duration = std::max<qint64>(1, timelineValue(clip.timeline_range.duration)),
           .color = colorForTrack(track.kind, track_index),
           .selected = selected_clip_ids_.contains(clip.id),
-          .offline = edit::findAsset(*project, clip.asset_id) == nullptr,
-          .proxy =
-              proxy != imported_assets_.end() && proxy->proxy.has_value() && proxy->proxy->complete,
+          .offline = record == nullptr || record->availability == assets::AssetAvailability::Missing,
+          .proxy = record != nullptr && record->proxy.has_value() && record->proxy->complete,
+          .waveform = waveform == media_waveforms_.end()
+                          ? QVector<desktop_ui::WaveformBucketView>{}
+                          : waveform->second,
       });
     }
     ++track_index;
@@ -5025,6 +5241,11 @@ void EditorController::refreshInspectorView() {
   const edit::Sequence* sequence = currentSequence();
   if (sequence == nullptr || !active_clip_id_.has_value()) {
     window_.inspector()->clearSelection();
+    if (!selected_media_id_.isEmpty()) {
+      presentAssetMetadata(selected_media_id_);
+    } else {
+      window_.inspector()->clearAssetMetadata();
+    }
     return;
   }
   const edit::Clip* clip = edit::findClip(*sequence, *active_clip_id_);
@@ -5032,6 +5253,11 @@ void EditorController::refreshInspectorView() {
     selected_clip_ids_.clear();
     active_clip_id_.reset();
     window_.inspector()->clearSelection();
+    if (!selected_media_id_.isEmpty()) {
+      presentAssetMetadata(selected_media_id_);
+    } else {
+      window_.inspector()->clearAssetMetadata();
+    }
     return;
   }
 
@@ -5149,6 +5375,7 @@ void EditorController::refreshInspectorView() {
     }
   }
   window_.inspector()->setEffectParameters(effect_parameters);
+  presentAssetMetadata(QString::fromStdString(clip->asset_id.toString()));
 }
 
 void EditorController::refreshMixerView() {
@@ -5277,9 +5504,14 @@ void EditorController::rebuildPlaybackRegistry() {
   }
   const auto project = editor_->projectAt(editor_->revision());
   for (const edit::Asset& asset : project->assets) {
+    const auto* record = findImported(imported_assets_, asset.id.toString());
     playback::AssetPlaybackSources sources{
         .original = {.path = pathFromUtf8String(asset.source_uri), .video_stream_index = -1},
-        .proxy = std::nullopt};
+        .proxy = record != nullptr && record->proxy.has_value() && record->proxy->complete
+                     ? std::optional<playback::AssetStreamLocation>{
+                           playback::AssetStreamLocation{.path = record->proxy->proxy_uri,
+                                                         .video_stream_index = -1}}
+                     : std::nullopt};
     if (playback_registry_->register_asset(asset.id, std::move(sources))) {
       registered_playback_assets_.push_back(asset.id);
     }
@@ -5647,6 +5879,573 @@ void EditorController::setDirty(const bool dirty) {
 
 void EditorController::showError(const QString& title, const QString& message) {
   QMessageBox::critical(&window_, title, message);
+}
+
+void EditorController::waitForInFlightCacheJob(const bool cancel) {
+  if (cancel) {
+    ++cache_job_generation_;
+    cache_job_stop_source_.request_stop();
+  }
+  if (cache_job_future_.isRunning()) {
+    cache_job_future_.waitForFinished();
+  }
+  if (cancel) {
+    cache_job_running_ = false;
+    cache_job_queue_.clear();
+    cache_job_stop_source_ = std::stop_source();
+  }
+}
+
+void EditorController::dropCachedPreview(const std::string& asset_id) {
+  media_thumbnails_.erase(asset_id);
+  media_waveforms_.erase(asset_id);
+  media_metadata_titles_.erase(asset_id);
+}
+
+void EditorController::loadCachedPreviews(const assets::AssetRecord& record) {
+  if (media_cache_ == nullptr || cache_job_running_) {
+    return;
+  }
+  if (recordHasVideo(record)) {
+    const media_cache::ThumbnailOptions options;
+    const media_cache::CacheKey key{.asset_id = record.id,
+                                    .kind = media_cache::CacheKind::Thumbnail,
+                                    .parameter_hash = media_cache::thumbnail_parameter_hash(options)};
+    const auto present = media_cache_->contains(key);
+    if (present && present.value()) {
+      if (auto thumbnail = media_cache::load_thumbnail(record.id, options, *media_cache_)) {
+        media_thumbnails_[record.id] = imageFromJpeg(thumbnail.value().jpeg_bytes);
+      }
+    }
+  }
+  if (recordHasAudio(record)) {
+    const media_cache::WaveformOptions options;
+    const media_cache::CacheKey key{.asset_id = record.id,
+                                    .kind = media_cache::CacheKind::Waveform,
+                                    .parameter_hash = media_cache::waveform_parameter_hash(options)};
+    const auto present = media_cache_->contains(key);
+    if (present && present.value()) {
+      if (auto waveform = media_cache::load_waveform(record.id, options, *media_cache_)) {
+        media_waveforms_[record.id] = waveformBucketsForUi(waveform.value());
+      }
+    }
+  }
+  if (auto metadata = media_cache::load_metadata(record.id, *media_cache_)) {
+    media_metadata_titles_[record.id] = QString::fromStdString(metadata.value().title);
+  }
+}
+
+bool EditorController::reconstructMediaState() {
+  waitForInFlightCacheJob(true);
+  imported_assets_.clear();
+  media_thumbnails_.clear();
+  media_waveforms_.clear();
+  media_metadata_titles_.clear();
+  cache_job_queue_.clear();
+  cache_disk_full_ = false;
+  proxy_auto_queue_.clear();
+  selected_media_id_.clear();
+  for (const auto& [asset_id, cancellation] : proxy_jobs_) {
+    Q_UNUSED(asset_id)
+    cancellation->request_stop();
+  }
+
+  if (!editor_) {
+    return false;
+  }
+
+  MediaReconstructionOptions options;
+  options.legacy_proxy_directory = proxyCacheDirectory();
+  std::unordered_set<std::string> seen_directories;
+  if (checkpoint_path_.has_value()) {
+    appendUniqueSearchDirectory(options.search_directories, seen_directories,
+                                checkpoint_path_->parent_path());
+  }
+  const QString last_relink =
+      QSettings().value(QStringLiteral("mediaCache/lastRelinkDirectory")).toString();
+  if (!last_relink.isEmpty()) {
+    appendUniqueSearchDirectory(options.search_directories, seen_directories,
+                                pathFromQString(last_relink));
+  }
+  const auto project = editor_->projectAt(editor_->revision());
+  for (const edit::Asset& asset : project->assets) {
+    appendUniqueSearchDirectory(options.search_directories, seen_directories,
+                                path_from_utf8(asset.source_uri).parent_path());
+  }
+
+  imported_assets_ =
+      reconstruct_media_records(project->assets, media_cache_.get(), options);
+  bool relinked = false;
+  for (const assets::AssetRecord& record : imported_assets_) {
+    const edit::Asset* model = nullptr;
+    for (const edit::Asset& asset : project->assets) {
+      if (asset.id.toString() == record.id) {
+        model = &asset;
+        break;
+      }
+    }
+    if (model == nullptr || record.availability != assets::AssetAvailability::Online) {
+      continue;
+    }
+    if (utf8_from_path(record.uri) == model->source_uri) {
+      continue;
+    }
+    if (apply(edit::EditCommand{.operation = relink_command_from_record(record),
+                                .coalescing_key = {}},
+              tr("Could not persist the recovered media path"))) {
+      relinked = true;
+    }
+  }
+
+  rebuildPlaybackRegistry();
+  for (const assets::AssetRecord& record : imported_assets_) {
+    loadCachedPreviews(record);
+    enqueueMediaCacheJobs(record);
+  }
+  scheduleRecommendedProxies();
+  return relinked;
+}
+
+void EditorController::enqueueMediaCacheJobs(const assets::AssetRecord& asset) {
+  if (cache_disk_full_ || media_cache_ == nullptr ||
+      asset.availability != assets::AssetAvailability::Online) {
+    return;
+  }
+  if (recordHasVideo(asset) && !media_thumbnails_.contains(asset.id)) {
+    cache_job_queue_.emplace_back(asset.id, kCacheJobThumbnail);
+  }
+  if (recordHasAudio(asset) && !media_waveforms_.contains(asset.id)) {
+    cache_job_queue_.emplace_back(asset.id, kCacheJobWaveform);
+  }
+  pumpCacheJobs();
+}
+
+void EditorController::pumpCacheJobs() {
+  if (cache_job_running_ || cache_job_queue_.empty() || media_cache_ == nullptr || cache_disk_full_) {
+    return;
+  }
+  const auto job = cache_job_queue_.front();
+  cache_job_queue_.pop_front();
+  const assets::AssetRecord* record = findImported(imported_assets_, job.first);
+  if (record == nullptr || record->availability != assets::AssetAvailability::Online) {
+    pumpCacheJobs();
+    return;
+  }
+
+  cache_job_running_ = true;
+  const std::string asset_id = record->id;
+  const std::filesystem::path uri = record->uri;
+  const int kind = job.second;
+  const std::uint64_t generation = cache_job_generation_;
+  const std::stop_token stop_token = cache_job_stop_source_.get_token();
+  media_cache::CacheStore* store = media_cache_.get();
+
+  auto* watcher = new QFutureWatcher<CacheJobOutcome>(this);
+  connect(watcher, &QFutureWatcher<CacheJobOutcome>::finished, this, [this, watcher] {
+    const CacheJobOutcome outcome = watcher->result();
+    watcher->deleteLater();
+    cache_job_running_ = false;
+    if (outcome.generation != cache_job_generation_) {
+      pumpCacheJobs();
+      return;
+    }
+    if (outcome.disk_full) {
+      cache_disk_full_ = true;
+      cache_job_queue_.clear();
+      showError(tr("Media cache is full"),
+                outcome.error.isEmpty() ? tr("The media cache has no remaining space.")
+                                        : outcome.error);
+      return;
+    }
+    if (outcome.succeeded) {
+      if (outcome.kind == kCacheJobThumbnail && !outcome.thumbnail.isNull()) {
+        media_thumbnails_[outcome.asset_id] = outcome.thumbnail;
+      } else if (outcome.kind == kCacheJobWaveform) {
+        media_waveforms_[outcome.asset_id] = outcome.waveform;
+      }
+      refreshMediaView();
+      refreshTimelineView();
+    } else if (!outcome.cancelled && !outcome.error.isEmpty()) {
+      window_.showTransientMessage(
+          tr("Could not cache media preview: %1").arg(outcome.error));
+    }
+    if (auto* browser = window_.cacheBrowser(); browser != nullptr && browser->isVisible()) {
+      refreshCacheInventory();
+    }
+    pumpCacheJobs();
+  });
+
+  cache_job_future_ = QtConcurrent::run(
+      [asset_id, uri, kind, store, stop_token, generation]() -> CacheJobOutcome {
+        CacheJobOutcome outcome;
+        outcome.asset_id = asset_id;
+        outcome.kind = kind;
+        outcome.generation = generation;
+        if (kind == kCacheJobThumbnail) {
+          auto generated = media_cache::generate_thumbnail(uri, -1, {}, asset_id, *store, stop_token);
+          if (!generated) {
+            outcome.cancelled = generated.error().code == media_cache::ThumbnailErrorCode::Cancelled;
+            outcome.disk_full = generated.error().code == media_cache::ThumbnailErrorCode::StoreFailed &&
+                                storeErrorLooksFull(generated.error().message);
+            outcome.error = QString::fromStdString(generated.error().message);
+            return outcome;
+          }
+          outcome.thumbnail = imageFromJpeg(generated.value().jpeg_bytes);
+          outcome.succeeded = !outcome.thumbnail.isNull();
+          return outcome;
+        }
+        auto generated = media_cache::generate_waveform(uri, -1, {}, asset_id, *store, stop_token);
+        if (!generated) {
+          outcome.cancelled = generated.error().code == media_cache::WaveformErrorCode::Cancelled;
+          outcome.disk_full = generated.error().code == media_cache::WaveformErrorCode::StoreFailed &&
+                              storeErrorLooksFull(generated.error().message);
+          outcome.error = QString::fromStdString(generated.error().message);
+          return outcome;
+        }
+        outcome.waveform = waveformBucketsForUi(generated.value());
+        outcome.succeeded = true;
+        return outcome;
+      });
+  watcher->setFuture(cache_job_future_);
+}
+
+void EditorController::scheduleRecommendedProxies() {
+  for (const assets::AssetRecord& record : imported_assets_) {
+    if (record.availability != assets::AssetAvailability::Online) {
+      continue;
+    }
+    if (!assets::AssetService::should_recommend_proxy(record)) {
+      continue;
+    }
+    if (record.proxy.has_value() && record.proxy->complete) {
+      continue;
+    }
+    if (proxy_jobs_.contains(record.id)) {
+      continue;
+    }
+    const QString id = QString::fromStdString(record.id);
+    if (std::find(proxy_auto_queue_.begin(), proxy_auto_queue_.end(), id) ==
+        proxy_auto_queue_.end()) {
+      proxy_auto_queue_.push_back(id);
+    }
+  }
+  pumpProxyQueue();
+}
+
+void EditorController::pumpProxyQueue() {
+  if (!proxy_jobs_.empty()) {
+    return;
+  }
+  while (!proxy_auto_queue_.empty()) {
+    const QString id = proxy_auto_queue_.front();
+    proxy_auto_queue_.pop_front();
+    generateProxy(id);
+    if (!proxy_jobs_.empty()) {
+      return;
+    }
+  }
+}
+
+void EditorController::reregisterAssetMedia(const assets::AssetRecord& record) {
+  const auto model_id = edit::EntityId::parse(record.id);
+  if (!model_id.has_value()) {
+    return;
+  }
+  playback::AssetPlaybackSources sources{
+      .original = {.path = record.uri, .video_stream_index = -1},
+      .proxy = record.proxy.has_value() && record.proxy->complete
+                   ? std::optional<playback::AssetStreamLocation>{playback::AssetStreamLocation{
+                         .path = record.proxy->proxy_uri, .video_stream_index = -1}}
+                   : std::nullopt};
+  (void)playback_registry_->register_asset(*model_id, std::move(sources));
+  frame_provider_->invalidate(*model_id);
+  if (recordHasAudio(record)) {
+    (void)audio_registry_->register_original(
+        *model_id, audio_render::OriginalAudioMedia{.path = record.uri, .audio_stream_index = -1});
+  }
+}
+
+void EditorController::relinkMedia(const QString& assetId) {
+  QSettings settings;
+  const QString start_directory =
+      settings.value(QStringLiteral("mediaCache/lastRelinkDirectory")).toString();
+  const QString path = QFileDialog::getOpenFileName(&window_, tr("Relink media"), start_directory);
+  if (path.isEmpty()) {
+    return;
+  }
+
+  const std::string key = assetId.toStdString();
+  assets::AssetRecord existing;
+  if (const auto* record = findImported(imported_assets_, key); record != nullptr) {
+    existing = *record;
+  } else {
+    const edit::Asset* asset = assetByTextId(assetId);
+    if (asset == nullptr) {
+      window_.showTransientMessage(tr("That media item is no longer in the project"));
+      return;
+    }
+    existing.id = asset->id.toString();
+    existing.uri = pathFromUtf8String(asset->source_uri);
+    existing.fingerprint.quick_sha256 = asset->fingerprint;
+  }
+
+  assets::AssetService service;
+  auto relinked = service.relink(existing, pathFromQString(path), false);
+  if (!relinked) {
+    const bool fingerprint_mismatch =
+        relinked.error().message.find("fingerprint") != std::string::npos;
+    if (fingerprint_mismatch) {
+      const auto answer = QMessageBox::question(
+          &window_, tr("Relink media"),
+          tr("The replacement file does not match the original fingerprint. Relink anyway?"),
+          QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+      if (answer != QMessageBox::Yes) {
+        return;
+      }
+      relinked = service.relink(existing, pathFromQString(path), true);
+    }
+    if (!relinked) {
+      showError(tr("Could not relink media"), QString::fromStdString(relinked.error().message));
+      return;
+    }
+  }
+
+  assets::AssetRecord result = std::move(relinked).value();
+  result.proxy.reset();
+  if (!apply(edit::EditCommand{.operation = relink_command_from_record(result), .coalescing_key = {}},
+             tr("Could not relink media"))) {
+    return;
+  }
+
+  if (auto* record = findImported(imported_assets_, key); record != nullptr) {
+    *record = result;
+  } else {
+    imported_assets_.push_back(result);
+  }
+  dropCachedPreview(result.id);
+  reregisterAssetMedia(result);
+  settings.setValue(QStringLiteral("mediaCache/lastRelinkDirectory"),
+                    QFileInfo(path).absolutePath());
+  enqueueMediaCacheJobs(result);
+  scheduleRecommendedProxies();
+  refreshViews();
+}
+
+void EditorController::selectMedia(const QString& mediaId) {
+  selected_media_id_ = mediaId;
+  refreshInspectorView();
+}
+
+void EditorController::presentAssetMetadata(const QString& assetId) {
+  if (assetId.isEmpty()) {
+    window_.inspector()->clearAssetMetadata();
+    return;
+  }
+  desktop_ui::AssetMetadataView view;
+  view.assetId = assetId;
+  const std::string key = assetId.toStdString();
+  if (media_cache_ != nullptr && !cache_job_running_) {
+    if (auto loaded = media_cache::load_metadata(key, *media_cache_)) {
+      view.title = QString::fromStdString(loaded.value().title);
+      view.notes = QString::fromStdString(loaded.value().notes);
+      view.rating = loaded.value().rating;
+      for (const auto& tag : loaded.value().tags) {
+        view.tags.push_back(QString::fromStdString(tag));
+      }
+      media_metadata_titles_[key] = view.title;
+      window_.inspector()->setAssetMetadata(view);
+      return;
+    }
+  }
+  if (const auto title = media_metadata_titles_.find(key); title != media_metadata_titles_.end()) {
+    view.title = title->second;
+  }
+  window_.inspector()->setAssetMetadata(view);
+}
+
+void EditorController::saveAssetMetadata(const desktop_ui::AssetMetadataView& metadata) {
+  if (metadata.assetId.isEmpty()) {
+    return;
+  }
+  if (media_cache_ == nullptr) {
+    window_.showTransientMessage(tr("Media cache is unavailable"));
+    return;
+  }
+  if (cache_job_running_) {
+    window_.showTransientMessage(tr("Media cache is busy; try again in a moment"));
+    return;
+  }
+  media_cache::MetadataDocument document;
+  document.title = metadata.title.toStdString();
+  document.notes = metadata.notes.toStdString();
+  document.rating = metadata.rating;
+  document.tags.reserve(static_cast<std::size_t>(metadata.tags.size()));
+  for (const QString& tag : metadata.tags) {
+    document.tags.push_back(tag.toStdString());
+  }
+  const auto saved = media_cache::save_metadata(metadata.assetId.toStdString(), document, *media_cache_);
+  if (!saved) {
+    showError(tr("Could not save media metadata"), QString::fromStdString(saved.error().message));
+    return;
+  }
+  media_metadata_titles_[metadata.assetId.toStdString()] = metadata.title;
+  refreshMediaView();
+}
+
+void EditorController::showMediaCacheBrowser() {
+  refreshCacheInventory();
+}
+
+void EditorController::refreshCacheInventory() {
+  auto* browser = window_.cacheBrowser();
+  if (browser == nullptr) {
+    return;
+  }
+  if (media_cache_ == nullptr) {
+    browser->setInventory({});
+    return;
+  }
+  if (cache_job_running_) {
+    window_.showTransientMessage(tr("Media cache is busy; inventory will refresh when idle"));
+    return;
+  }
+  const auto inspected = media_cache_->inspect();
+  if (!inspected) {
+    showError(tr("Could not inspect the media cache"),
+              QString::fromStdString(inspected.error().message));
+    return;
+  }
+  desktop_ui::CacheInventoryView view;
+  view.totalBytes = static_cast<qint64>(inspected.value().total_bytes);
+  view.budgetBytes = static_cast<qint64>(inspected.value().budget_bytes);
+  const auto project = editor_ ? editor_->projectAt(editor_->revision()) : nullptr;
+  for (const auto& entry : inspected.value().entries) {
+    desktop_ui::CacheEntryView row;
+    row.assetId = QString::fromStdString(entry.key.asset_id);
+    row.kindText = cacheKindText(entry.key.kind);
+    row.bytes = static_cast<qint64>(entry.bytes);
+    row.lastAccessUtcMs = entry.last_access_utc_ms;
+    row.displayName = row.assetId;
+    if (project != nullptr) {
+      for (const edit::Asset& asset : project->assets) {
+        if (asset.id.toString() == entry.key.asset_id) {
+          row.displayName = QString::fromStdString(asset.name);
+          break;
+        }
+      }
+    }
+    view.entries.push_back(std::move(row));
+  }
+  browser->setInventory(view);
+}
+
+void EditorController::handleCacheBudgetChanged(const qint64 budgetBytes) {
+  const qint64 budget = std::max<qint64>(0, budgetBytes);
+  QSettings().setValue(QStringLiteral("mediaCache/budgetBytes"), budget);
+  if (media_cache_ == nullptr) {
+    return;
+  }
+  if (cache_job_running_) {
+    window_.showTransientMessage(tr("Media cache is busy; try again in a moment"));
+    return;
+  }
+  cache_disk_full_ = false;
+  media_cache_->set_budget_bytes(static_cast<std::uint64_t>(budget));
+  (void)media_cache_->evict_to_budget();
+  media_thumbnails_.clear();
+  media_waveforms_.clear();
+  for (const assets::AssetRecord& record : imported_assets_) {
+    loadCachedPreviews(record);
+    enqueueMediaCacheJobs(record);
+  }
+  refreshCacheInventory();
+  refreshViews();
+}
+
+void EditorController::removeCacheEntry(const QString& assetId, const QString& kindText) {
+  if (media_cache_ == nullptr) {
+    return;
+  }
+  if (cache_job_running_) {
+    window_.showTransientMessage(tr("Media cache is busy; try again in a moment"));
+    return;
+  }
+  const auto kind = cacheKindFromText(kindText);
+  if (!kind.has_value()) {
+    return;
+  }
+  (void)media_cache_->remove_kind(assetId.toStdString(), *kind);
+  if (*kind == media_cache::CacheKind::Thumbnail) {
+    media_thumbnails_.erase(assetId.toStdString());
+  } else if (*kind == media_cache::CacheKind::Waveform) {
+    media_waveforms_.erase(assetId.toStdString());
+  } else if (*kind == media_cache::CacheKind::Metadata) {
+    media_metadata_titles_.erase(assetId.toStdString());
+  } else if (*kind == media_cache::CacheKind::Proxy || *kind == media_cache::CacheKind::ProxyPtsMap) {
+    if (auto* record = findImported(imported_assets_, assetId.toStdString()); record != nullptr) {
+      record->proxy.reset();
+      reregisterAssetMedia(*record);
+    }
+  }
+  refreshCacheInventory();
+  refreshViews();
+}
+
+void EditorController::removeCacheAsset(const QString& assetId) {
+  if (media_cache_ == nullptr) {
+    return;
+  }
+  if (cache_job_running_) {
+    window_.showTransientMessage(tr("Media cache is busy; try again in a moment"));
+    return;
+  }
+  (void)media_cache_->remove_asset(assetId.toStdString());
+  dropCachedPreview(assetId.toStdString());
+  if (auto* record = findImported(imported_assets_, assetId.toStdString()); record != nullptr) {
+    record->proxy.reset();
+    reregisterAssetMedia(*record);
+  }
+  refreshCacheInventory();
+  refreshViews();
+}
+
+void EditorController::evictCacheToBudget() {
+  if (media_cache_ == nullptr) {
+    return;
+  }
+  if (cache_job_running_) {
+    window_.showTransientMessage(tr("Media cache is busy; try again in a moment"));
+    return;
+  }
+  (void)media_cache_->evict_to_budget();
+  media_thumbnails_.clear();
+  media_waveforms_.clear();
+  for (const assets::AssetRecord& record : imported_assets_) {
+    loadCachedPreviews(record);
+  }
+  refreshCacheInventory();
+  refreshViews();
+}
+
+void EditorController::clearMediaCache() {
+  if (media_cache_ == nullptr) {
+    return;
+  }
+  if (cache_job_running_) {
+    window_.showTransientMessage(tr("Media cache is busy; try again in a moment"));
+    return;
+  }
+  (void)media_cache_->clear();
+  media_thumbnails_.clear();
+  media_waveforms_.clear();
+  media_metadata_titles_.clear();
+  cache_disk_full_ = false;
+  for (assets::AssetRecord& record : imported_assets_) {
+    record.proxy.reset();
+    reregisterAssetMedia(record);
+  }
+  refreshCacheInventory();
+  refreshViews();
 }
 
 } // namespace video_editor::app

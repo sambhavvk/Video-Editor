@@ -14,17 +14,19 @@ import path.
 
 The project asset stores the source URI, quick fingerprint, high-level media attributes, and select
 metadata. Import accepts the best video and audio stream for current editing. Broader stream
-selection, image sequences, attachments, alternate angles/languages, and persistent relink UX are
-not complete.
+selection, image sequences, attachments, and alternate angles/languages are not complete.
 
 The lower-level relink contract compares fingerprints and refuses changed content unless the caller
-explicitly permits it. The desktop's Relink menu item is currently not connected.
+explicitly permits it. The desktop Relink menu is connected: it opens a file picker, confirms when
+content changed, persists the new URI with `RelinkAssetCommand`, and re-registers playback. Opening
+a project auto-recovers Missing assets when a same-named file in the project folder, last relink
+directory, or original parent still matches the stored fingerprint.
 
 ## Proxy recommendation and profile
 
-The asset policy recommends a proxy for difficult/high-resolution video. The desktop does not
-automatically enqueue it: the user right-clicks the media-bin item and chooses **Create editing
-proxy**.
+The asset policy recommends a proxy for difficult/high-resolution video. The desktop automatically
+enqueues that work for Online recommended assets after import and reopen (one job at a time). The
+user can still right-click a media-bin item and choose **Create editing proxy**.
 
 The requested default is:
 
@@ -108,7 +110,7 @@ generation parameters change without invalidating the whole asset. The store
 enforces a configurable byte budget (default 100 GB) with least-recently-used
 eviction; `put` writes a temp file, fsyncs it on POSIX, renames it into place,
 and protects the just-inserted entry from eviction. `inspect()` returns an
-LRU-ordered inventory for a future cache browser.
+LRU-ordered inventory for the cache browser.
 
 Three services fill the store:
 
@@ -131,22 +133,22 @@ serialize through the owning service.
 
 ## Cache locations and current limits
 
-The desktop places proxies below Qt's per-user cache location in a `proxies` directory, using the
-asset ID in the file name. The corresponding `.vepts` sidecar uses the proxy path plus the sidecar
-suffix. Working project recovery files are separate and live under application-local data, not the
-cache.
+The desktop opens one `CacheStore` under Qt's per-user cache location in `media_cache/`. Thumbnails,
+waveforms, metadata, completed proxies, and `.vepts` maps share that store's budget and LRU.
+`put_file` adopts large proxy files without loading them into RAM; `path_for` returns the blob path
+for playback. A legacy `proxies/{assetId}.proxy.{mov|mkv}` directory remains a read-only discovery
+fallback for caches written before this unification. Working project recovery files stay under
+application-local data, not the cache.
+
+`File > Manage Media Cache…` inspects the store, changes the persisted budget (10–200 GB, default
+100 GB), and can remove or clear rebuildable artifacts. `CacheErrorCode::Full` stops remaining
+thumbnail/waveform jobs and is reported to the user.
 
 Current limitations:
 
-- generated proxy association is not persisted or rediscovered after reopen;
-- the `media_cache` budget is not yet shared with proxy storage — each lives
-  under its own root and is evicted independently. A unified budget across
-  proxies, thumbnails, waveforms, and metadata remains future work;
-- there is no cache browser UI, disk-full guard, or cleanup policy;
-- `media_cache` FFmpeg-dependent generation paths are not yet covered by
-  integration tests with generated media fixtures;
-- unplugged/missing-media and disk-full behavior has not passed the required
-  fault matrix.
+- proxy generation still runs in-process; restartable worker isolation is a later gate;
+- playback does not yet consume `.vepts` for every VFR seek decision;
+- unplugged-media and disk-full behavior has not passed the required physical fault matrix.
 
 Deleting the cache should never destroy project edits or original media, but users should close the
 application before manual cleanup because an active proxy or preview job may be using it.

@@ -31,7 +31,8 @@ public beta. Save important work often and keep the original media files availab
 - Local transcription requires an explicitly downloaded, checksummed multilingual base model and a
   build with the pinned optional `whisper.cpp` backend. Builds without that backend keep manual
   captions available and report transcription as unavailable.
-- Relinking, persistent cache management, thumbnails, and waveforms are not complete workflows.
+- Relinking, cache management, thumbnails, and waveforms are connected in the current desktop slice.
+  Unplugged-media and disk-full fault matrices remain release work.
 - Project and internal schema compatibility are pre-beta and may change through migrations.
 
 See the [full status matrix](beta-feature-status.md) before relying on a capability.
@@ -70,8 +71,10 @@ Import using **File > Import Media**, the media-bin Import button, a command-lin
 or by dropping files on the program viewer. Import runs asynchronously and probes each file with
 FFmpeg. Failed items are reported without discarding successful imports.
 
-The media bin shows name, duration, detected format, and status. Search filters by name or format.
-Double-click an item to insert it at the playhead:
+The media bin shows a thumbnail, name, duration, detected format, and status (Original, Offline,
+Changed, Proxy recommended, Creating proxy…, or Proxy ready). Search filters by name or format.
+The Inspector Asset group edits a cached display title, tags, notes, and rating; an empty title
+falls back to the file name. Double-click an item to insert it at the playhead:
 
 - Video goes to the first unlocked targeted video track.
 - Audio goes to the first unlocked targeted audio track.
@@ -81,8 +84,17 @@ Double-click an item to insert it at the playhead:
 - The first inserted video clip derives sequence width, height, and nominal frame rate from the
   asset when those values are available. The sequence audio sample rate remains 48 kHz.
 
-The application references the original path. Moving or deleting that file can make the asset
-unavailable; the visible Relink command is not connected yet.
+The application references the original path. Missing files show **Offline** on the media bin and
+timeline; a fingerprint mismatch shows **Changed**. Right-click **Relink media…** to pick a
+replacement. Matching fingerprints relink immediately; changed content asks for confirmation. On
+open, matching files with the same name are recovered from the project folder, the last successful
+relink directory, or the original parent folder. Relinked URIs are saved with the project.
+
+**File > Manage Media Cache…** shows used space against a 10–200 GB budget (default 100 GB), lists
+thumbnails, waveforms, metadata, proxies, and PTS maps, and can remove entries or clear the cache.
+Clearing cache never deletes the `.veproj` or original media.
+
+Audio clips draw a waveform on the timeline when the cache has generated one.
 
 ## Edit the timeline
 
@@ -268,16 +280,15 @@ and one undo step; edits made after analysis make the review stale and require r
 
 ## Create an editing proxy
 
-For a media-bin item marked **Proxy recommended**, right-click and choose **Create editing proxy**.
-The same menu cancels an active generation. The current in-process background job creates a
-half-resolution ProRes Proxy/MOV with 48 kHz PCM audio when available, or uses the predetermined
-FFV1/Matroska fallback when configured encoders require it. Completion updates playback to permit
-the proxy; export still uses the original.
+4K long-GOP video is marked **Proxy recommended** and queued automatically after import or reopen
+when the original is online. Right-click any other item and choose **Create editing proxy**. The
+same menu cancels an active generation. Jobs run one at a time in-process: a half-resolution ProRes
+Proxy/MOV with 48 kHz PCM audio when available, or the predetermined FFV1/Matroska fallback.
+Completion updates playback to permit the proxy; export still uses the original.
 
-The generated proxy and `.vepts` timestamp map live in the application cache, not the project.
-Cancellation and failures do not commit a partial destination. Proxy association is currently
-session-local: reopening the project does not rediscover a previously generated proxy. There is no
-cache browser, size budget, or LRU eviction yet. See [Media, proxies, and cache](reference/media-proxies-and-cache.md).
+The generated proxy and `.vepts` timestamp map live in the media cache, not the project. Reopening
+the project rediscovers a matching proxy by asset id and source fingerprint. Cancellation and
+failures do not commit a partial destination. See [Media, proxies, and cache](reference/media-proxies-and-cache.md).
 
 ## Export a master or creator file
 

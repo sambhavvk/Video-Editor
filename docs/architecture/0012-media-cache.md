@@ -49,7 +49,7 @@ and three services that build on it.
   entry from eviction so a large new entry cannot evict itself.
 - Atomic writes: temp file + fsync (POSIX) + rename, then index update. A crash
   never leaves a partially written blob referenced by the index.
-- `inspect()` returns an LRU-ordered inventory for a future cache browser.
+- `inspect()` returns an LRU-ordered inventory for the cache browser.
 - Not thread-safe; callers serialize through the owning service.
 - Rebuildable: deleting the directory never destroys edits or originals.
 
@@ -101,27 +101,19 @@ produces the `AssetRecord` and fingerprint used as the cache key).
 
 ## Consequences
 
-- The "Metadata, thumbnails, waveforms" beta row moves from **Missing** to
-  **Partial**: the cache store, extractors, serializers, and unit tests are
-  implemented; desktop UI wiring (media-bin thumbnails, clip-header waveforms,
-  metadata editor panel) and FFmpeg-dependent integration tests are the
-  remaining work.
-- The cache store is the foundation for the broader "Cache management" row:
-  the 100 GB budget, LRU eviction, and `inspect()` inventory now exist. A cache
-  browser UI and cross-module budget sharing with proxies remain future work.
-- The store is deliberately not thread-safe; the application controller must
-  serialize access. This matches the existing in-process proxy/export pattern.
-- FFmpeg-dependent generation paths are not exercised by unit tests (which
-  cover only the pure resolvers and serializers). Integration tests against
-  generated fixtures, like `tests/proxy_service`, are a follow-up.
+- The "Metadata, thumbnails, waveforms" beta row is **Implemented**: the cache
+  store, extractors, serializers, desktop wiring (media-bin thumbnails,
+  timeline waveforms, Inspector metadata), and an FFmpeg lavfi generation test
+  exist.
+- The cache store is also the unified budget for proxies and `.vepts` maps via
+  `put_file` / `path_for` and `CacheKind::Proxy` / `CacheKind::ProxyPtsMap`.
+  **File > Manage Media Cache…** is the inspection UI.
+- The store is deliberately not thread-safe; the application controller
+  serializes access with a one-at-a-time cache job queue.
 - Windows blob fsync is deferred; the index uses `PRAGMA synchronous = FULL`
   for its own durability in the meantime.
 
 ## Open items
 
-- Wire `media_cache` into `editor_controller`: generate thumbnails on import,
-  render thumbnails in `MediaBinWidget`, draw waveforms in `timeline_widget`,
-  add a metadata editor panel.
-- Add FFmpeg-dependent integration tests with generated media fixtures.
-- Share the cache budget across proxies, thumbnails, and waveforms (currently
-  each artifact class has its own store root).
+- Physical unplug/disk-full fault-injection matrix (priority 7).
+- Restartable proxy worker IPC (priority 7); generation remains in-process.

@@ -11,6 +11,7 @@ endif()
 find_package(Qt6 6.11 REQUIRED COMPONENTS Core Gui Widgets)
 
 add_library(video_editor_desktop_ui STATIC
+    include/video_editor/desktop_ui/cache_browser_dialog.hpp
     include/video_editor/desktop_ui/command_palette.hpp
     include/video_editor/desktop_ui/editor_window.hpp
     include/video_editor/desktop_ui/keyframe_curve_widget.hpp
@@ -18,6 +19,7 @@ add_library(video_editor_desktop_ui STATIC
     include/video_editor/desktop_ui/program_viewer.hpp
     include/video_editor/desktop_ui/timeline_widget.hpp
     include/video_editor/desktop_ui/ui_types.hpp
+    src/cache_browser_dialog.cpp
     src/command_palette.cpp
     src/editor_window.cpp
     src/keyframe_curve_widget.cpp

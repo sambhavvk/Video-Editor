@@ -4,6 +4,7 @@
 
 #include "video_editor/desktop_ui/editor_window.hpp"
 
+#include "video_editor/desktop_ui/cache_browser_dialog.hpp"
 #include "video_editor/desktop_ui/command_palette.hpp"
 #include "video_editor/desktop_ui/panel_widgets.hpp"
 #include "video_editor/desktop_ui/program_viewer.hpp"
@@ -375,6 +376,7 @@ void EditorWindow::createPanels() {
   captions_panel_ = new CaptionsPanelWidget(this);
   deliver_panel_ = new DeliverPanelWidget(this);
   deliver_panel_->setExportEnabled(false);
+  cache_browser_ = new CacheBrowserDialog(this);
 
   media_dock_ = makeDock(QStringLiteral("mediaDock"), tr("Media Bin"), media_bin_, this);
   inspector_dock_ = makeDock(QStringLiteral("inspectorDock"), tr("Inspector"), inspector_, this);
@@ -423,6 +425,8 @@ void EditorWindow::createActions() {
   auto* import = create(QStringLiteral("importMedia"), tr("Import Media…"),
                         tr("Import video, audio, or images"), QKeySequence{tr("Ctrl+I")});
   import->setIcon(style()->standardIcon(QStyle::SP_DialogOpenButton));
+  create(QStringLiteral("manageMediaCache"), tr("Manage Media Cache…"),
+         tr("Review cache use and set the media cache budget"));
   auto* exportAction = create(QStringLiteral("export"), tr("Export Video…"),
                               tr("Open the Deliver workspace"), QKeySequence{tr("Ctrl+E")});
   exportAction->setIcon(style()->standardIcon(QStyle::SP_DialogSaveButton));
@@ -560,6 +564,7 @@ void EditorWindow::createMenus() {
   file->addAction(action(QStringLiteral("saveProjectAs")));
   file->addSeparator();
   file->addAction(action(QStringLiteral("importMedia")));
+  file->addAction(action(QStringLiteral("manageMediaCache")));
   file->addAction(action(QStringLiteral("export")));
   file->addSeparator();
   file->addAction(action(QStringLiteral("quit")));
@@ -689,6 +694,12 @@ void EditorWindow::createStatusBar() {
 void EditorWindow::connectControllerSurface() {
   connect(media_bin_, &MediaBinWidget::importRequested, this, &EditorWindow::importMediaRequested);
   connect(media_bin_, &MediaBinWidget::mediaActivated, this, &EditorWindow::mediaActivated);
+  connect(media_bin_, &MediaBinWidget::mediaSelectionChanged, this,
+          &EditorWindow::mediaSelectionChanged);
+  connect(action(QStringLiteral("manageMediaCache")), &QAction::triggered, this, [this] {
+    emit manageMediaCacheRequested();
+    cache_browser_->exec();
+  });
   connect(program_viewer_, &ProgramViewer::filesDropped, this,
           [this](const QStringList&) { emit importMediaRequested(); });
   connect(program_viewer_, &ProgramViewer::togglePlaybackRequested,
@@ -699,6 +710,8 @@ void EditorWindow::connectControllerSurface() {
   connect(effects_panel_, &EffectsPanelWidget::effectAddRequested, this,
           &EditorWindow::effectAddRequested);
   connect(inspector_, &InspectorWidget::parameterEdited, this, &EditorWindow::parameterEdited);
+  connect(inspector_, &InspectorWidget::assetMetadataEdited, this,
+          &EditorWindow::assetMetadataEdited);
   connect(inspector_, &InspectorWidget::keyframeToggleRequested, this,
           &EditorWindow::keyframeToggleRequested);
   connect(inspector_, &InspectorWidget::effectParameterEdited, this,
@@ -883,10 +896,10 @@ QString EditorWindow::darkStyleSheet() {
         QPushButton { background: #35445b; border: 1px solid #526987; border-radius: 4px; padding: 7px 12px; }
         QPushButton:hover { background: #405879; }
         QPushButton:pressed { background: #2f4059; }
-        QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
+        QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit {
             background: #181a1f; border: 1px solid #444a55; border-radius: 4px; padding: 5px; selection-background-color: #476892;
         }
-        QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus { border-color: #6d91c4; }
+        QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QPlainTextEdit:focus { border-color: #6d91c4; }
         QComboBox::drop-down { border: 0; width: 22px; }
         QDockWidget { color: #dce1e9; font-weight: 600; }
         QDockWidget::title { background: #2a2e36; border-bottom: 1px solid #3e434e; padding: 7px 8px; text-align: left; }

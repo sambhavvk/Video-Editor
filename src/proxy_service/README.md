@@ -18,3 +18,8 @@ to FFmpeg resampler rounding to the nearest output sample.
 Official packages must dynamically link the project's pinned LGPL FFmpeg
 bundle. The local developer build may link ABI-identical system FFmpeg only for
 testing, and must not be treated as a redistributable build.
+
+`discover_proxy` looks up a complete matching proxy in `CacheStore` (Proxy +
+ProxyPtsMap kinds) then in an optional legacy `{assetId}.proxy.{mov|mkv}`
+directory. Matching requires a valid `.vepts` whose source fingerprint still
+content-matches. `proxy_parameter_hash` is the stable cache key for a profile.

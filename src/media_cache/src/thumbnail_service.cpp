@@ -484,7 +484,7 @@ generate_from_source(const std::filesystem::path& asset_uri, int stream_index,
 
   ScaleContext scaler(sws_getCachedContext(
       nullptr, decoder_context->width, decoder_context->height, decoder_context->pix_fmt,
-      target_w, target_h, AV_PIX_FMT_YUV420P, SWS_BICUBIC | SWS_FULL_CHR_H_INT, nullptr, nullptr,
+      target_w, target_h, AV_PIX_FMT_YUVJ420P, SWS_BICUBIC | SWS_FULL_CHR_H_INT, nullptr, nullptr,
       nullptr));
   if (!scaler) {
     return ThumbnailResult<Thumbnail>::failure(
@@ -497,9 +497,10 @@ generate_from_source(const std::filesystem::path& asset_uri, int stream_index,
         make_error(ThumbnailErrorCode::Internal, "cannot allocate scaled frame",
                    AVERROR(ENOMEM)));
   }
-  scaled->format = AV_PIX_FMT_YUV420P;
+  scaled->format = AV_PIX_FMT_YUVJ420P;
   scaled->width = target_w;
   scaled->height = target_h;
+  scaled->color_range = AVCOL_RANGE_JPEG;
   {
     const int alloc_result = av_frame_get_buffer(scaled.get(), 32);
     if (alloc_result < 0) {
@@ -536,7 +537,9 @@ generate_from_source(const std::filesystem::path& asset_uri, int stream_index,
         make_error(ThumbnailErrorCode::Internal, "cannot allocate JPEG encoder context",
                    AVERROR(ENOMEM)));
   }
-  encoder_context->pix_fmt = AV_PIX_FMT_YUV420P;
+  encoder_context->pix_fmt = AV_PIX_FMT_YUVJ420P;
+  encoder_context->color_range = AVCOL_RANGE_JPEG;
+  encoder_context->strict_std_compliance = FF_COMPLIANCE_UNOFFICIAL;
   encoder_context->width = target_w;
   encoder_context->height = target_h;
   encoder_context->time_base = AVRational{1, 1};

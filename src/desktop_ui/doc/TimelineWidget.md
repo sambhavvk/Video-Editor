@@ -10,8 +10,10 @@ Namespace: `video_editor::desktop_ui`
 
 `TimelineWidget` is the virtualized Qt Widgets timeline surface. It paints tracks, clips, markers,
 gaps, transient edit previews, snap guides, and focus feedback without creating a child widget per
-clip. It owns transient selection/gesture state and emits presentation intents; the application
-controller performs exact model mutation and refreshes authoritative views.
+clip. When `TimelineClipView.waveform` is populated, the lower portion of a sufficiently large clip
+draws a static min/max waveform; PROXY and Media offline badges remain. It owns transient
+selection/gesture state and emits presentation intents; the application controller performs exact
+model mutation and refreshes authoritative views.
 
 ## Project structure and dependencies
 

@@ -37,6 +37,35 @@ constexpr QColor kPlayhead{244, 89, 93};
 constexpr QColor kSnapGuide{94, 214, 194};
 constexpr QColor kEditPreview{230, 238, 255, 105};
 
+void paintClipWaveform(QPainter& painter, const QRect& rect,
+                       const QVector<WaveformBucketView>& waveform, const bool leaveBottomBadge) {
+  if (waveform.isEmpty() || rect.width() < 16 || rect.height() < 24) {
+    return;
+  }
+  const int top_inset = 18;
+  const int bottom_inset = leaveBottomBadge ? 16 : 5;
+  const QRect band{rect.left() + 6, rect.top() + top_inset, std::max(0, rect.width() - 12),
+                   rect.height() - top_inset - bottom_inset};
+  if (band.width() < 4 || band.height() < 8) {
+    return;
+  }
+  const int buckets = waveform.size();
+  const qreal center = static_cast<qreal>(band.center().y());
+  const qreal half = static_cast<qreal>(band.height()) * 0.5;
+  painter.setPen(QPen{QColor{236, 240, 247, 170}, 1});
+  for (int x = 0; x < band.width(); ++x) {
+    const int index = static_cast<int>(static_cast<qint64>(x) * buckets / band.width());
+    const auto& bucket = waveform.at(index);
+    if (bucket.minimum > bucket.maximum) {
+      continue;
+    }
+    const qreal min_y = center + static_cast<qreal>(bucket.minimum) * half;
+    const qreal max_y = center + static_cast<qreal>(bucket.maximum) * half;
+    const qreal px = static_cast<qreal>(band.left() + x);
+    painter.drawLine(QPointF{px, min_y}, QPointF{px, max_y});
+  }
+}
+
 QString formatRulerTime(double seconds) {
   const auto total = static_cast<qint64>(std::max(0.0, seconds));
   const auto hours = total / 3600;
@@ -507,6 +536,7 @@ void TimelineWidget::paintEvent(QPaintEvent* event) {
     painter.drawText(rect.adjusted(8, 4, -badgeSpace, -4), Qt::AlignLeft | Qt::AlignTop,
                      fontMetrics().elidedText(clip.displayName, Qt::ElideRight,
                                               std::max(0, rect.width() - badgeSpace - 12)));
+    paintClipWaveform(painter, rect, clip.waveform, clip.offline);
     if (clip.proxy && rect.width() > 70) {
       painter.setFont(QFont{font().family(), std::max(7, font().pointSize() - 2), QFont::DemiBold});
       painter.setPen(QColor{224, 233, 246});

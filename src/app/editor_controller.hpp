@@ -19,6 +19,7 @@
 #include <QTimer>
 
 #include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <memory>
 #include <numeric>
@@ -39,6 +40,10 @@ class QVariant;
 
 namespace video_editor::desktop_ui {
 class EditorWindow;
+}
+
+namespace video_editor::media_cache {
+class CacheStore;
 }
 
 namespace video_editor::store {
@@ -279,9 +284,22 @@ private:
     QString error;
   };
 
+  struct CacheJobOutcome {
+    std::string asset_id;
+    int kind{0};
+    std::uint64_t generation{0};
+    bool succeeded{false};
+    bool cancelled{false};
+    bool disk_full{false};
+    QImage thumbnail;
+    QVector<desktop_ui::WaveformBucketView> waveform;
+    QString error;
+  };
+
   [[nodiscard]] static edit::Project makeDefaultProject();
   [[nodiscard]] static std::filesystem::path recoveryDirectory();
   [[nodiscard]] static std::filesystem::path proxyCacheDirectory();
+  [[nodiscard]] static std::filesystem::path mediaCacheDirectory();
   [[nodiscard]] std::filesystem::path newWorkingPath(const edit::EntityId& projectId) const;
   [[nodiscard]] bool confirmDiscardChanges();
   [[nodiscard]] bool saveTo(const std::filesystem::path& destination);
@@ -296,6 +314,26 @@ private:
                                 const QString& failureContext);
   void addImportedAsset(assets::AssetRecord asset);
   void generateProxy(const QString& assetId);
+  [[nodiscard]] bool reconstructMediaState();
+  void enqueueMediaCacheJobs(const assets::AssetRecord& asset);
+  void pumpCacheJobs();
+  void scheduleRecommendedProxies();
+  void pumpProxyQueue();
+  void relinkMedia(const QString& assetId);
+  void selectMedia(const QString& mediaId);
+  void saveAssetMetadata(const desktop_ui::AssetMetadataView& metadata);
+  void showMediaCacheBrowser();
+  void refreshCacheInventory();
+  void handleCacheBudgetChanged(qint64 budgetBytes);
+  void removeCacheEntry(const QString& assetId, const QString& kindText);
+  void removeCacheAsset(const QString& assetId);
+  void evictCacheToBudget();
+  void clearMediaCache();
+  void loadCachedPreviews(const assets::AssetRecord& record);
+  void presentAssetMetadata(const QString& assetId);
+  void reregisterAssetMedia(const assets::AssetRecord& record);
+  void dropCachedPreview(const std::string& asset_id);
+  void waitForInFlightCacheJob(bool cancel);
   void refreshViews();
   void refreshMediaView();
   void refreshTimelineView();
@@ -368,6 +406,18 @@ private:
   std::optional<std::filesystem::path> checkpoint_path_;
   std::filesystem::path working_path_;
   std::vector<assets::AssetRecord> imported_assets_;
+  std::unique_ptr<media_cache::CacheStore> media_cache_;
+  std::unordered_map<std::string, QImage> media_thumbnails_;
+  std::unordered_map<std::string, QVector<desktop_ui::WaveformBucketView>> media_waveforms_;
+  std::unordered_map<std::string, QString> media_metadata_titles_;
+  std::deque<std::pair<std::string, int>> cache_job_queue_;
+  bool cache_job_running_{false};
+  bool cache_disk_full_{false};
+  std::deque<QString> proxy_auto_queue_;
+  QString selected_media_id_;
+  std::stop_source cache_job_stop_source_;
+  QFuture<CacheJobOutcome> cache_job_future_;
+  std::uint64_t cache_job_generation_{0};
   std::unordered_map<std::string, std::shared_ptr<std::stop_source>> proxy_jobs_;
   std::vector<QFuture<ProxyOutcome>> proxy_futures_;
   std::vector<std::size_t> visible_caption_indices_;
@@ -456,6 +506,7 @@ private:
   QFuture<CaptionAnalysisOutcome> caption_analysis_future_;
   QFutureWatcher<CaptionAnalysisOutcome> caption_analysis_watcher_;
   std::uint64_t caption_analysis_generation_{0};
+  bool media_paths_updated_on_install_{false};
   bool dirty_{false};
   bool closing_after_confirmation_{false};
   double playback_rate_{0.0};

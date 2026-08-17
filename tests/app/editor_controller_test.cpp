@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 #include "editor_controller.hpp"
+#include "media_reconstruction.hpp"
 #include "path_utils.hpp"
 
 #include "video_editor/desktop_ui/editor_window.hpp"
@@ -9,6 +10,7 @@
 #include "video_editor/desktop_ui/timeline_widget.hpp"
 
 #include <QDataStream>
+#include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
@@ -131,6 +133,7 @@ private slots:
   void normalizationGenerationRejectsObsoleteCompletionAndClearsBusy();
   void mapsAndClampsReversedTranscriptWordsInPlaybackOrder();
   void rejectsOversizedModelDownloadBoundaries();
+  void reconstructsMediaRecordsFromPersistedAssets();
 
 private:
   std::unique_ptr<QTemporaryDir> application_data_;
@@ -838,6 +841,60 @@ void EditorControllerTest::realAudioDeviceUsesTheSampleCounterAsMasterClock() {
   const std::int64_t paused_at = controller.audioMasterSampleCounter();
   QTest::qWait(50);
   QCOMPARE(controller.audioMasterSampleCounter(), paused_at);
+}
+
+void EditorControllerTest::reconstructsMediaRecordsFromPersistedAssets() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString wave_path = directory.filePath(QStringLiteral("dialogue.wav"));
+  writeSilentWave(wave_path);
+
+  video_editor::assets::AssetService service;
+  auto imported = service.import(video_editor::app::pathFromQString(wave_path));
+  QVERIFY2(imported, imported ? "" : imported.error().message.c_str());
+
+  video_editor::edit::Asset asset;
+  asset.id = video_editor::edit::EntityId::generate();
+  asset.name = "dialogue.wav";
+  asset.source_uri = video_editor::app::utf8_from_path(imported.value().uri);
+  asset.fingerprint = imported.value().fingerprint.quick_sha256;
+  asset.has_audio = true;
+
+  const auto online =
+      video_editor::app::reconstruct_asset_record(asset, nullptr);
+  QCOMPARE(online.availability, video_editor::assets::AssetAvailability::Online);
+  QCOMPARE(online.id, asset.id.toString());
+  QCOMPARE(video_editor::app::utf8_from_path(online.uri), asset.source_uri);
+
+  const auto command = video_editor::app::relink_command_from_record(online);
+  QCOMPARE(command.asset_id, asset.id);
+  QCOMPARE(command.source_uri, asset.source_uri);
+  QCOMPARE(command.fingerprint, asset.fingerprint);
+  QVERIFY(command.has_audio);
+
+  video_editor::edit::Asset missing = asset;
+  missing.source_uri = video_editor::app::utf8_from_path(
+      video_editor::app::pathFromQString(directory.filePath(QStringLiteral("gone/dialogue.wav"))));
+  const auto absent = video_editor::app::reconstruct_asset_record(missing, nullptr);
+  QCOMPARE(absent.availability, video_editor::assets::AssetAvailability::Missing);
+
+  const QString search_root = directory.filePath(QStringLiteral("search"));
+  QVERIFY(QDir().mkpath(search_root));
+  const QString recovered_path = QDir(search_root).filePath(QStringLiteral("dialogue.wav"));
+  QVERIFY(QFile::copy(wave_path, recovered_path));
+
+  video_editor::app::MediaReconstructionOptions options;
+  options.search_directories.push_back(video_editor::app::pathFromQString(search_root));
+  const auto recovered = video_editor::app::reconstruct_asset_record(missing, nullptr, options);
+  QCOMPARE(recovered.availability, video_editor::assets::AssetAvailability::Online);
+  QCOMPARE(QFileInfo(video_editor::app::qStringFromPath(recovered.uri)).fileName(),
+           QStringLiteral("dialogue.wav"));
+  QVERIFY(QFileInfo::exists(video_editor::app::qStringFromPath(recovered.uri)));
+
+  const auto batch = video_editor::app::reconstruct_media_records({asset, missing}, nullptr, options);
+  QCOMPARE(batch.size(), std::size_t{2});
+  QCOMPARE(batch.front().availability, video_editor::assets::AssetAvailability::Online);
+  QCOMPARE(batch.back().availability, video_editor::assets::AssetAvailability::Online);
 }
 
 QTEST_MAIN(EditorControllerTest)

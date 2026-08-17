@@ -81,10 +81,11 @@ editorial fields. The decoded project ID must match the store metadata for recov
 or snapshots are rejected with an error
 rather than partly opening a project.
 
-Imported runtime `AssetRecord` data and proxy manifests are currently not rebuilt completely from
-the project snapshot. Original paths are registered for playback, but proxy association and some
-media-bin details are session-oriented. Persistent media reconstruction is therefore still a beta
-gap.
+Opening a checkpoint rebuilds session media from the snapshot: each asset is probed when the path
+exists, marked Missing or Changed otherwise, and may be auto-recovered from nearby folders when the
+filename and fingerprint match. Proxies are rediscovered from the media cache (or a legacy proxy
+directory) when the `.vepts` source fingerprint still matches. Originals stay authoritative for
+audio and export. Proxy paths are not stored in `.veproj`.
 
 ## Startup recovery catalog
 

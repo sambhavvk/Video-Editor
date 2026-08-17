@@ -45,7 +45,9 @@ Releases owned settings and normal QObject-owned children.
 
 `workspace()` returns the active workspace. `action(id)` returns a borrowed registered action or
 null. `programViewer()`, `timeline()`, `mediaBin()`, `inspector()`, `effectsPanel()`, `audioMixer()`,
-`captionsPanel()`, and `deliverPanel()` return borrowed, window-owned child pointers.
+`captionsPanel()`, `deliverPanel()`, and `cacheBrowser()` return borrowed, window-owned child
+pointers. `manageMediaCache` opens the modal media-cache dialog after emitting
+`manageMediaCacheRequested()` so the controller can refresh inventory.
 
 ### `void setProjectDisplayName(const QString& displayName)` / `void setProjectDirty(bool dirty)`
 
@@ -89,7 +91,8 @@ Emitted after the active layout changes.
 ### Project lifecycle signals
 
 `newProjectRequested()`, `openProjectRequested()`, `saveProjectRequested()`,
-`saveProjectAsRequested()`, and `importMediaRequested()` request controller workflows.
+`saveProjectAsRequested()`, `importMediaRequested()`, and `manageMediaCacheRequested()` request
+controller workflows.
 
 ### `void exportRequested(const QString& presetId)`
 
@@ -108,10 +111,12 @@ multi-selection/tool/header/marker/gap signals are emitted directly by `Timeline
 
 ### Panel signals
 
-`mediaActivated(const QString& mediaId)`, `effectAddRequested(const QString& effectId)`, and
-`parameterEdited(const QString& parameterId, const QVariant& value)` pass basic panel intent to the
-controller. Inspector effect/keyframe, mixer gain/pan/DSP/device/normalization, and Deliver option
-signals are exposed by their borrowed panel widgets and forwarded by the controller.
+`mediaActivated(const QString& mediaId)`, `mediaSelectionChanged(const QString& mediaId)`,
+`effectAddRequested(const QString& effectId)`, `parameterEdited(const QString& parameterId,
+const QVariant& value)`, and `assetMetadataEdited(const AssetMetadataView& metadata)` pass basic
+panel intent to the controller. Inspector effect/keyframe, mixer gain/pan/DSP/device/normalization,
+and Deliver option signals are exposed by their borrowed panel widgets and forwarded by the
+controller. Cache-browser budget/remove/evict/clear signals are emitted by `cacheBrowser()`.
 
 ## Protected event handlers
 

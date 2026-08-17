@@ -6,6 +6,13 @@ Header: `video_editor/desktop_ui/panel_widgets.hpp`
 
 Namespace: `video_editor::desktop_ui`
 
+## MediaBinWidget
+
+`MediaBinWidget` is a searchable table of `MediaItemView` rows: thumbnail, name, duration, format,
+and status. A non-empty `metadataTitle` is the visible name; `filePath` remains the tooltip. Status
+text is paired with color (`Offline`, `Changed`, proxy lifecycle, or `Original`). Relink is enabled
+for offline or content-changed items. `mediaSelectionChanged` reports the current row identity.
+
 ## Inspector and effects
 
 `InspectorWidget` presents clip transform/audio/title/speed state and typed effect parameters. The
@@ -13,6 +20,10 @@ controller supplies values with `setParameter` and a complete curve view with
 `setEffectParameters`. Effect signals distinguish base-value edits, keyframe toggle/selection,
 exact time/value, interpolation, deletion, and Bezier-control edits. All times are presentation
 ticks and are converted to clip-local edit-model `Time` by the controller.
+
+`setAssetMetadata` / `clearAssetMetadata` drive the Asset group (title, comma-separated tags, notes,
+rating 0–5). An empty `assetId` hides the group. Field edits emit a complete `AssetMetadataView`.
+`clearSelection()` also clears asset metadata.
 
 `EffectsPanelWidget` owns a searchable list of `EffectView` presets and emits activation/add intent.
 It does not instantiate a canonical effect itself.
@@ -58,6 +69,13 @@ discard, and selection intent; it never mutates the timeline itself.
 Style controls emit a complete `CaptionStyleView` for the selected stable caption ID. Alignment,
 vertical position, safe margin, font request, size, colors, emphasis, and outline are presentation
 values; the controller validates and commits them through the canonical caption command.
+
+## CacheBrowserDialog
+
+`CacheBrowserDialog` is a modal inventory of rebuildable cache artifacts. `setInventory` replaces
+used/budget bytes and the Name/Kind/Size/Last accessed table. Budget changes emit `budgetChanged`.
+Remove selected, remove asset, evict unused, and clear-all (after confirmation) emit intent only;
+the controller mutates `CacheStore`. Clearing never claims to delete projects or originals.
 
 ## Ownership and thread safety
 

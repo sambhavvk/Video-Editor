@@ -8,6 +8,7 @@ target_compile_features(video_editor_app_tests PRIVATE cxx_std_20)
 target_link_libraries(video_editor_app_tests
   PRIVATE
     video_editor_app_controller
+    video_editor::media_cache
     video_editor::project_warnings
     Qt6::Test
     Qt6::Widgets)

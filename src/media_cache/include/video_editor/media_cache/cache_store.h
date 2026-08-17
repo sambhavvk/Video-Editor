@@ -187,7 +187,7 @@ public:
   [[nodiscard]] CacheResult<void> clear();
 
   // Returns a snapshot of the store contents, sorted by last-access time
-  // ascending (least-recently-used first). Useful for a future cache browser.
+  // ascending (least-recently-used first). Used by the cache browser.
   [[nodiscard]] CacheResult<CacheInventory> inspect();
 
   [[nodiscard]] std::uint64_t budget_bytes() const noexcept { return options_.budget_bytes; }

@@ -30,7 +30,7 @@ flowchart LR
     Realtime -->|"master playhead"| Controller
     Import["Asset service"] --> Registry
     Import --> Proxy["Proxy service"]
-    Import --> MediaCache["Media cache: thumbnails, waveforms, metadata"]
+    Import --> MediaCache["Media cache: thumbs, waveforms, metadata, proxies"]
     MediaCache --> CacheStore["Content-addressed LRU store"]
     Jobs["Protobuf job protocol"] --> Worker["Worker host: probe and proxy"]
     Controller -->|"one framed job"| TranscribeWorker["Transcription worker"]
@@ -66,7 +66,7 @@ or Unix-socket job service is not connected.
 | `media_codec` | Narrow FFmpeg runtime/version checks and media probing | Timeline ownership |
 | `asset_service` | File fingerprints, import/relink validation, proxy recommendation policy | A persistent media-bin database |
 | `proxy_service` | Cancellable proxy transcode, profile fallback, versioned PTS sidecar, atomic output | Authoritative media or a cache eviction service |
-| `media_cache` | Content-addressed rebuildable-artifact store (100 GB LRU budget, atomic put, inventory) and the thumbnail, waveform, and metadata services that fill it | Authoritative media, the edit model, or a cache eviction policy for proxies |
+| `media_cache` | Content-addressed rebuildable-artifact store (thumbs, waveforms, metadata, proxies, PTS maps; LRU budget; `put_file`) | Authoritative media or the edit model |
 | `playback` | Original/proxy registry, persistent FFmpeg decode sessions, keyframe seek, epoch cancellation, CPU color conversion | Audio-device playback or full color management |
 | `render_engine` | Pull-based deterministic CPU frame graph including title/transition rendering, typed effect/keyframe evaluation, known color/crop/blur processing, and cache; capability-gated libplacebo D3D11/Vulkan transform/composite path with typed per-frame CPU fallback | Native desktop swapchain presentation, native GPU title/transition/effect shaders, rotation around a moved pivot, full color/LUT parity, hardware decoder, or zero-copy bridge |
 | `export_service` | Revision-bound originals-only FFV1/ProRes masters and FOSS VP9/Opus WebM creator delivery, exact frame/sample spans, scale/frame-rate controls, caption burn-in/sidecars, optional QSV/VAAPI VP9 with complete libvpx retry, and atomic media commit | H.264/AAC approval, embedded subtitle streams, or render queue |
@@ -130,10 +130,10 @@ presentation state, not project entities. Original media remains
 authoritative for image/audio content but is referenced rather than embedded.
 
 Proxies, PTS sidecars, thumbnails, waveforms, decoded frames, render results, GPU textures, and
-checksummed transcription models are rebuildable and stay outside `.veproj`. Proxies, a per-asset thumbnail
-service, a waveform pyramid service, a metadata document service, and a shared content-addressed
-cache store with a 100 GB LRU budget are implemented in `media_cache`; the unified budget is not
-yet shared across proxies and these artifacts, and a cache browser UI remains future work.
+checksummed transcription models are rebuildable and stay outside `.veproj`. The desktop owns one
+`media_cache` `CacheStore` with a configurable LRU budget that also holds completed proxies and
+`.vepts` maps. Media-bin thumbnails, timeline waveforms, Inspector metadata, Relink, proxy
+rediscovery, and **File > Manage Media Cache…** are wired. Proxy generation remains in-process.
 
 ## Concurrency and cancellation
 
