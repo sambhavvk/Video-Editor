@@ -16,6 +16,7 @@ target_link_libraries(
   video_editor_proxy_service_tests
   PRIVATE
     VideoEditor::ProxyService
+    video_editor::media_cache
     video_editor::media_codec
     video_editor::project_warnings
     PkgConfig::PROXY_TEST_AVFORMAT

@@ -5,6 +5,7 @@
 #pragma once
 
 #include <QColor>
+#include <QImage>
 #include <QMetaType>
 #include <QPointF>
 #include <QString>
@@ -35,7 +36,10 @@ struct MediaItemView {
   QString filePath;
   QString durationText;
   QString formatText;
+  QString metadataTitle;
+  QImage thumbnail;
   bool offline{false};
+  bool contentChanged{false};
   bool proxyAvailable{false};
   bool proxyRecommended{false};
   bool proxyGenerating{false};
@@ -137,6 +141,11 @@ struct AudioTrackMeterView {
 // Times are expressed in the TimelineWidget time scale supplied by the caller.
 // The presentation model intentionally carries no edit-model types so the UI can
 // be integrated before that module is linked.
+struct WaveformBucketView {
+  float minimum{-1.0F};
+  float maximum{1.0F};
+};
+
 struct TimelineClipView {
   QString id;
   QString displayName;
@@ -147,6 +156,29 @@ struct TimelineClipView {
   bool selected{false};
   bool offline{false};
   bool proxy{false};
+  QVector<WaveformBucketView> waveform;
+};
+
+struct AssetMetadataView {
+  QString assetId;
+  QString title;
+  QStringList tags;
+  QString notes;
+  int rating{0};
+};
+
+struct CacheEntryView {
+  QString assetId;
+  QString displayName;
+  QString kindText;
+  qint64 bytes{0};
+  qint64 lastAccessUtcMs{0};
+};
+
+struct CacheInventoryView {
+  qint64 totalBytes{0};
+  qint64 budgetBytes{0};
+  QVector<CacheEntryView> entries;
 };
 
 struct EffectView {

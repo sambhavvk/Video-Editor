@@ -15,6 +15,7 @@ extern "C" {
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -23,6 +24,7 @@ extern "C" {
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 namespace video_editor::proxy {
@@ -536,6 +538,145 @@ TEST(ProxyGeneration, AlreadyCancelledRequestDoesNotCreateDestinations) {
   EXPECT_EQ(result.error().code, ErrorCode::Cancelled);
   EXPECT_FALSE(std::filesystem::exists(destination));
   EXPECT_FALSE(std::filesystem::exists(default_pts_map_path(destination)));
+}
+
+template <typename Integer>
+void append_little_endian(std::vector<std::byte>& output, const Integer value) {
+  using Unsigned = std::make_unsigned_t<Integer>;
+  const auto bits = static_cast<Unsigned>(value);
+  for (std::size_t shift = 0; shift < sizeof(Integer); ++shift) {
+    output.push_back(
+        static_cast<std::byte>((bits >> (shift * 8U)) & static_cast<Unsigned>(0xFFU)));
+  }
+}
+
+void append_prefixed_string(std::vector<std::byte>& output, const std::string& value) {
+  append_little_endian(output, static_cast<std::uint32_t>(value.size()));
+  for (const char byte : value) {
+    output.push_back(static_cast<std::byte>(static_cast<unsigned char>(byte)));
+  }
+}
+
+[[nodiscard]] std::vector<std::byte> make_pts_map_bytes(const assets::FileFingerprint& fingerprint,
+                                                        const VideoCodec codec,
+                                                        const Container container) {
+  std::vector<std::byte> output;
+  for (const char byte : std::string_view{"VEPTSMAP"}) {
+    output.push_back(static_cast<std::byte>(static_cast<unsigned char>(byte)));
+  }
+  append_little_endian(output, std::uint32_t{1});
+  append_little_endian(output, static_cast<std::uint8_t>(codec));
+  append_little_endian(output, static_cast<std::uint8_t>(container));
+  append_little_endian(output, std::uint16_t{0});
+  append_little_endian(output, static_cast<std::uint64_t>(fingerprint.size));
+  append_little_endian(output, fingerprint.modified_nanoseconds);
+  append_prefixed_string(output, fingerprint.quick_sha256);
+  append_little_endian(output, std::uint8_t{0});
+  append_little_endian(output, std::uint32_t{1});
+  append_little_endian(output, std::int32_t{0});
+  append_little_endian(output, std::int32_t{0});
+  append_little_endian(output, std::int32_t{1});
+  append_little_endian(output, std::int32_t{25});
+  append_little_endian(output, std::int32_t{1});
+  append_little_endian(output, std::int32_t{25});
+  append_little_endian(output, std::int64_t{0});
+  append_little_endian(output, std::uint64_t{0});
+  return output;
+}
+
+void write_bytes(const std::filesystem::path& path, const std::vector<std::byte>& bytes) {
+  std::ofstream output(path, std::ios::binary | std::ios::trunc);
+  output.write(reinterpret_cast<const char*>(bytes.data()),
+               static_cast<std::streamsize>(bytes.size()));
+}
+
+[[nodiscard]] assets::FileFingerprint make_fingerprint(const std::uint64_t size, const char fill) {
+  assets::FileFingerprint fingerprint;
+  fingerprint.size = size;
+  fingerprint.modified_nanoseconds = 1;
+  fingerprint.quick_sha256 = std::string(64, fill);
+  return fingerprint;
+}
+
+TEST(ProxyDiscovery, ParameterHashIsStableForDefaultAndResolvedProfiles) {
+  EXPECT_EQ(proxy_parameter_hash(ProxyProfile{}), proxy_parameter_hash(ProxyProfile{}));
+  const ProxyProfile fallback = patent_neutral_fallback_profile();
+  EXPECT_NE(proxy_parameter_hash(ProxyProfile{}), proxy_parameter_hash(fallback));
+  ResolvedProfile resolved;
+  resolved.requested = ProxyProfile{};
+  resolved.video_codec = VideoCodec::ProResProxy;
+  resolved.container = Container::QuickTime;
+  resolved.used_fallback = false;
+  EXPECT_NE(proxy_parameter_hash(ProxyProfile{}), proxy_parameter_hash(resolved));
+  EXPECT_EQ(proxy_parameter_hash(resolved), proxy_parameter_hash(resolved));
+}
+
+TEST(ProxyDiscovery, FindsCompleteProxyInCacheStore) {
+  TemporaryDirectory directory;
+  media_cache::CacheStore cache(directory.path() / "cache");
+  const std::string asset_id = "asset-discover";
+  const auto fingerprint = make_fingerprint(2048, 'a');
+  const std::string hash = proxy_parameter_hash(ProxyProfile{});
+
+  const auto proxy_source = directory.path() / "proxy.mov";
+  write_text(proxy_source, "dummy-proxy-bytes");
+  ASSERT_TRUE(cache
+                  .put_file({.asset_id = asset_id,
+                             .kind = media_cache::CacheKind::Proxy,
+                             .parameter_hash = hash},
+                            proxy_source)
+                  .has_value());
+
+  const auto pts_source = directory.path() / "proxy.vepts";
+  write_bytes(pts_source, make_pts_map_bytes(fingerprint, VideoCodec::ProResProxy,
+                                             Container::QuickTime));
+  ASSERT_TRUE(cache
+                  .put_file({.asset_id = asset_id,
+                             .kind = media_cache::CacheKind::ProxyPtsMap,
+                             .parameter_hash = hash},
+                            pts_source)
+                  .has_value());
+
+  const auto found = discover_proxy(asset_id, fingerprint, cache);
+  ASSERT_TRUE(found.has_value());
+  EXPECT_TRUE(found->manifest.complete);
+  EXPECT_EQ(found->manifest.engine_version, "proxy-service-v1");
+  EXPECT_TRUE(found->manifest.source_fingerprint.content_matches(fingerprint));
+  EXPECT_EQ(found->manifest.profile.codec, assets::ProxyCodec::ProResProxy);
+  EXPECT_EQ(found->manifest.profile.maximum_width, 1920);
+  EXPECT_EQ(found->manifest.profile.maximum_height, 1080);
+  EXPECT_TRUE(found->manifest.profile.include_pcm_audio);
+  EXPECT_TRUE(std::filesystem::exists(found->manifest.proxy_uri));
+  EXPECT_TRUE(std::filesystem::exists(found->pts_map_path));
+
+  const auto mismatch = discover_proxy(asset_id, make_fingerprint(2048, 'b'), cache);
+  EXPECT_FALSE(mismatch.has_value());
+}
+
+TEST(ProxyDiscovery, FindsLegacyDirectoryProxyAndIgnoresIncompleteFiles) {
+  TemporaryDirectory directory;
+  media_cache::CacheStore cache(directory.path() / "cache");
+  const std::string asset_id = "legacy-asset";
+  const auto fingerprint = make_fingerprint(512, 'c');
+  const auto legacy = directory.path() / "legacy";
+  std::filesystem::create_directories(legacy);
+
+  const auto incomplete = legacy / (asset_id + ".proxy.mkv");
+  write_text(incomplete, "incomplete-proxy");
+
+  EXPECT_FALSE(discover_proxy(asset_id, fingerprint, cache, legacy).has_value());
+
+  const auto proxy = legacy / (asset_id + ".proxy.mov");
+  write_text(proxy, "legacy-proxy");
+  write_bytes(default_pts_map_path(proxy),
+              make_pts_map_bytes(fingerprint, VideoCodec::Ffv1, Container::Matroska));
+
+  const auto found = discover_proxy(asset_id, fingerprint, cache, legacy);
+  ASSERT_TRUE(found.has_value());
+  EXPECT_EQ(found->manifest.proxy_uri, proxy);
+  EXPECT_EQ(found->pts_map_path, default_pts_map_path(proxy));
+  EXPECT_EQ(found->manifest.profile.codec, assets::ProxyCodec::Ffv1);
+  EXPECT_TRUE(found->manifest.complete);
 }
 
 } // namespace

@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -17,6 +18,8 @@ enum class CacheKind : std::uint8_t {
   Thumbnail = 1,
   Waveform = 2,
   Metadata = 3,
+  Proxy = 4,
+  ProxyPtsMap = 5,
 };
 
 // Options for opening a CacheStore. Defined as a freestanding struct (rather
@@ -150,9 +153,19 @@ public:
   // even after evicting everything else.
   [[nodiscard]] CacheResult<void> put(const CacheKey& key, std::span<const std::byte> bytes);
 
+  // Adopts an existing file into the blob store without reading it into memory.
+  // Moves when source and destination are on the same filesystem; otherwise copies
+  // then removes the source on success. Atomically replaces any existing entry.
+  // Returns Full if the file is larger than the budget.
+  [[nodiscard]] CacheResult<void> put_file(const CacheKey& key, const std::filesystem::path& source);
+
   // Reads bytes under key. Updates last-access time. Returns NotFound for
   // missing entries.
   [[nodiscard]] CacheResult<std::vector<std::byte>> get(const CacheKey& key);
+
+  // Returns the on-disk blob path and updates LRU last-access time (like get).
+  // Returns NotFound if missing. Does not load bytes.
+  [[nodiscard]] CacheResult<std::filesystem::path> path_for(const CacheKey& key);
 
   // Returns true if an entry exists. Does not update last-access time.
   [[nodiscard]] CacheResult<bool> contains(const CacheKey& key);

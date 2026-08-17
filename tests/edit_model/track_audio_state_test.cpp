@@ -165,7 +165,8 @@ TEST(TrackAudioStateTest, IsAppendedAfterEveryExistingOperation) {
   EXPECT_EQ(EditOperation{AddTrackEffectCommand{}}.index(), 40U);
   EXPECT_EQ(EditOperation{RemoveTrackEffectCommand{}}.index(), 41U);
   EXPECT_EQ(EditOperation{SetTrackEffectParameterCommand{}}.index(), 42U);
-  EXPECT_EQ(std::variant_size_v<EditOperation>, 45U);
+  EXPECT_EQ(EditOperation{RelinkAssetCommand{}}.index(), 45U);
+  EXPECT_EQ(std::variant_size_v<EditOperation>, 46U);
 }
 
 TEST(TrackAudioMixTest, AppliesGainAndPanToAudioTrackOnly) {

@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 #pragma once
 
+#include "video_editor/asset_service/asset_service.h"
 #include "video_editor/asset_service/fingerprint.h"
+#include "video_editor/media_cache/cache_store.h"
 
 #include <cstdint>
 #include <filesystem>
@@ -212,5 +214,26 @@ struct GenerateResult {
                                                     ProgressCallback progress = {});
 
 [[nodiscard]] Result<PtsMap> load_pts_map(const std::filesystem::path& path);
+
+// Stable cache parameter hash for the default/resolved half-res proxy profile.
+[[nodiscard]] std::string proxy_parameter_hash(const ProxyProfile& profile);
+[[nodiscard]] std::string proxy_parameter_hash(const ResolvedProfile& profile);
+
+struct DiscoveredProxy {
+  assets::ProxyManifest manifest;
+  std::filesystem::path pts_map_path;
+};
+
+// Discover a complete matching proxy for asset_id whose .vepts source fingerprint
+// content_matches `source_fingerprint`. Checks CacheStore Proxy + ProxyPtsMap
+// kinds first (using proxy_parameter_hash of default ProxyProfile and of
+// patent_neutral_fallback_profile), then optional legacy_directory for
+// `{assetId}.proxy.mov` / `{assetId}.proxy.mkv` plus `.vepts` sidecar via
+// default_pts_map_path. Ignore incomplete/mismatched/missing files.
+[[nodiscard]] std::optional<DiscoveredProxy>
+discover_proxy(const std::string& asset_id,
+               const assets::FileFingerprint& source_fingerprint,
+               media_cache::CacheStore& cache,
+               const std::optional<std::filesystem::path>& legacy_directory = std::nullopt);
 
 } // namespace video_editor::proxy

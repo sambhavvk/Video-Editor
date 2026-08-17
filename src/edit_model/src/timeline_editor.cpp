@@ -1160,6 +1160,41 @@ struct PlannedClip final {
             project.assets.erase(found);
             return std::nullopt;
           },
+          [&](const RelinkAssetCommand& command) -> std::optional<EditError> {
+            if (command.asset_id.isNil()) {
+              return error(EditErrorCode::InvalidArgument, "asset id cannot be nil");
+            }
+            if (command.source_uri.empty() || command.fingerprint.empty()) {
+              return error(EditErrorCode::InvalidArgument,
+                           "relink source uri and fingerprint cannot be empty");
+            }
+            const auto found =
+                std::find_if(project.assets.begin(), project.assets.end(),
+                             [&](const Asset& candidate) { return candidate.id == command.asset_id; });
+            if (found == project.assets.end()) {
+              return error(EditErrorCode::EntityNotFound, "asset was not found");
+            }
+            Asset& asset = *found;
+            const auto filename_of = [](const std::string& uri) -> std::string {
+              const auto separator = uri.find_last_of("/\\");
+              return separator == std::string::npos ? uri : uri.substr(separator + 1);
+            };
+            if (asset.name == filename_of(asset.source_uri)) {
+              asset.name = filename_of(command.source_uri);
+            }
+            asset.source_uri = command.source_uri;
+            asset.fingerprint = command.fingerprint;
+            asset.duration = command.duration;
+            asset.has_video = command.has_video;
+            asset.has_audio = command.has_audio;
+            asset.width = command.width;
+            asset.height = command.height;
+            asset.nominal_frame_rate = command.nominal_frame_rate;
+            asset.audio_sample_rate = command.audio_sample_rate;
+            asset.audio_channels = command.audio_channels;
+            asset.metadata = command.metadata;
+            return std::nullopt;
+          },
           [&](const AddSequenceCommand& command) -> std::optional<EditError> {
             if (command.sequence.id.isNil()) {
               return error(EditErrorCode::InvalidArgument, "sequence id cannot be nil");
@@ -2192,6 +2227,8 @@ std::string commandName(const EditCommand& command) {
           return "Add asset";
         if constexpr (std::is_same_v<T, RemoveAssetCommand>)
           return "Remove asset";
+        if constexpr (std::is_same_v<T, RelinkAssetCommand>)
+          return "Relink asset";
         if constexpr (std::is_same_v<T, AddSequenceCommand>)
           return "Add sequence";
         if constexpr (std::is_same_v<T, RemoveSequenceCommand>)

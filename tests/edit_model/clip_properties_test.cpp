@@ -90,7 +90,8 @@ TEST(ClipPropertiesTest, AppendsOperationsWithoutChangingExistingVariantOrdinals
   EXPECT_EQ(EditOperation{SetTrackTargetedCommand{}}.index(), 37U);
   EXPECT_EQ(EditOperation{CloseGapCommand{}}.index(), 38U);
   EXPECT_EQ(EditOperation{SetTrackAudioMixCommand{}}.index(), 39U);
-  EXPECT_EQ(std::variant_size_v<EditOperation>, 45U);
+  EXPECT_EQ(EditOperation{RelinkAssetCommand{}}.index(), 45U);
+  EXPECT_EQ(std::variant_size_v<EditOperation>, 46U);
 }
 
 TEST(ClipPropertiesTest, AppliesAndRoundTripsTypedPropertiesAsExactRevisions) {

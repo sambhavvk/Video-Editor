@@ -25,6 +25,7 @@ target_link_libraries(
   PUBLIC
     video_editor::project_options
     video_editor::asset_service
+    video_editor::media_cache
   PRIVATE
     video_editor::project_warnings
     PkgConfig::AVFORMAT

@@ -270,6 +270,103 @@ struct DigestContextDeleter {
   return true;
 }
 
+[[nodiscard]] std::filesystem::path unique_temp_sibling(const std::filesystem::path& final_path) {
+  const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+  static std::atomic<std::uint64_t> sequence{0};
+  return final_path.parent_path() /
+         (".blob-" + std::to_string(stamp) + "-" +
+          std::to_string(sequence.fetch_add(1, std::memory_order_relaxed)) + ".tmp");
+}
+
+[[nodiscard]] bool fsync_regular_file(const std::filesystem::path& path, std::string& error_message) {
+#if !defined(_WIN32)
+  const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd >= 0) {
+    int result = 0;
+    do {
+      result = ::fsync(fd);
+    } while (result != 0 && errno == EINTR);
+    const int saved_errno = errno;
+    ::close(fd);
+    if (result != 0) {
+      error_message = std::string("fsync of blob failed: ") + std::strerror(saved_errno);
+      return false;
+    }
+  }
+#else
+  static_cast<void>(path);
+  static_cast<void>(error_message);
+#endif
+  return true;
+}
+
+void fsync_directory_best_effort(const std::filesystem::path& directory) {
+#if !defined(_WIN32)
+  const int dir_fd = ::open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (dir_fd >= 0) {
+    int result = 0;
+    do {
+      result = ::fsync(dir_fd);
+    } while (result != 0 && errno == EINTR);
+    ::close(dir_fd);
+  }
+#else
+  static_cast<void>(directory);
+#endif
+}
+
+[[nodiscard]] bool adopt_blob_atomic(const std::filesystem::path& source,
+                                     const std::filesystem::path& final_path,
+                                     std::string& error_message) {
+  namespace fs = std::filesystem;
+  std::error_code ec;
+
+  const fs::path parent = final_path.parent_path();
+  if (!fs::exists(parent, ec)) {
+    fs::create_directories(parent, ec);
+    if (ec) {
+      error_message = "cannot create blob directory: " + ec.message();
+      return false;
+    }
+  }
+
+  ec.clear();
+  if (fs::exists(final_path, ec) && !ec) {
+    ec.clear();
+    if (fs::equivalent(source, final_path, ec) && !ec) {
+      return true;
+    }
+  }
+  ec.clear();
+
+  const fs::path temp_path = unique_temp_sibling(final_path);
+  fs::create_hard_link(source, temp_path, ec);
+  if (ec) {
+    ec.clear();
+    fs::copy_file(source, temp_path, fs::copy_options::overwrite_existing, ec);
+    if (ec) {
+      error_message = "cannot copy source into cache: " + ec.message();
+      fs::remove(temp_path, ec);
+      return false;
+    }
+  }
+
+  if (!fsync_regular_file(temp_path, error_message)) {
+    fs::remove(temp_path, ec);
+    return false;
+  }
+
+  fs::rename(temp_path, final_path, ec);
+  if (ec) {
+    error_message = "cannot rename temp blob into place: " + ec.message();
+    fs::remove(temp_path, ec);
+    return false;
+  }
+
+  fsync_directory_best_effort(parent);
+  return true;
+}
+
 [[nodiscard]] bool read_blob(const std::filesystem::path& path, std::vector<std::byte>& out,
                              std::string& error_message) {
   std::ifstream input(path, std::ios::binary);
@@ -718,6 +815,100 @@ CacheResult<void> CacheStore::put(const CacheKey& key, std::span<const std::byte
   return CacheResult<void>::success();
 }
 
+CacheResult<void> CacheStore::put_file(const CacheKey& key, const std::filesystem::path& source) {
+  if (!key.valid()) {
+    return CacheResult<void>::failure(
+        make_error(CacheErrorCode::InvalidArgument, "cache key is empty"));
+  }
+  if (source.empty()) {
+    return CacheResult<void>::failure(
+        make_error(CacheErrorCode::InvalidArgument, "source path is empty"));
+  }
+
+  std::error_code ec;
+  if (!std::filesystem::exists(source, ec) || ec) {
+    return CacheResult<void>::failure(
+        make_error(CacheErrorCode::NotFound, "source file does not exist", current_native_code()));
+  }
+
+  ec.clear();
+  const auto size = std::filesystem::file_size(source, ec);
+  if (ec) {
+    return CacheResult<void>::failure(make_error(CacheErrorCode::WriteFailed,
+                                                 "cannot determine source size: " + ec.message(),
+                                                 current_native_code()));
+  }
+  const std::uint64_t blob_bytes = static_cast<std::uint64_t>(size);
+  if (options_.budget_bytes != 0 && blob_bytes > options_.budget_bytes) {
+    return CacheResult<void>::failure(
+        make_error(CacheErrorCode::Full,
+                   "blob size " + std::to_string(blob_bytes) + " exceeds budget " +
+                       std::to_string(options_.budget_bytes)));
+  }
+
+  const std::filesystem::path blob_path = blob_path_for(root_, key);
+  if (blob_path.empty()) {
+    return CacheResult<void>::failure(
+        make_error(CacheErrorCode::Internal, "cannot compute blob name"));
+  }
+
+  bool source_is_destination = false;
+  {
+    std::error_code equiv_ec;
+    if (std::filesystem::exists(blob_path, equiv_ec) && !equiv_ec) {
+      equiv_ec.clear();
+      source_is_destination =
+          std::filesystem::equivalent(source, blob_path, equiv_ec) && !equiv_ec;
+    }
+  }
+
+  if (!source_is_destination) {
+    std::string write_error;
+    if (!adopt_blob_atomic(source, blob_path, write_error)) {
+      return CacheResult<void>::failure(
+          make_error(CacheErrorCode::WriteFailed, std::move(write_error), current_native_code()));
+    }
+  }
+
+  const std::int64_t now = impl_->monotonic_now_ms();
+  Statement* insert = impl_->ensure_insert();
+  if (insert == nullptr || !insert->valid()) {
+    if (!source_is_destination) {
+      remove_blob_quietly(blob_path);
+    }
+    return CacheResult<void>::failure(
+        make_error(CacheErrorCode::Internal, "cannot prepare insert statement"));
+  }
+
+  insert->bind_text(1, key.asset_id);
+  insert->bind_int(2, static_cast<int>(key.kind));
+  insert->bind_text(3, key.parameter_hash);
+  insert->bind_text(4, blob_path.string());
+  insert->bind_int64(5, static_cast<std::int64_t>(blob_bytes));
+  insert->bind_int64(6, now);
+  insert->bind_int64(7, now);
+  const int step_result = insert->step();
+  insert->reset();
+
+  if (step_result != SQLITE_DONE) {
+    if (!source_is_destination) {
+      remove_blob_quietly(blob_path);
+    }
+    return CacheResult<void>::failure(
+        make_error(CacheErrorCode::Internal, "cannot insert cache entry"));
+  }
+
+  if (!source_is_destination) {
+    remove_blob_quietly(source);
+  }
+
+  impl_->protected_keys.insert(composite_key(key));
+  (void)impl_->evict_to_budget(options_.budget_bytes);
+  impl_->protected_keys.clear();
+
+  return CacheResult<void>::success();
+}
+
 CacheResult<std::vector<std::byte>> CacheStore::get(const CacheKey& key) {
   if (!key.valid()) {
     return CacheResult<std::vector<std::byte>>::failure(
@@ -775,6 +966,56 @@ CacheResult<std::vector<std::byte>> CacheStore::get(const CacheKey& key) {
   }
 
   return CacheResult<std::vector<std::byte>>::success(std::move(out));
+}
+
+CacheResult<std::filesystem::path> CacheStore::path_for(const CacheKey& key) {
+  if (!key.valid()) {
+    return CacheResult<std::filesystem::path>::failure(
+        make_error(CacheErrorCode::InvalidArgument, "cache key is empty"));
+  }
+
+  Statement* select = impl_->ensure_select_row();
+  if (select == nullptr || !select->valid()) {
+    return CacheResult<std::filesystem::path>::failure(
+        make_error(CacheErrorCode::Internal, "cannot prepare select statement"));
+  }
+
+  select->bind_text(1, key.asset_id);
+  select->bind_int(2, static_cast<int>(key.kind));
+  select->bind_text(3, key.parameter_hash);
+  const int step_result = select->step();
+  if (step_result != SQLITE_ROW) {
+    select->reset();
+    return CacheResult<std::filesystem::path>::failure(
+        make_error(CacheErrorCode::NotFound, "cache entry not found"));
+  }
+
+  const std::string blob_path_str = select->column_text(1);
+  select->reset();
+
+  if (blob_path_str.empty()) {
+    return CacheResult<std::filesystem::path>::failure(
+        make_error(CacheErrorCode::NotFound, "cache entry has no blob path"));
+  }
+
+  const std::filesystem::path blob_path(blob_path_str);
+  std::error_code ec;
+  if (!std::filesystem::exists(blob_path, ec)) {
+    return CacheResult<std::filesystem::path>::failure(
+        make_error(CacheErrorCode::NotFound, "blob file is missing"));
+  }
+
+  Statement* touch = impl_->ensure_touch();
+  if (touch != nullptr && touch->valid()) {
+    touch->bind_int64(1, impl_->monotonic_now_ms());
+    touch->bind_text(2, key.asset_id);
+    touch->bind_int(3, static_cast<int>(key.kind));
+    touch->bind_text(4, key.parameter_hash);
+    touch->step();
+    touch->reset();
+  }
+
+  return CacheResult<std::filesystem::path>::success(blob_path);
 }
 
 CacheResult<bool> CacheStore::contains(const CacheKey& key) {

@@ -639,5 +639,74 @@ TEST(TimelineEditorTest, TimelineCutChangeSetRejectsInvalidPayloadsAtomically) {
   EXPECT_EQ(editor.revision(), Revision{0});
 }
 
+TEST(TimelineEditorTest, RelinkAssetUpdatesReferencedAssetAndOptionalName) {
+  auto fixture = makeProject();
+  const auto clip = makeClip(fixture.asset_id, 0, 10);
+  fixture.project.sequences[0].tracks[0].clips.push_back(clip);
+  TimelineEditor editor(fixture.project);
+
+  RelinkAssetCommand relink;
+  relink.asset_id = fixture.asset_id;
+  relink.source_uri = "/other/newclip.mkv";
+  relink.fingerprint = "relinked-fingerprint";
+  relink.duration = Time(90, 1);
+  relink.has_video = true;
+  relink.has_audio = true;
+  relink.width = 1920;
+  relink.height = 1080;
+  relink.nominal_frame_rate = Rate(24, 1);
+  relink.audio_sample_rate = 44'100;
+  relink.audio_channels = 1;
+  relink.metadata.emplace("camera", "B");
+
+  const auto applied = editor.apply(EditCommand{relink, {}}, Revision{0});
+  ASSERT_TRUE(applied) << (applied ? "" : applied.error().message);
+  EXPECT_EQ(applied.value(), Revision{1});
+  EXPECT_EQ(editor.history().front().command_name, "Relink asset");
+
+  const auto current = editor.projectAt(applied.value());
+  ASSERT_NE(current, nullptr);
+  const auto* asset = findAsset(*current, fixture.asset_id);
+  ASSERT_NE(asset, nullptr);
+  EXPECT_EQ(asset->id, fixture.asset_id);
+  EXPECT_EQ(asset->name, "newclip.mkv");
+  EXPECT_EQ(asset->source_uri, "/other/newclip.mkv");
+  EXPECT_EQ(asset->fingerprint, "relinked-fingerprint");
+  EXPECT_EQ(asset->duration, Time(90, 1));
+  EXPECT_TRUE(asset->has_video);
+  EXPECT_TRUE(asset->has_audio);
+  EXPECT_EQ(asset->width, 1920U);
+  EXPECT_EQ(asset->height, 1080U);
+  ASSERT_TRUE(asset->nominal_frame_rate.has_value());
+  EXPECT_EQ(*asset->nominal_frame_rate, Rate(24, 1));
+  EXPECT_EQ(asset->audio_sample_rate, 44'100U);
+  EXPECT_EQ(asset->audio_channels, 1U);
+  EXPECT_EQ(asset->metadata.at("camera"), "B");
+
+  const auto view = snapshot(editor, fixture.sequence_id, applied.value());
+  const auto* live_clip = view.findClip(clip.id);
+  ASSERT_NE(live_clip, nullptr);
+  EXPECT_EQ(live_clip->asset_id, fixture.asset_id);
+
+  auto customized = makeProject();
+  customized.project.assets.front().name = "Hero shot";
+  TimelineEditor custom_editor(customized.project);
+  RelinkAssetCommand custom_relink = relink;
+  custom_relink.asset_id = customized.asset_id;
+  const auto custom_applied = custom_editor.apply(EditCommand{custom_relink, {}}, Revision{0});
+  ASSERT_TRUE(custom_applied) << (custom_applied ? "" : custom_applied.error().message);
+  const auto* custom_asset =
+      findAsset(*custom_editor.projectAt(custom_applied.value()), customized.asset_id);
+  ASSERT_NE(custom_asset, nullptr);
+  EXPECT_EQ(custom_asset->name, "Hero shot");
+  EXPECT_EQ(custom_asset->source_uri, "/other/newclip.mkv");
+
+  RelinkAssetCommand missing = relink;
+  missing.asset_id = EntityId::generate();
+  const auto unknown = editor.apply(EditCommand{missing, {}}, applied.value());
+  ASSERT_FALSE(unknown);
+  EXPECT_EQ(unknown.error().code, EditErrorCode::EntityNotFound);
+}
+
 } // namespace
 } // namespace video_editor::edit

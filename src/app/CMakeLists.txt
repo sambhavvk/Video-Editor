@@ -5,6 +5,8 @@ find_package(Qt6 ${VIDEO_EDITOR_QT_VERSION} EXACT REQUIRED COMPONENTS Core Concu
 add_library(video_editor_app_controller
   editor_controller.cpp
   editor_controller.hpp
+  media_reconstruction.cpp
+  media_reconstruction.hpp
   path_utils.hpp)
 
 target_compile_features(video_editor_app_controller PUBLIC cxx_std_20)
@@ -26,6 +28,7 @@ target_link_libraries(
     video_editor::project_codec
     video_editor::playback
     video_editor::proxy_service
+    video_editor::media_cache
     video_editor::render_engine
     VideoEditor::ExportService
     video_editor::transcription_service

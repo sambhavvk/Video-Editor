@@ -1469,4 +1469,139 @@ Result<PtsMap> load_pts_map(const std::filesystem::path& path) {
   }
 }
 
+std::string proxy_parameter_hash(const ProxyProfile& profile) {
+  std::string hash;
+  hash += "codec=";
+  hash += std::to_string(static_cast<unsigned>(profile.video_codec));
+  hash += ";scale=";
+  hash += std::to_string(profile.scale_numerator);
+  hash += "/";
+  hash += std::to_string(profile.scale_denominator);
+  hash += ";max=";
+  hash += std::to_string(profile.maximum_width);
+  hash += "x";
+  hash += std::to_string(profile.maximum_height);
+  hash += ";pcm=";
+  hash += profile.include_pcm_audio ? "1" : "0";
+  return hash;
+}
+
+std::string proxy_parameter_hash(const ResolvedProfile& profile) {
+  std::string hash = proxy_parameter_hash(profile.requested);
+  hash += ";resolved_codec=";
+  hash += std::to_string(static_cast<unsigned>(profile.video_codec));
+  hash += ";container=";
+  hash += std::to_string(static_cast<unsigned>(profile.container));
+  hash += ";fallback=";
+  hash += profile.used_fallback ? "1" : "0";
+  return hash;
+}
+
+namespace {
+
+[[nodiscard]] assets::ProxyCodec proxy_codec_from(const VideoCodec codec) noexcept {
+  return codec == VideoCodec::Ffv1 ? assets::ProxyCodec::Ffv1 : assets::ProxyCodec::ProResProxy;
+}
+
+[[nodiscard]] std::optional<DiscoveredProxy>
+try_complete_proxy(const std::filesystem::path& proxy_path,
+                   const std::filesystem::path& pts_map_path,
+                   const assets::FileFingerprint& source_fingerprint) {
+  if (proxy_path.empty()) {
+    return std::nullopt;
+  }
+  std::error_code error;
+  if (!std::filesystem::is_regular_file(proxy_path, error) || error) {
+    return std::nullopt;
+  }
+  const auto map = load_pts_map(pts_map_path);
+  if (!map) {
+    return std::nullopt;
+  }
+  const assets::FileFingerprint& stored = map.value().source_fingerprint;
+  const bool hash_matches = stored.quick_sha256 == source_fingerprint.quick_sha256 &&
+                            !stored.quick_sha256.empty();
+  const bool size_ok = source_fingerprint.size == 0 || stored.size == source_fingerprint.size;
+  if (!hash_matches || !size_ok) {
+    return std::nullopt;
+  }
+  return DiscoveredProxy{
+      .manifest =
+          assets::ProxyManifest{
+              .proxy_uri = proxy_path,
+              .profile = {.codec = proxy_codec_from(map.value().video_codec),
+                          .maximum_width = 1920,
+                          .maximum_height = 1080,
+                          .include_pcm_audio = true},
+              .source_fingerprint = map.value().source_fingerprint,
+              .engine_version = "proxy-service-v1",
+              .complete = true,
+          },
+      .pts_map_path = pts_map_path,
+  };
+}
+
+[[nodiscard]] std::vector<std::string> discovery_parameter_hashes() {
+  ProxyProfile hd_prores;
+  hd_prores.maximum_width = 1280;
+  hd_prores.maximum_height = 720;
+  ProxyProfile hd_ffv1 = patent_neutral_fallback_profile();
+  hd_ffv1.maximum_width = 1280;
+  hd_ffv1.maximum_height = 720;
+
+  std::vector<std::string> hashes{
+      proxy_parameter_hash(ProxyProfile{}),
+      proxy_parameter_hash(patent_neutral_fallback_profile()),
+      proxy_parameter_hash(hd_prores),
+      proxy_parameter_hash(hd_ffv1),
+  };
+  std::sort(hashes.begin(), hashes.end());
+  hashes.erase(std::unique(hashes.begin(), hashes.end()), hashes.end());
+  return hashes;
+}
+
+} // namespace
+
+std::optional<DiscoveredProxy>
+discover_proxy(const std::string& asset_id, const assets::FileFingerprint& source_fingerprint,
+               media_cache::CacheStore& cache,
+               const std::optional<std::filesystem::path>& legacy_directory) {
+  if (asset_id.empty()) {
+    return std::nullopt;
+  }
+
+  for (const std::string& hash : discovery_parameter_hashes()) {
+    const media_cache::CacheKey proxy_key{.asset_id = asset_id,
+                                          .kind = media_cache::CacheKind::Proxy,
+                                          .parameter_hash = hash};
+    const auto proxy_path = cache.path_for(proxy_key);
+    if (!proxy_path) {
+      continue;
+    }
+
+    const media_cache::CacheKey pts_key{.asset_id = asset_id,
+                                        .kind = media_cache::CacheKind::ProxyPtsMap,
+                                        .parameter_hash = hash};
+    const auto cached_pts = cache.path_for(pts_key);
+    const std::filesystem::path pts_path =
+        cached_pts ? cached_pts.value() : default_pts_map_path(proxy_path.value());
+    if (auto found = try_complete_proxy(proxy_path.value(), pts_path, source_fingerprint)) {
+      return found;
+    }
+  }
+
+  if (!legacy_directory.has_value() || legacy_directory->empty()) {
+    return std::nullopt;
+  }
+
+  for (const char* suffix : {".proxy.mov", ".proxy.mkv"}) {
+    const std::filesystem::path proxy_path = *legacy_directory / (asset_id + suffix);
+    const std::filesystem::path pts_path = default_pts_map_path(proxy_path);
+    if (auto found = try_complete_proxy(proxy_path, pts_path, source_fingerprint)) {
+      return found;
+    }
+  }
+  return std::nullopt;
+}
+
 } // namespace video_editor::proxy

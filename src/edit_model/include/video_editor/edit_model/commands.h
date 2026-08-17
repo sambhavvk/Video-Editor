@@ -4,6 +4,7 @@
 #include "video_editor/edit_model/model.h"
 
 #include <cstddef>
+#include <map>
 #include <optional>
 #include <string>
 #include <variant>
@@ -18,6 +19,20 @@ struct AddAssetCommand final {
 };
 struct RemoveAssetCommand final {
   EntityId asset_id;
+};
+struct RelinkAssetCommand final {
+  EntityId asset_id;
+  std::string source_uri;
+  std::string fingerprint;
+  Time duration{};
+  bool has_video{false};
+  bool has_audio{false};
+  std::uint32_t width{0};
+  std::uint32_t height{0};
+  std::optional<Rate> nominal_frame_rate;
+  std::uint32_t audio_sample_rate{0};
+  std::uint32_t audio_channels{0};
+  std::map<std::string, std::string, std::less<>> metadata;
 };
 struct AddSequenceCommand final {
   Sequence sequence;
@@ -275,7 +290,7 @@ using EditOperation = std::variant<
     RemoveTransitionCommand, RenameTrackCommand, ReorderTrackCommand, SetTrackLockedCommand,
     SetTrackVisibilityCommand, SetTrackTargetedCommand, CloseGapCommand, SetTrackAudioMixCommand,
     AddTrackEffectCommand, RemoveTrackEffectCommand, SetTrackEffectParameterCommand,
-    ApplyCaptionChangeSetCommand, ApplyTimelineCutChangeSetCommand>;
+    ApplyCaptionChangeSetCommand, ApplyTimelineCutChangeSetCommand, RelinkAssetCommand>;
 
 struct EditCommand final {
   EditOperation operation;

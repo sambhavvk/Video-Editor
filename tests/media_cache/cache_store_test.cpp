@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -56,6 +57,17 @@ private:
                                 std::string parameter_hash) {
   return CacheKey{.asset_id = std::move(asset_id), .kind = kind,
                  .parameter_hash = std::move(parameter_hash)};
+}
+
+void write_file_bytes(const std::filesystem::path& path, const std::vector<std::byte>& bytes) {
+  std::ofstream output(path, std::ios::binary | std::ios::trunc);
+  ASSERT_TRUE(static_cast<bool>(output));
+  if (!bytes.empty()) {
+    output.write(reinterpret_cast<const char*>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+  }
+  output.close();
+  ASSERT_TRUE(static_cast<bool>(output));
 }
 
 } // namespace
@@ -302,6 +314,120 @@ TEST(CacheStoreTest, PersistsAcrossReopen) {
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result.value(), bytes);
   }
+}
+
+TEST(CacheStoreTest, PutFilePathForAndGetRoundTrip) {
+  TemporaryDirectory dir;
+  CacheStore store(dir.path() / "cache");
+  const auto key = make_key("asset-file", CacheKind::Thumbnail, "w=64");
+  const auto bytes = make_bytes(9, 32);
+  const auto source = dir.path() / "source.bin";
+  write_file_bytes(source, bytes);
+
+  ASSERT_TRUE(store.put_file(key, source).has_value());
+
+  auto path = store.path_for(key);
+  ASSERT_TRUE(path.has_value());
+  EXPECT_TRUE(std::filesystem::exists(path.value()));
+
+  auto result = store.get(key);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(result.value(), bytes);
+}
+
+TEST(CacheStoreTest, PathForMissingKeyReturnsNotFound) {
+  TemporaryDirectory dir;
+  CacheStore store(dir.path());
+  const auto key = make_key("missing-path", CacheKind::Thumbnail, "w=64");
+
+  auto result = store.path_for(key);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code, CacheErrorCode::NotFound);
+}
+
+TEST(CacheStoreTest, PutFileCountsLargeFileInInspect) {
+  TemporaryDirectory dir;
+  CacheStore store(dir.path() / "cache");
+  const auto key = make_key("large-file", CacheKind::Proxy, "p");
+  const auto bytes = make_bytes(3, 64 * 1024);
+  const auto source = dir.path() / "large.bin";
+  write_file_bytes(source, bytes);
+
+  ASSERT_TRUE(store.put_file(key, source).has_value());
+
+  auto inventory = store.inspect();
+  ASSERT_TRUE(inventory.has_value());
+  EXPECT_EQ(inventory.value().total_bytes, 64U * 1024U);
+  ASSERT_EQ(inventory.value().entries.size(), 1U);
+  EXPECT_EQ(inventory.value().entries.front().bytes, 64U * 1024U);
+}
+
+TEST(CacheStoreTest, PutFileExceedingBudgetReturnsFullAndKeepsSource) {
+  TemporaryDirectory dir;
+  CacheStore store(dir.path() / "cache");
+  store.set_budget_bytes(16);
+  const auto key = make_key("too-big", CacheKind::Proxy, "p");
+  const auto bytes = make_bytes(4, 64);
+  const auto source = dir.path() / "too-big.bin";
+  write_file_bytes(source, bytes);
+
+  auto result = store.put_file(key, source);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code, CacheErrorCode::Full);
+  EXPECT_TRUE(std::filesystem::exists(source));
+}
+
+TEST(CacheStoreTest, PutFilePersistsAcrossReopenViaPathFor) {
+  TemporaryDirectory dir;
+  const auto key = make_key("persist-file", CacheKind::Waveform, "r=low");
+  const auto bytes = make_bytes(5, 24);
+  const auto source = dir.path() / "persist.bin";
+  write_file_bytes(source, bytes);
+
+  {
+    CacheStore store(dir.path() / "cache");
+    ASSERT_TRUE(store.put_file(key, source).has_value());
+  }
+
+  {
+    CacheStore store(dir.path() / "cache");
+    auto path = store.path_for(key);
+    ASSERT_TRUE(path.has_value());
+    EXPECT_TRUE(std::filesystem::exists(path.value()));
+    auto result = store.get(key);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result.value(), bytes);
+  }
+}
+
+TEST(CacheStoreTest, ProxyKindsSupportPutContainsAndRemoveKind) {
+  TemporaryDirectory dir;
+  CacheStore store(dir.path());
+  const std::string asset_id = "proxy-asset";
+  const auto proxy_key = make_key(asset_id, CacheKind::Proxy, "half-res");
+  const auto pts_key = make_key(asset_id, CacheKind::ProxyPtsMap, "half-res");
+  const auto thumb_key = make_key(asset_id, CacheKind::Thumbnail, "w=128");
+
+  ASSERT_TRUE(store.put(proxy_key, make_bytes(1, 8)).has_value());
+  ASSERT_TRUE(store.put(pts_key, make_bytes(2, 8)).has_value());
+  ASSERT_TRUE(store.put(thumb_key, make_bytes(3, 8)).has_value());
+
+  EXPECT_TRUE(store.contains(proxy_key).value());
+  EXPECT_TRUE(store.contains(pts_key).value());
+  EXPECT_TRUE(store.contains(thumb_key).value());
+
+  auto removed = store.remove_kind(asset_id, CacheKind::Proxy);
+  ASSERT_TRUE(removed.has_value());
+  EXPECT_EQ(removed.value(), 1U);
+  EXPECT_FALSE(store.contains(proxy_key).value());
+  EXPECT_TRUE(store.contains(pts_key).value());
+  EXPECT_TRUE(store.contains(thumb_key).value());
+
+  auto removed_pts = store.remove_kind(asset_id, CacheKind::ProxyPtsMap);
+  ASSERT_TRUE(removed_pts.has_value());
+  EXPECT_EQ(removed_pts.value(), 1U);
+  EXPECT_FALSE(store.contains(pts_key).value());
+  EXPECT_TRUE(store.contains(thumb_key).value());
 }
 
 } // namespace video_editor::media_cache

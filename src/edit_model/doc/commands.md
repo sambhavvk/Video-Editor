@@ -28,6 +28,7 @@ operations can be submitted through `TimelineEditor::applyBatch` for one atomic 
 | --- | --- | --- |
 | `AddAssetCommand` | `asset` | Adds one validated asset with a project-unique ID. |
 | `RemoveAssetCommand` | `asset_id` | Removes an unused asset; references make the command fail. |
+| `RelinkAssetCommand` | `asset_id`, `source_uri`, `fingerprint`, technical fields, `metadata` | Replaces an existing asset's source and technical metadata; clips may keep referencing it. |
 | `AddSequenceCommand` | `sequence` | Adds a complete validated sequence. |
 | `RemoveSequenceCommand` | `sequence_id` | Removes the selected sequence. |
 | `SetSequenceFormatCommand` | `sequence_id`, `frame_rate`, `width`, `height` | Replaces the exact frame rate and raster dimensions. |
