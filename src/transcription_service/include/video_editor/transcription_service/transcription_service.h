@@ -2,7 +2,8 @@
 #pragma once
 
 #include "video_editor/edit_model/result.h"
-#include "video_editor/job_service.pb.h"
+#include "video_editor/job_service/protocol.h"
+#include "video_editor/transcription_service/model_manifest.h"
 
 #include <cstdint>
 #include <filesystem>
@@ -14,16 +15,6 @@
 #include <vector>
 
 namespace video_editor::transcription {
-
-inline constexpr std::uint32_t kTranscriptionSchemaVersion = 1;
-inline constexpr std::string_view kWhisperModelId{"base"};
-inline constexpr std::string_view kWhisperModelFilename{"ggml-base.bin"};
-inline constexpr std::string_view kWhisperModelUrl{
-    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin"};
-inline constexpr std::string_view kWhisperModelDigestAlgorithm{"sha1"};
-inline constexpr std::string_view kWhisperModelDigest{
-    "465707469ff3a37a2b9b8d8f89f2f99de7299dac"};
-inline constexpr std::uintmax_t kWhisperModelBytes{147951465U};
 
 using OptionsMessage = jobs::v1::TranscribeOptions;
 using ResultMessage = jobs::v1::TranscriptionResult;
@@ -66,9 +57,9 @@ struct ModelDescriptor final {
 class ModelFetcher {
 public:
   virtual ~ModelFetcher() = default;
-  [[nodiscard]] virtual Result<std::uintmax_t>
-  fetch(const ModelDescriptor& model, const std::filesystem::path& destination,
-        std::stop_token cancellation) = 0;
+  [[nodiscard]] virtual Result<std::uintmax_t> fetch(const ModelDescriptor& model,
+                                                     const std::filesystem::path& destination,
+                                                     std::stop_token cancellation) = 0;
 };
 
 class ModelManager final {
@@ -76,8 +67,10 @@ public:
   ModelManager(std::filesystem::path cache_directory, ModelFetcher& fetcher,
                ModelDescriptor model = default_model_descriptor());
 
-  [[nodiscard]] Result<std::filesystem::path>
-  ensure(std::stop_token cancellation = {}) const;
+  [[nodiscard]] Result<std::filesystem::path> ensure(std::stop_token cancellation = {}) const;
+  // Checks the staged cache artifact only; it never invokes ModelFetcher.
+  [[nodiscard]] bool verify(std::stop_token cancellation = {}) const noexcept;
+  [[nodiscard]] std::filesystem::path model_path() const;
 
 private:
   std::filesystem::path cache_directory_;
@@ -90,16 +83,33 @@ struct AudioData final {
   std::uint32_t sample_rate{16'000};
 };
 
+// A source-relative window in the asset's media timeline. The all-zero value
+// means the complete input. AudioData samples always begin at zero for this
+// window; TranscriptionService translates returned word timestamps back to
+// source-absolute centiseconds.
+struct AudioRange final {
+  std::int64_t start_centiseconds{0};
+  std::int64_t duration_centiseconds{0};
+
+  [[nodiscard]] bool is_full_input() const noexcept {
+    return start_centiseconds == 0 && duration_centiseconds == 0;
+  }
+};
+
 class AudioDecoder {
 public:
   virtual ~AudioDecoder() = default;
-  [[nodiscard]] virtual Result<AudioData>
-  decode(const std::filesystem::path& input, std::stop_token cancellation,
-         const ProgressCallback& progress) = 0;
+  [[nodiscard]] virtual Result<AudioData> decode(const std::filesystem::path& input,
+                                                 const AudioRange& range,
+                                                 std::stop_token cancellation,
+                                                 const ProgressCallback& progress) = 0;
 };
 
 struct BackendCapabilities final {
   bool available{false};
+  // This is a compiled/provenance assertion supplied by the build, not a
+  // runtime device check. whisper.cpp 1.9.2 does not expose the selected
+  // ggml backend through its public C API.
   bool vulkan_available{false};
   std::string backend;
 };
@@ -108,21 +118,22 @@ class TranscriptionBackend {
 public:
   virtual ~TranscriptionBackend() = default;
   [[nodiscard]] virtual BackendCapabilities capabilities() const = 0;
-  [[nodiscard]] virtual Result<ResultMessage>
-  transcribe(const std::filesystem::path& model, const AudioData& audio,
-             const OptionsMessage& options, std::stop_token cancellation,
-             const ProgressCallback& progress) = 0;
+  [[nodiscard]] virtual Result<ResultMessage> transcribe(const std::filesystem::path& model,
+                                                         const AudioData& audio,
+                                                         const OptionsMessage& options,
+                                                         std::stop_token cancellation,
+                                                         const ProgressCallback& progress) = 0;
 };
 
 class TranscriptionService final {
 public:
-  TranscriptionService(ModelManager& models, AudioDecoder& decoder,
-                       TranscriptionBackend& backend);
+  TranscriptionService(ModelManager& models, AudioDecoder& decoder, TranscriptionBackend& backend);
 
-  [[nodiscard]] Result<ResultMessage>
-  transcribe(const std::filesystem::path& input, const OptionsMessage& options,
-             std::stop_token cancellation = {},
-             const ProgressCallback& progress = {}) const;
+  [[nodiscard]] Result<ResultMessage> transcribe(const std::filesystem::path& input,
+                                                 const OptionsMessage& options,
+                                                 std::stop_token cancellation = {},
+                                                 const ProgressCallback& progress = {}) const;
+  [[nodiscard]] BackendCapabilities capabilities() const;
 
 private:
   ModelManager& models_;

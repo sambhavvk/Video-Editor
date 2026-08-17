@@ -4,6 +4,7 @@
 #include "video_editor/job_service/job_id.h"
 #include "video_editor/media_codec/probe.h"
 #include "video_editor/proxy_service/proxy_service.h"
+#include "video_editor/transcription_service/transcription_service.h"
 
 #include <algorithm>
 #include <cmath>
@@ -16,12 +17,15 @@
 namespace video_editor::workers {
 namespace {
 
+namespace transcription = video_editor::transcription;
+
 using jobs::kProtocolMajor;
 using jobs::kProtocolMinor;
 namespace protocol = jobs::v1;
 
 constexpr std::string_view kProResHalfPreset{"video-editor.proxy.prores-half.v1"};
 constexpr std::string_view kFfv1HalfPreset{"video-editor.proxy.ffv1-half.v1"};
+constexpr std::string_view kTranscribePreset{"video-editor.transcribe.whisper-base.v1"};
 
 protocol::WorkerEvent event_for(const protocol::JobSpec& spec, const protocol::JobState state,
                                 const double progress, const std::string_view phase) {
@@ -358,9 +362,156 @@ struct ProxyErrorDescription {
   return sink(event);
 }
 
+struct ParsedTranscribeRequest final {
+  std::filesystem::path input;
+  transcription::OptionsMessage options;
+};
+
+[[nodiscard]] bool parse_transcribe_request(const protocol::JobSpec& spec,
+                                            ParsedTranscribeRequest& parsed, std::string& error) {
+  if (!jobs::valid_job_id(spec.job_id())) {
+    error = "job_id must be a canonical UUID job identifier";
+    return false;
+  }
+  if (spec.input_uris_size() != 1 || spec.input_uris(0).empty()) {
+    error = "input_uris must contain exactly one audio/video file";
+    return false;
+  }
+  if (spec.output_uri().size() != 0U || !spec.project_checkpoint().empty()) {
+    error = "output_uri and project_checkpoint must be empty for transcription";
+    return false;
+  }
+  if (spec.preset_id() != kTranscribePreset) {
+    error = "preset_id must be video-editor.transcribe.whisper-base.v1";
+    return false;
+  }
+  if (!valid_utf8(spec.input_uris(0)) || has_embedded_nul(spec.input_uris(0))) {
+    error = "input path must be well-formed UTF-8 without NUL bytes";
+    return false;
+  }
+  parsed.input = utf8_path(spec.input_uris(0));
+  if (!parsed.input.is_absolute()) {
+    error = "input path must be absolute";
+    return false;
+  }
+  if (!parsed.options.ParseFromString(spec.options())) {
+    error = "options is not a valid TranscribeOptions protobuf";
+    return false;
+  }
+  if (parsed.options.GetReflection()->GetUnknownFields(parsed.options).field_count() != 0) {
+    error = "options contains unknown fields";
+    return false;
+  }
+  if (!transcription::validate_options(parsed.options, error)) {
+    return false;
+  }
+  return true;
+}
+
+[[nodiscard]] bool run_transcribe(const protocol::JobSpec& spec, const EventSink& sink,
+                                  DispatchDependencies& dependencies) {
+  ParsedTranscribeRequest parsed;
+  std::string validation_error;
+  if (!parse_transcribe_request(spec, parsed, validation_error)) {
+    auto event = event_for(spec, protocol::JOB_STATE_FAILED, 0.0, "validating");
+    fail(event, "invalid-argument", 0, "The transcription settings are not valid.",
+         validation_error);
+    return sink(event);
+  }
+  if (dependencies.transcriber == nullptr) {
+    auto event = event_for(spec, protocol::JOB_STATE_FAILED, 0.0, "backend-unavailable");
+    fail(event, "backend-unavailable", 0, "Transcription is unavailable in this worker build.",
+         "whisper.cpp was not configured or no transcription service was injected");
+    return sink(event);
+  }
+  if (!dependencies.transcriber->capabilities().available) {
+    auto event = event_for(spec, protocol::JOB_STATE_FAILED, 0.0, "backend-unavailable");
+    fail(event, "backend-unavailable", 0, "Transcription is unavailable in this worker build.",
+         "whisper.cpp backend capability is not available");
+    return sink(event);
+  }
+
+  std::stop_source stop;
+  double last_progress = 0.0;
+  bool sink_available = true;
+  const auto progress = [&](const double value, const std::string_view phase) {
+    if (!sink_available)
+      return;
+    const double next = std::max(last_progress, std::clamp(value, 0.0, 1.0));
+    auto event = event_for(spec, protocol::JOB_STATE_RUNNING, next, phase);
+    sink_available = sink(event);
+    last_progress = next;
+    if (!sink_available)
+      stop.request_stop();
+  };
+  const auto result = dependencies.transcriber->transcribe(parsed.input, parsed.options,
+                                                           stop.get_token(), progress);
+  if (!sink_available)
+    return false;
+  if (!result) {
+    auto event = event_for(spec, protocol::JOB_STATE_FAILED, last_progress, "failed");
+    const auto& issue = result.error();
+    const auto category = [&]() -> std::string_view {
+      using transcription::ErrorCode;
+      switch (issue.code) {
+      case ErrorCode::Cancelled:
+        return "cancelled";
+      case ErrorCode::BackendUnavailable:
+        return "backend-unavailable";
+      case ErrorCode::ModelDownloadFailed:
+        return "model-download";
+      case ErrorCode::ModelChecksumMismatch:
+        return "model-checksum";
+      case ErrorCode::ModelSizeMismatch:
+        return "model-size";
+      case ErrorCode::InputNotFound:
+        return "source-not-found";
+      case ErrorCode::AudioDecodeFailed:
+        return "audio-decode";
+      case ErrorCode::InvalidOptions:
+      case ErrorCode::InvalidInput:
+        return "invalid-argument";
+      case ErrorCode::ModelUnavailable:
+      case ErrorCode::BackendFailed:
+        return "transcription";
+      }
+      return "transcription";
+    }();
+    fail(event, category, issue.native_code, "Transcription failed.", issue.message,
+         issue.retryable);
+    if (issue.code == transcription::ErrorCode::Cancelled) {
+      event.mutable_event()->set_state(protocol::JOB_STATE_CANCELLED);
+      event.mutable_event()->set_phase("cancelled");
+    }
+    return sink(event);
+  }
+  auto event = event_for(spec, protocol::JOB_STATE_SUCCEEDED, 1.0, "complete");
+  if (!result.value().SerializeToString(event.mutable_event()->mutable_result())) {
+    fail(event, "serialization", 0, "Transcription completed but its result could not be saved.",
+         "TranscriptionResult protobuf serialization failed");
+    return sink(event);
+  }
+  auto* metadata = event.mutable_event()->mutable_metadata();
+  (*metadata)["contract_version"] = std::to_string(transcription::kTranscriptionSchemaVersion);
+  (*metadata)["backend"] = result.value().backend();
+  (*metadata)["model_id"] = result.value().model_id();
+  (*metadata)["detected_language"] = result.value().detected_language();
+  (*metadata)["word_count"] = std::to_string(result.value().words_size());
+  (*metadata)["vulkan_capability"] =
+      result.value().vulkan_available() ? "compiled/asserted" : "not-asserted";
+  (*metadata)["vulkan_used"] = "unknown";
+  return sink(event);
+}
+
 } // namespace
 
 bool dispatch_job(const protocol::JobSpec& spec, const EventSink& sink) {
+  DispatchDependencies dependencies;
+  return dispatch_job(spec, sink, dependencies);
+}
+
+bool dispatch_job(const protocol::JobSpec& spec, const EventSink& sink,
+                  DispatchDependencies& dependencies) {
   if (!sink) {
     return false;
   }
@@ -373,9 +524,12 @@ bool dispatch_job(const protocol::JobSpec& spec, const EventSink& sink) {
   if (spec.kind() == protocol::JOB_KIND_PROXY) {
     return run_proxy(spec, sink);
   }
+  if (spec.kind() == protocol::JOB_KIND_TRANSCRIBE) {
+    return run_transcribe(spec, sink, dependencies);
+  }
   auto event = event_for(spec, protocol::JOB_STATE_FAILED, 0.0, "unsupported");
   fail(event, "unsupported-job", 0, "This worker does not implement that job yet.",
-       "only JOB_KIND_PROBE and JOB_KIND_PROXY are enabled in this worker");
+       "only JOB_KIND_PROBE, JOB_KIND_PROXY, and JOB_KIND_TRANSCRIBE are enabled in this worker");
   return sink(event);
 }
 

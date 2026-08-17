@@ -1,13 +1,26 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "video_editor/job_service/framing.h"
 #include "video_editor/job_service/protocol.h"
+#include "video_editor/transcription_service/transcription_service.h"
 #include "video_editor/workers/job_dispatch.h"
 
+#include <cstdlib>
+#include <filesystem>
 #include <iostream>
 namespace protocol = video_editor::jobs::v1;
 
 int main() {
   GOOGLE_PROTOBUF_VERIFY_VERSION;
+  const char* configured_model_dir = std::getenv("VIDEO_EDITOR_TRANSCRIPTION_MODEL_DIR");
+  const std::filesystem::path model_dir =
+      configured_model_dir == nullptr ? std::filesystem::current_path() / ".video_editor_models"
+                                      : std::filesystem::path(configured_model_dir);
+  auto fetcher = video_editor::transcription::make_unavailable_model_fetcher();
+  video_editor::transcription::ModelManager models(model_dir, *fetcher);
+  auto decoder = video_editor::transcription::make_ffmpeg_audio_decoder();
+  auto backend = video_editor::transcription::make_default_backend();
+  video_editor::transcription::TranscriptionService transcriber(models, *decoder, *backend);
+  video_editor::workers::DispatchDependencies dependencies{.transcriber = &transcriber};
   const video_editor::workers::EventSink sink = [](const protocol::WorkerEvent& event) {
     return video_editor::jobs::write_frame(std::cout, event).ok;
   };
@@ -28,7 +41,8 @@ int main() {
     if (request.has_shutdown()) {
       break;
     }
-    if (request.has_start() && !video_editor::workers::dispatch_job(request.start().spec(), sink)) {
+    if (request.has_start() &&
+        !video_editor::workers::dispatch_job(request.start().spec(), sink, dependencies)) {
       return 4;
     }
     if (request.has_cancel() &&

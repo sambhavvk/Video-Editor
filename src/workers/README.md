@@ -33,7 +33,27 @@ A success uses `result_uri` for the proxy and reports the map path, resolved
 codec/container, fallback decision, dimensions, and frame/sample counts in
 metadata. Worker and protocol versions are attached to every event.
 
-## Cancellation limitation
+## Transcription job contract (v2)
+
+Set `JobSpec.kind` to `JOB_KIND_TRANSCRIBE`, use preset
+`video-editor.transcribe.whisper-base.v1`, provide exactly one absolute UTF-8 local input path, and
+leave output/checkpoint fields empty. `options` is a typed `TranscribeOptions` message; malformed,
+unknown-field, unsupported model/language/range, or future-schema values fail before media I/O.
+The stable preset name remains v1; the independently versioned typed options/result payload is v2.
+
+The worker verifies the already-installed pinned model, seeks and decodes only the requested
+authoritative source range to mono float32 at 16 kHz, invokes the optional whisper.cpp backend, and
+returns a typed `TranscriptionResult` with source-absolute word timing, probability, language,
+backend, model digest, and truthful compiled Vulkan capability. Both source-range fields set to zero
+mean the complete input; otherwise the duration must be positive. It never downloads a model and
+raw audio never crosses the protocol. A build without the optional backend returns
+`backend-unavailable`.
+
+The desktop uses one fresh host process per transcription request. Closing that process is its
+cancellation/crash-containment boundary; project state changes only after the desktop validates and
+reviews the terminal result.
+
+## Proxy cancellation limitation
 
 The protobuf protocol contains `CancelJob`, but the current stdin/stdout host
 dispatches one job synchronously. It cannot read another frame while FFmpeg is
@@ -47,6 +67,7 @@ the planned named-pipe/Unix-socket job service.
 
 ## Current coverage
 
-`JOB_KIND_PROBE` retains its existing behavior. `JOB_KIND_PROXY` is implemented.
-Thumbnail, waveform, render-cache, export, and transcription jobs return an
-`unsupported-job` failure.
+`JOB_KIND_PROBE`, `JOB_KIND_PROXY`, and `JOB_KIND_TRANSCRIBE` are implemented. Thumbnail, waveform,
+render-cache, and export jobs return an `unsupported-job` failure.
+
+AI assistance has been used to create this output.

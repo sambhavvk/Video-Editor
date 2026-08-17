@@ -28,6 +28,42 @@ namespace {
 namespace wire = ::video_editor::persistence::v1;
 
 class IdRegistry;
+[[nodiscard]] bool validUtf8(std::string_view text) noexcept {
+  std::size_t index = 0;
+  while (index < text.size()) {
+    const auto byte = static_cast<unsigned char>(text[index]);
+    std::size_t continuation = 0;
+    std::uint32_t code_point = 0;
+    if (byte <= 0x7FU) {
+      code_point = byte;
+    } else if ((byte & 0xE0U) == 0xC0U) {
+      code_point = byte & 0x1FU;
+      continuation = 1;
+    } else if ((byte & 0xF0U) == 0xE0U) {
+      code_point = byte & 0x0FU;
+      continuation = 2;
+    } else if ((byte & 0xF8U) == 0xF0U) {
+      code_point = byte & 0x07U;
+      continuation = 3;
+    } else {
+      return false;
+    }
+    if (index + continuation >= text.size())
+      return false;
+    for (std::size_t i = 0; i < continuation; ++i) {
+      const auto next = static_cast<unsigned char>(text[index + 1U + i]);
+      if ((next & 0xC0U) != 0x80U)
+        return false;
+      code_point = (code_point << 6U) | (next & 0x3FU);
+    }
+    if ((continuation == 1U && code_point < 0x80U) || (continuation == 2U && code_point < 0x800U) ||
+        (continuation == 3U && code_point < 0x10000U) || code_point > 0x10FFFFU ||
+        (code_point >= 0xD800U && code_point <= 0xDFFFU))
+      return false;
+    index += continuation + 1U;
+  }
+  return true;
+}
 void requirePresent(bool present, std::string_view path);
 [[nodiscard]] edit::EntityId decodeId(const wire::EntityId& value, std::string_view path,
                                       IdRegistry* registry = nullptr, bool allow_nil = false);
@@ -503,6 +539,13 @@ void encodeCaptionStyle(const edit::CaptionStyle& value, wire::CaptionStyle* out
   requireFinite(value.font_size, childPath(path, "font_size"));
   require(value.font_size > 0.0, CodecErrorCode::InvalidField, childPath(path, "font_size"),
           "caption font size must be positive");
+  requireFinite(value.vertical_position, childPath(path, "vertical_position"));
+  requireFinite(value.safe_margin, childPath(path, "safe_margin"));
+  requireFinite(value.outline_width, childPath(path, "outline_width"));
+  require(value.vertical_position >= 0.0 && value.vertical_position <= 1.0 &&
+              value.safe_margin >= 0.0 && value.safe_margin <= 0.5 && value.outline_width >= 0.0 &&
+              value.outline_width <= 128.0,
+          CodecErrorCode::InvalidField, path, "caption style geometry is outside supported bounds");
   output->set_font_family(value.font_family);
   output->set_font_size(value.font_size);
   encodeColor(value.text_color, output->mutable_text_color(), childPath(path, "text_color"));
@@ -510,6 +553,40 @@ void encodeCaptionStyle(const edit::CaptionStyle& value, wire::CaptionStyle* out
               childPath(path, "background_color"));
   output->set_bold(value.bold);
   output->set_italic(value.italic);
+  switch (value.alignment) {
+  case edit::CaptionAlignment::Left:
+    output->set_alignment(wire::CAPTION_ALIGNMENT_LEFT);
+    break;
+  case edit::CaptionAlignment::Center:
+    output->set_alignment(wire::CAPTION_ALIGNMENT_CENTER);
+    break;
+  case edit::CaptionAlignment::Right:
+    output->set_alignment(wire::CAPTION_ALIGNMENT_RIGHT);
+    break;
+  default:
+    fail(CodecErrorCode::InvalidField, childPath(path, "alignment"), "unknown caption alignment");
+  }
+  output->set_vertical_position(value.vertical_position);
+  output->set_safe_margin(value.safe_margin);
+  output->set_outline_width(value.outline_width);
+  encodeColor(value.outline_color, output->mutable_outline_color(),
+              childPath(path, "outline_color"));
+}
+
+void encodeCaptionWord(const edit::CaptionWord& value, wire::CaptionWord* output,
+                       std::string_view path, IdRegistry& ids) {
+  encodeId(value.id, output->mutable_id(), childPath(path, "id"), &ids);
+  require(!value.text.empty(), CodecErrorCode::InvalidField, childPath(path, "text"),
+          "caption word text cannot be empty");
+  require(validUtf8(value.text), CodecErrorCode::InvalidField, childPath(path, "text"),
+          "caption word text must be valid UTF-8");
+  requireFinite(value.probability, childPath(path, "probability"));
+  require(value.probability >= 0.0 && value.probability <= 1.0 && !value.range.start.isNegative() &&
+              value.range.duration > edit::Time{},
+          CodecErrorCode::InvalidField, path, "caption word range/probability is invalid");
+  encodeRange(value.range, output->mutable_range());
+  output->set_text(value.text);
+  output->set_probability(value.probability);
 }
 
 void encodeCaption(const edit::Caption& value, wire::Caption* output, std::string_view path,
@@ -522,6 +599,27 @@ void encodeCaption(const edit::Caption& value, wire::Caption* output, std::strin
   output->set_text(value.text);
   output->set_language(value.language);
   encodeCaptionStyle(value.style, output->mutable_style(), childPath(path, "style"));
+  switch (value.provenance.source) {
+  case edit::CaptionWordSource::Unknown:
+    output->mutable_provenance()->set_source(wire::CAPTION_WORD_SOURCE_UNSPECIFIED);
+    break;
+  case edit::CaptionWordSource::Imported:
+    output->mutable_provenance()->set_source(wire::CAPTION_WORD_SOURCE_IMPORTED);
+    break;
+  case edit::CaptionWordSource::LocalTranscription:
+    output->mutable_provenance()->set_source(wire::CAPTION_WORD_SOURCE_LOCAL_TRANSCRIPTION);
+    break;
+  case edit::CaptionWordSource::UserEdited:
+    output->mutable_provenance()->set_source(wire::CAPTION_WORD_SOURCE_USER_EDITED);
+    break;
+  default:
+    fail(CodecErrorCode::InvalidField, childPath(path, "provenance.source"), "unknown word source");
+  }
+  output->mutable_provenance()->set_model_identity(value.provenance.model_identity);
+  for (std::size_t index = 0; index < value.words.size(); ++index) {
+    encodeCaptionWord(value.words[index], output->add_words(), indexedPath(path, "words", index),
+                      ids);
+  }
 }
 
 void encodeSequence(const edit::Sequence& value, wire::Sequence* output, std::string_view path,
@@ -725,6 +823,38 @@ void reject_v2_fields_in_declared_v1(const wire::ProjectSnapshot& snapshot) {
         ++clip_index;
       }
       ++track_index;
+    }
+    ++sequence_index;
+  }
+}
+
+void reject_v3_fields_in_declared_older(const wire::ProjectSnapshot& snapshot) {
+  if (snapshot.schema_version() >= 3U) {
+    return;
+  }
+  std::size_t sequence_index = 0;
+  for (const auto& sequence : snapshot.project().sequences()) {
+    std::size_t caption_index = 0;
+    for (const auto& caption : sequence.captions()) {
+      if (!caption.words().empty() || caption.has_provenance()) {
+        fail(CodecErrorCode::InvalidField,
+             childPath(indexedPath(indexedPath("project", "sequences", sequence_index), "captions",
+                                   caption_index),
+                       "words"),
+             "declared schema older than v3 cannot contain caption transcript fields");
+      }
+      const auto style_path =
+          childPath(indexedPath(indexedPath("project", "sequences", sequence_index), "captions",
+                                caption_index),
+                    "style");
+      if (caption.has_style() &&
+          (caption.style().alignment() != wire::CAPTION_ALIGNMENT_UNSPECIFIED ||
+           caption.style().has_outline_color() || caption.style().vertical_position() != 0.0 ||
+           caption.style().safe_margin() != 0.0 || caption.style().outline_width() != 0.0)) {
+        fail(CodecErrorCode::InvalidField, style_path,
+             "declared schema older than v3 cannot contain caption style fields");
+      }
+      ++caption_index;
     }
     ++sequence_index;
   }
@@ -1176,7 +1306,8 @@ decodeMetadata(const google::protobuf::RepeatedPtrField<wire::StringEntry>& entr
 }
 
 [[nodiscard]] edit::CaptionStyle decodeCaptionStyle(const wire::CaptionStyle& value,
-                                                    std::string_view path) {
+                                                    std::string_view path,
+                                                    const std::uint32_t declared_schema_version) {
   requirePresent(value.has_text_color(), childPath(path, "text_color"));
   requirePresent(value.has_background_color(), childPath(path, "background_color"));
   require(!value.font_family().empty(), CodecErrorCode::InvalidField,
@@ -1192,10 +1323,67 @@ decodeMetadata(const google::protobuf::RepeatedPtrField<wire::StringEntry>& entr
       decodeColor(value.background_color(), childPath(path, "background_color"));
   result.bold = value.bold();
   result.italic = value.italic();
+  switch (value.alignment()) {
+  case wire::CAPTION_ALIGNMENT_LEFT:
+    result.alignment = edit::CaptionAlignment::Left;
+    break;
+  case wire::CAPTION_ALIGNMENT_CENTER:
+    result.alignment = edit::CaptionAlignment::Center;
+    break;
+  case wire::CAPTION_ALIGNMENT_RIGHT:
+    result.alignment = edit::CaptionAlignment::Right;
+    break;
+  case wire::CAPTION_ALIGNMENT_UNSPECIFIED:
+    result.alignment = edit::CaptionAlignment::Center;
+    break;
+  default:
+    fail(CodecErrorCode::InvalidField, childPath(path, "alignment"), "unknown caption alignment");
+  }
+  if (value.has_vertical_position()) {
+    result.vertical_position = value.vertical_position();
+  }
+  if (value.has_safe_margin()) {
+    result.safe_margin = value.safe_margin();
+  }
+  if (value.has_outline_width()) {
+    result.outline_width = value.outline_width();
+  }
+  requireFinite(result.vertical_position, childPath(path, "vertical_position"));
+  requireFinite(result.safe_margin, childPath(path, "safe_margin"));
+  requireFinite(result.outline_width, childPath(path, "outline_width"));
+  require(result.vertical_position >= 0.0 && result.vertical_position <= 1.0 &&
+              result.safe_margin >= 0.0 && result.safe_margin <= 0.5 &&
+              result.outline_width >= 0.0 && result.outline_width <= 128.0,
+          CodecErrorCode::InvalidField, path, "caption style geometry is outside supported bounds");
+  if (value.has_outline_color()) {
+    result.outline_color = decodeColor(value.outline_color(), childPath(path, "outline_color"));
+  } else if (declared_schema_version >= 3U) {
+    // Early v3 writers may omit optional style fields; model defaults remain canonical.
+    result.outline_color = edit::ColorRgba{0.0, 0.0, 0.0, 1.0};
+  }
+  return result;
+}
+
+[[nodiscard]] edit::CaptionWord decodeCaptionWord(const wire::CaptionWord& value,
+                                                  std::string_view path, IdRegistry& ids) {
+  requirePresent(value.has_id(), childPath(path, "id"));
+  requirePresent(value.has_range(), childPath(path, "range"));
+  edit::CaptionWord result;
+  result.id = decodeId(value.id(), childPath(path, "id"), &ids);
+  result.text = value.text();
+  result.range = decodeRange(value.range(), childPath(path, "range"));
+  result.probability = value.probability();
+  require(!result.text.empty() && result.range.start.isNegative() == false &&
+              result.range.duration > edit::Time{},
+          CodecErrorCode::InvalidField, path, "caption word text/range is invalid");
+  requireFinite(result.probability, childPath(path, "probability"));
+  require(result.probability >= 0.0 && result.probability <= 1.0, CodecErrorCode::InvalidField,
+          childPath(path, "probability"), "caption word probability must be in [0, 1]");
   return result;
 }
 
 [[nodiscard]] edit::Caption decodeCaption(const wire::Caption& value, std::string_view path,
+                                          const std::uint32_t declared_schema_version,
                                           IdRegistry& ids) {
   requirePresent(value.has_id(), childPath(path, "id"));
   requirePresent(value.has_range(), childPath(path, "range"));
@@ -1208,7 +1396,45 @@ decodeMetadata(const google::protobuf::RepeatedPtrField<wire::StringEntry>& entr
           "caption range requires a non-negative start and positive duration");
   result.text = value.text();
   result.language = value.language();
-  result.style = decodeCaptionStyle(value.style(), childPath(path, "style"));
+  result.style =
+      decodeCaptionStyle(value.style(), childPath(path, "style"), declared_schema_version);
+  if (value.has_provenance()) {
+    result.provenance.model_identity = value.provenance().model_identity();
+    require(validUtf8(result.provenance.model_identity), CodecErrorCode::InvalidField,
+            childPath(path, "provenance.model_identity"),
+            "caption provenance identity must be valid UTF-8");
+    switch (value.provenance().source()) {
+    case wire::CAPTION_WORD_SOURCE_IMPORTED:
+      result.provenance.source = edit::CaptionWordSource::Imported;
+      break;
+    case wire::CAPTION_WORD_SOURCE_LOCAL_TRANSCRIPTION:
+      result.provenance.source = edit::CaptionWordSource::LocalTranscription;
+      break;
+    case wire::CAPTION_WORD_SOURCE_USER_EDITED:
+      result.provenance.source = edit::CaptionWordSource::UserEdited;
+      break;
+    case wire::CAPTION_WORD_SOURCE_UNSPECIFIED:
+      result.provenance.source = edit::CaptionWordSource::Unknown;
+      break;
+    default:
+      fail(CodecErrorCode::InvalidField, childPath(path, "provenance.source"),
+           "unknown word source");
+    }
+  }
+  std::optional<edit::Time> previous_end;
+  std::size_t index = 0;
+  for (const auto& word : value.words()) {
+    auto decoded = decodeCaptionWord(word, indexedPath(path, "words", index++), ids);
+    require(result.range.contains(decoded.range), CodecErrorCode::InvalidField,
+            indexedPath(path, "words", index - 1), "caption word must be contained in caption");
+    if (previous_end) {
+      require(decoded.range.start >= *previous_end, CodecErrorCode::InvalidField,
+              indexedPath(path, "words", index - 1),
+              "caption words must be ordered and non-overlapping");
+    }
+    previous_end = decoded.range.end();
+    result.words.push_back(std::move(decoded));
+  }
   return result;
 }
 
@@ -1238,7 +1464,8 @@ decodeMetadata(const google::protobuf::RepeatedPtrField<wire::StringEntry>& entr
   }
   index = 0;
   for (const auto& caption : value.captions()) {
-    result.captions.push_back(decodeCaption(caption, indexedPath(path, "captions", index++), ids));
+    result.captions.push_back(decodeCaption(caption, indexedPath(path, "captions", index++),
+                                            declared_schema_version, ids));
   }
   assignDecodedTransitions(value, path, result, ids);
   return result;
@@ -1345,6 +1572,7 @@ edit::Result<edit::Project, CodecError> deserialize_project(std::span<const std:
             "schema version cannot be older than its minimum reader version");
     requirePresent(snapshot.has_project(), "snapshot.project");
     reject_v2_fields_in_declared_v1(snapshot);
+    reject_v3_fields_in_declared_older(snapshot);
     if (const auto unknown = findUnknownField(snapshot, "snapshot")) {
       fail(CodecErrorCode::InvalidField, *unknown,
            "snapshot contains fields not defined by its declared schema version");

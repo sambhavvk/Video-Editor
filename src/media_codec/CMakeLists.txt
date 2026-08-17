@@ -38,6 +38,15 @@ pkg_check_modules(AVUTIL REQUIRED IMPORTED_TARGET libavutil=${VIDEO_EDITOR_AVUTI
 pkg_check_modules(SWRESAMPLE REQUIRED IMPORTED_TARGET libswresample=${VIDEO_EDITOR_SWRESAMPLE_VERSION})
 pkg_check_modules(SWSCALE REQUIRED IMPORTED_TARGET libswscale=${VIDEO_EDITOR_SWSCALE_VERSION})
 
+# Make the canonical FFmpeg imported targets reusable by media consumers
+# (including the optional transcription service) without repeating package
+# discovery or allowing a second ABI contract to drift.
+set_property(TARGET PkgConfig::AVFORMAT PROPERTY IMPORTED_GLOBAL TRUE)
+set_property(TARGET PkgConfig::AVCODEC PROPERTY IMPORTED_GLOBAL TRUE)
+set_property(TARGET PkgConfig::AVUTIL PROPERTY IMPORTED_GLOBAL TRUE)
+set_property(TARGET PkgConfig::SWRESAMPLE PROPERTY IMPORTED_GLOBAL TRUE)
+set_property(TARGET PkgConfig::SWSCALE PROPERTY IMPORTED_GLOBAL TRUE)
+
 add_library(video_editor_media_codec
   src/probe.cpp
   src/runtime.cpp

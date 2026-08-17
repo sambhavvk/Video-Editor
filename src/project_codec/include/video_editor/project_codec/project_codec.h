@@ -13,7 +13,7 @@
 
 namespace video_editor::project_codec {
 
-inline constexpr std::uint32_t kCurrentSchemaVersion = 2;
+inline constexpr std::uint32_t kCurrentSchemaVersion = 3;
 inline constexpr std::uint32_t kMinimumReaderVersion = 1;
 inline constexpr std::size_t kMaximumSnapshotBytes = 256U * 1024U * 1024U;
 

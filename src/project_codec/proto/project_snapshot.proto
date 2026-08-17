@@ -221,6 +221,37 @@ message CaptionStyle {
   ColorRgba background_color = 4;
   bool bold = 5;
   bool italic = 6;
+  CaptionAlignment alignment = 7;
+  optional double vertical_position = 8;
+  optional double safe_margin = 9;
+  optional double outline_width = 10;
+  optional ColorRgba outline_color = 11;
+}
+
+enum CaptionAlignment {
+  CAPTION_ALIGNMENT_UNSPECIFIED = 0;
+  CAPTION_ALIGNMENT_LEFT = 1;
+  CAPTION_ALIGNMENT_CENTER = 2;
+  CAPTION_ALIGNMENT_RIGHT = 3;
+}
+
+enum CaptionWordSource {
+  CAPTION_WORD_SOURCE_UNSPECIFIED = 0;
+  CAPTION_WORD_SOURCE_IMPORTED = 1;
+  CAPTION_WORD_SOURCE_LOCAL_TRANSCRIPTION = 2;
+  CAPTION_WORD_SOURCE_USER_EDITED = 3;
+}
+
+message CaptionProvenance {
+  CaptionWordSource source = 1;
+  string model_identity = 2;
+}
+
+message CaptionWord {
+  EntityId id = 1;
+  string text = 2;
+  TimeRange range = 3;
+  double probability = 4;
 }
 
 message Caption {
@@ -229,6 +260,8 @@ message Caption {
   string text = 3;
   string language = 4;
   CaptionStyle style = 5;
+  repeated CaptionWord words = 6;
+  CaptionProvenance provenance = 7;
 }
 
 message Sequence {

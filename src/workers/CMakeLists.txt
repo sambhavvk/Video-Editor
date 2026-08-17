@@ -16,6 +16,7 @@ target_link_libraries(
   PRIVATE
     video_editor::media_codec
     video_editor::proxy_service
+    video_editor::transcription_service
     video_editor::project_warnings
   PUBLIC
     video_editor::job_service
@@ -28,4 +29,7 @@ target_link_libraries(
   video_editor_worker_host
   PRIVATE
     video_editor::worker_dispatch
+    video_editor::transcription_service
     video_editor::project_warnings)
+
+install(TARGETS video_editor_worker_host RUNTIME DESTINATION bin)

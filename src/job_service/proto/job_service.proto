@@ -45,6 +45,10 @@ message TranscribeOptions {
   uint32 thread_count = 5;
   bool word_timestamps = 6;
   bool prefer_vulkan = 7;
+  // Optional source-relative window in centiseconds. Both fields set to zero
+  // means the complete input. When present, duration must be positive.
+  int64 source_start_centiseconds = 8;
+  int64 source_duration_centiseconds = 9;
 }
 
 message TranscriptionWord {
@@ -65,6 +69,10 @@ message TranscriptionResult {
   bool vulkan_available = 8;
   bool vulkan_used = 9;
   string backend = 10;
+  // Word timestamps are source-absolute (relative to the beginning of the
+  // selected input asset), even when a source window was requested.
+  int64 source_start_centiseconds = 11;
+  int64 source_duration_centiseconds = 12;
 }
 
 message StartJob { JobSpec spec = 1; }
