@@ -129,10 +129,38 @@ private slots:
   void audioDevicePollLossReturnAndDelayedStopAreRetryable();
   void audioDevicePollPauseCancelsRecoveryIntent();
   void normalizationGenerationRejectsObsoleteCompletionAndClearsBusy();
+  void mapsAndClampsReversedTranscriptWordsInPlaybackOrder();
+  void rejectsOversizedModelDownloadBoundaries();
 
 private:
   std::unique_ptr<QTemporaryDir> application_data_;
 };
+
+void EditorControllerTest::mapsAndClampsReversedTranscriptWordsInPlaybackOrder() {
+  using namespace video_editor;
+  const std::vector<edit::CaptionWord> words{
+      {.text = "before", .range = edit::TimeRange(edit::Time(-2, 1), edit::Time(3, 1))},
+      {.text = "inside", .range = edit::TimeRange(edit::Time(2, 1), edit::Time(2, 1))},
+      {.text = "after", .range = edit::TimeRange(edit::Time(8, 1), edit::Time(2, 1))}};
+  const auto mapped = app::mapTranscriptionWordsToTimeline(
+      words, edit::TimeRange(edit::Time(0, 1), edit::Time(6, 1)),
+      edit::TimeRange(edit::Time(10, 1), edit::Time(6, 1)), edit::Rate(1, 1), true);
+  QCOMPARE(mapped.size(), std::size_t{2});
+  QCOMPARE(mapped[0].text, std::string("inside"));
+  QCOMPARE(mapped[0].range, (edit::TimeRange(edit::Time(12, 1), edit::Time(2, 1))));
+  QCOMPARE(mapped[1].text, std::string("before"));
+  QCOMPARE(mapped[1].range, (edit::TimeRange(edit::Time(15, 1), edit::Time(1, 1))));
+}
+
+void EditorControllerTest::rejectsOversizedModelDownloadBoundaries() {
+  using video_editor::app::modelDownloadSizeAllowed;
+  constexpr std::uintmax_t expected = 147'951'465U;
+  QVERIFY(modelDownloadSizeAllowed(0U, static_cast<std::int64_t>(expected), expected));
+  QVERIFY(modelDownloadSizeAllowed(expected, -1, expected));
+  QVERIFY(!modelDownloadSizeAllowed(expected + 1U, -1, expected));
+  QVERIFY(!modelDownloadSizeAllowed(0U, static_cast<std::int64_t>(expected - 1U), expected));
+  QVERIFY(!modelDownloadSizeAllowed(0U, static_cast<std::int64_t>(expected + 1U), expected));
+}
 
 void EditorControllerTest::initTestCase() {
   application_data_ = std::make_unique<QTemporaryDir>();

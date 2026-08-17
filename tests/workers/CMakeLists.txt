@@ -9,10 +9,17 @@ target_link_libraries(
   video_editor_worker_tests
   PRIVATE
     video_editor::worker_dispatch
+    video_editor::transcription_service
     video_editor::job_service
     video_editor::proxy_service
     video_editor::project_warnings
     GTest::gtest_main)
+
+if(TARGET video_editor_worker_host)
+  add_dependencies(video_editor_worker_tests video_editor_worker_host)
+  target_compile_definitions(video_editor_worker_tests PRIVATE
+    VIDEO_EDITOR_WORKER_HOST="$<TARGET_FILE:video_editor_worker_host>")
+endif()
 
 if(VIDEO_EDITOR_WORKER_TEST_FFMPEG)
   target_compile_definitions(

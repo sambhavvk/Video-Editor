@@ -28,7 +28,9 @@ public beta. Save important work often and keep the original media files availab
   immutable revision against an editable −24 through −9 LUFS target.
 - The Inspector and Effects panel author the supported title, transition, speed, effect, and
   keyframe controls described below. Source-monitor insert/overwrite editing remains incomplete.
-- Local transcription is not implemented; the button only explains the model requirement.
+- Local transcription requires an explicitly downloaded, checksummed multilingual base model and a
+  build with the pinned optional `whisper.cpp` backend. Builds without that backend keep manual
+  captions available and report transcription as unavailable.
 - Relinking, persistent cache management, thumbnails, and waveforms are not complete workflows.
 - Project and internal schema compatibility are pre-beta and may change through migrations.
 
@@ -234,14 +236,35 @@ Open **Audio & Captions** to:
 - add a two-second `New caption` cue at the playhead;
 - edit caption text directly in the table;
 - delete the selected caption;
-- search caption text and double-click a result to seek to it;
+- search caption or timed-word text and double-click a result to seek to its exact timeline time;
+- edit alignment, vertical position, safe margin, text/background colors, emphasis, and outline;
+- download the optional model, transcribe a selected media clip locally, cancel it, and review the
+  proposed timed captions;
+- review measured-silence cuts and conservative filler-word cuts before applying them;
 - export the sequence captions as SRT or WebVTT.
 
 Import validates timing, order, overlap, cue text, and UTF-8. All cues from one import form a single
 undoable edit batch. Export writes atomically and rounds timing to the nearest millisecond because
-SRT and WebVTT timestamps are millisecond-based. The Deliver panel can also burn captions into video
-or create an SRT/WebVTT sidecar. Caption styling UI, word timing, reflow UI, embedded subtitle
-streams, and transcription are not integrated.
+SRT and WebVTT timestamps are millisecond-based. The Deliver panel can burn the canonical caption
+style into video or create an SRT/WebVTT sidecar. The bitmap reference renderer is deterministic but
+does not perform production font-family shaping, and embedded subtitle streams are not implemented.
+
+Model download is always explicit. The editor rejects a declared size mismatch and stops an
+unknown-length stream before it can exceed the pin. Bytes are staged, checked against the pinned
+byte length and upstream digest away from the UI thread, and atomically installed outside the
+project. Cancellation also covers verification and removes partial staging data. Media, transcripts,
+and project data are not uploaded. Transcription launches one worker process for the selected clip,
+seeks and decodes only its conservatively bounded original-media source range to mono 16 kHz audio,
+and maps returned
+source-absolute word timing through the clip's exact trim, speed, and reverse mapping. Cancel
+terminates that job process; a worker/backend failure leaves the project unchanged.
+
+The review list is bound to the immutable project revision used for analysis. `Measured silence`
+items come from bounded, incremental analysis of exact 48 kHz timeline audio, use a conservative
+5 ms inset, and are selected by default. Conservative standalone
+`um`, `uh`, and `erm` transcript fillers are labelled separately and start unselected. Toggle any
+item, then apply or discard the set. Applying accepted captions and cuts creates one atomic revision
+and one undo step; edits made after analysis make the review stale and require regeneration.
 
 ## Create an editing proxy
 

@@ -455,6 +455,33 @@ TEST(ProjectCodecTest, TrackVisibilityAndTargetingRoundTripAndOldV2Defaults) {
   EXPECT_DOUBLE_EQ(decoded.value().sequences[0].tracks[0].audio_pan, 0.0);
 }
 
+TEST(ProjectCodecTest, DeclaredVersionTwoCaptionDefaultsUpgradeToCanonicalV3) {
+  auto encoded = serialize_project(makeComplexProject());
+  video_editor::persistence::v1::ProjectSnapshot old_v2;
+  ASSERT_TRUE(old_v2.ParseFromArray(encoded.data(), static_cast<int>(encoded.size())));
+  old_v2.set_schema_version(2);
+  auto* caption = old_v2.mutable_project()->mutable_sequences(0)->mutable_captions(0);
+  caption->clear_words();
+  caption->clear_provenance();
+  caption->mutable_style()->clear_alignment();
+  caption->mutable_style()->clear_vertical_position();
+  caption->mutable_style()->clear_safe_margin();
+  caption->mutable_style()->clear_outline_width();
+  caption->mutable_style()->clear_outline_color();
+  std::string bytes_text;
+  ASSERT_TRUE(old_v2.SerializeToString(&bytes_text));
+  ProjectBytes bytes;
+  for (const char byte : bytes_text)
+    bytes.push_back(static_cast<std::byte>(byte));
+  const auto decoded = deserialize_project(bytes);
+  ASSERT_TRUE(decoded);
+  const auto& style = decoded.value().sequences.front().captions.front().style;
+  EXPECT_EQ(style.alignment, edit::CaptionAlignment::Center);
+  EXPECT_DOUBLE_EQ(style.vertical_position, 0.9);
+  EXPECT_DOUBLE_EQ(style.safe_margin, 0.05);
+  EXPECT_EQ(serialize_project(decoded.value())[1], std::byte{0x03});
+}
+
 TEST(ProjectCodecTest, SerializationIsDeterministic) {
   const auto project = makeComplexProject();
   const auto first = serialize_project(project);
@@ -466,7 +493,7 @@ TEST(ProjectCodecTest, SerializationIsDeterministic) {
   EXPECT_EQ(serialize_project(decoded.value()), first);
   ASSERT_GE(first.size(), 4U);
   EXPECT_EQ(first[0], std::byte{0x08});
-  EXPECT_EQ(first[1], std::byte{0x02});
+  EXPECT_EQ(first[1], std::byte{0x03});
   EXPECT_EQ(first[2], std::byte{0x10});
   EXPECT_EQ(first[3], std::byte{0x01});
 }
@@ -501,27 +528,27 @@ TEST(ProjectCodecTest, RejectsMalformedAndMissingVersionData) {
 }
 
 TEST(ProjectCodecTest, RejectsFutureSchemaAndReaderVersions) {
-  // schema_version = 3, minimum_reader_version = 1
-  const auto future_schema = deserialize_project(bytes({0x08, 0x03, 0x10, 0x01}));
+  // schema_version = 4, minimum_reader_version = 1
+  const auto future_schema = deserialize_project(bytes({0x08, 0x04, 0x10, 0x01}));
   ASSERT_FALSE(future_schema);
   EXPECT_EQ(future_schema.error().code, CodecErrorCode::UnsupportedSchemaVersion);
 
-  // schema_version = 2, minimum_reader_version = 3
-  const auto future_reader = deserialize_project(bytes({0x08, 0x02, 0x10, 0x03}));
+  // schema_version = 3, minimum_reader_version = 4
+  const auto future_reader = deserialize_project(bytes({0x08, 0x03, 0x10, 0x04}));
   ASSERT_FALSE(future_reader);
   EXPECT_EQ(future_reader.error().code, CodecErrorCode::UnsupportedMinimumReaderVersion);
 }
 
 TEST(ProjectCodecTest, RejectsUnknownFieldsAtTheDeclaredCurrentVersion) {
-  // The fourth root field is unknown to schema v2. It must not be silently
+  // The fourth root field is unknown to schema v3. It must not be silently
   // dropped, even though protobuf itself can parse it.
-  const auto unknown = deserialize_project(bytes({0x08, 0x02, 0x10, 0x01, 0x1A, 0x00, 0x20, 0x01}));
+  const auto unknown = deserialize_project(bytes({0x08, 0x03, 0x10, 0x01, 0x1A, 0x00, 0x20, 0x01}));
   ASSERT_FALSE(unknown);
   EXPECT_EQ(unknown.error().code, CodecErrorCode::InvalidField);
   EXPECT_EQ(unknown.error().field_path, "snapshot");
 }
 
-TEST(ProjectCodecTest, AcceptsDeclaredVersionOneProjectsAndRewritesCanonicalVersionTwo) {
+TEST(ProjectCodecTest, AcceptsDeclaredVersionOneProjectsAndRewritesCanonicalVersionThree) {
   const auto v2_project = makeSchemaV1CompatibleProject();
   const auto canonical_v2 = serialize_project(v2_project);
 
@@ -534,6 +561,15 @@ TEST(ProjectCodecTest, AcceptsDeclaredVersionOneProjectsAndRewritesCanonicalVers
       track.clear_targeted();
       track.clear_audio_gain_db();
       track.clear_audio_pan();
+    }
+    for (auto& caption : *sequence.mutable_captions()) {
+      caption.mutable_style()->clear_alignment();
+      caption.mutable_style()->clear_vertical_position();
+      caption.mutable_style()->clear_safe_margin();
+      caption.mutable_style()->clear_outline_width();
+      caption.mutable_style()->clear_outline_color();
+      caption.clear_words();
+      caption.clear_provenance();
     }
   }
   std::string old_bytes;
@@ -567,7 +603,7 @@ TEST(ProjectCodecTest, UpgradesGenuineVersionOneTitleClipAndLeavesMediaClipsTitl
   const auto reserialized = serialize_project(decoded.value());
   ASSERT_GE(reserialized.size(), 4U);
   EXPECT_EQ(reserialized[0], std::byte{0x08});
-  EXPECT_EQ(reserialized[1], std::byte{0x02});
+  EXPECT_EQ(reserialized[1], std::byte{0x03});
   EXPECT_EQ(reserialized[2], std::byte{0x10});
   EXPECT_EQ(reserialized[3], std::byte{0x01});
 }

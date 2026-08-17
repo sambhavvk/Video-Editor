@@ -580,5 +580,64 @@ TEST(TimelineEditorTest, AddsAndRemovesTracksAndHonorsTrackLocks) {
   EXPECT_EQ(removal.error().code, EditErrorCode::TrackLocked);
 }
 
+TEST(TimelineEditorTest, CaptionChangeSetIsAtomicRevisionBoundAndUndoable) {
+  auto fixture = makeProject();
+  TimelineEditor editor(fixture.project);
+  Caption caption;
+  caption.range = TimeRange(Time(0, 1), Time(2, 1));
+  caption.text = "hello";
+  const auto empty = editor.apply(
+      EditCommand{ApplyCaptionChangeSetCommand{fixture.sequence_id, {}, {}, {}}, {}}, Revision{0});
+  ASSERT_FALSE(empty);
+  EXPECT_EQ(empty.error().code, EditErrorCode::InvalidArgument);
+  EXPECT_EQ(editor.revision(), Revision{0});
+  const auto applied = editor.apply(
+      EditCommand{ApplyCaptionChangeSetCommand{fixture.sequence_id, {caption}, {}, {}}, {}},
+      Revision{0});
+  ASSERT_TRUE(applied);
+  EXPECT_EQ(editor.history().size(), 1U);
+  const auto stale = editor.apply(
+      EditCommand{ApplyCaptionChangeSetCommand{fixture.sequence_id, {}, {}, {caption.id}}, {}},
+      Revision{0});
+  ASSERT_FALSE(stale);
+  EXPECT_EQ(stale.error().code, EditErrorCode::RevisionConflict);
+  const auto undone = editor.undo(applied.value());
+  ASSERT_TRUE(undone);
+  EXPECT_TRUE(snapshot(editor, fixture.sequence_id, undone.value()).sequence().captions.empty());
+  const auto redone = editor.redo(undone.value());
+  ASSERT_TRUE(redone);
+  EXPECT_EQ(snapshot(editor, fixture.sequence_id, redone.value()).sequence().captions.size(), 1U);
+}
+
+TEST(TimelineEditorTest, TimelineCutChangeSetRejectsInvalidPayloadsAtomically) {
+  auto fixture = makeProject();
+  const auto clip = makeClip(fixture.asset_id, 0, 10);
+  fixture.project.sequences[0].tracks[0].clips.push_back(clip);
+  TimelineEditor editor(fixture.project);
+  const auto before = editor.projectAt(Revision{});
+  const auto empty = editor.apply(
+      EditCommand{ApplyTimelineCutChangeSetCommand{fixture.sequence_id, {}}, {}}, Revision{0});
+  ASSERT_FALSE(empty);
+  EXPECT_EQ(empty.error().code, EditErrorCode::InvalidArgument);
+  EXPECT_EQ(editor.projectAt(Revision{}), before);
+  auto replacement = TrackClipReplacement{fixture.video_track_id, TrackKind::Video, {clip}};
+  replacement.clips.front().timeline_range = TimeRange(Time(1, 1), Time(10, 1));
+  const auto missing = editor.apply(
+      EditCommand{ApplyTimelineCutChangeSetCommand{
+                      fixture.sequence_id, {{EntityId::generate(), TrackKind::Video, {clip}}}},
+                  {}},
+      Revision{0});
+  ASSERT_FALSE(missing);
+  EXPECT_EQ(missing.error().code, EditErrorCode::EntityNotFound);
+  const auto wrong_kind = editor.apply(
+      EditCommand{ApplyTimelineCutChangeSetCommand{
+                      fixture.sequence_id, {{fixture.video_track_id, TrackKind::Audio, {clip}}}},
+                  {}},
+      Revision{0});
+  ASSERT_FALSE(wrong_kind);
+  EXPECT_EQ(wrong_kind.error().code, EditErrorCode::InvalidTrackKind);
+  EXPECT_EQ(editor.revision(), Revision{0});
+}
+
 } // namespace
 } // namespace video_editor::edit

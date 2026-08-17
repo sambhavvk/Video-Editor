@@ -6,7 +6,7 @@
 >
 > **Status:** Engineering preview; not for public distribution or irreplaceable work
 >
-> **Last updated:** 2026-08-13
+> **Last updated:** 2026-08-14
 
 Thank you for testing. This guide covers a source build and the current Linux alpha workflow. The
 editor is offline-first and does not require an account, but packaging and the supported hardware
@@ -72,14 +72,15 @@ The authoritative versions are in `cmake/DependencyVersions.cmake`. At this revi
 
 | Dependency | Required contract |
 | --- | --- |
-| Qt | 6.11.1 exact; Core, Concurrent, Gui, and Widgets |
-| FFmpeg | 9.0 exact; shared LGPL-compatible build |
-| FFmpeg ABI | avformat/avcodec 63.1.100, avutil 61.1.100, swresample 7.1.100, swscale 10.1.100 |
+| Qt | 6.11.1 exact; Core, Concurrent, Gui, Widgets, and Network |
+| FFmpeg | 9.0.1 exact; shared LGPL-compatible build |
+| FFmpeg ABI | avformat/avcodec 63.1.101, avutil 61.1.101, swresample 7.1.101, swscale 10.1.101 |
 | Protobuf | 35.1 exact |
 | Abseil | 20250512.1 exact |
 | libplacebo | 7.360.1 exact; optional GPU acceleration |
 | libebur128 | 1.2.6 exact |
 | miniaudio | 0.11.25 header; optional but required for physical audio playback |
+| whisper.cpp | 1.9.2 at `306c88f4d1286aec1bf96e544632897886af5501`; optional local transcription backend |
 | SQLite | 3.45 or newer |
 | OpenSSL | 3.0 or newer |
 | GTest | Required when `VIDEO_EDITOR_BUILD_TESTS=ON` |
@@ -151,6 +152,10 @@ Useful configuration switches:
 | `VIDEO_EDITOR_BUILD_WORKERS` | `ON` | Build the worker-host executable |
 | `VIDEO_EDITOR_ENABLE_GPU_RENDERING` | `ON` | Build libplacebo support when its exact dependency is found |
 | `VIDEO_EDITOR_MINIAUDIO_ROOT` | empty | Prefix or directory containing `miniaudio.h` |
+| `VIDEO_EDITOR_ENABLE_WHISPER_CPP` | `OFF` | Link the pinned optional local transcription backend |
+| `VIDEO_EDITOR_TRANSCRIPTION_WHISPER_INCLUDE_DIR` | empty | Directory containing pinned `whisper.h` |
+| `VIDEO_EDITOR_TRANSCRIPTION_WHISPER_LIBRARY` | empty | Pinned whisper.cpp library file |
+| `VIDEO_EDITOR_WHISPER_CPP_VULKAN_ASSERTED` | `OFF` | Assert build provenance only when that linked backend was built with Vulkan |
 
 To build faster without tests:
 
@@ -276,7 +281,7 @@ preserved, and undo reverses the entire gesture in one step.
 5. Add Hold, Linear, and Bezier keyframes; edit exact time/value fields and drag the curve.
 6. Save, close, reopen, and verify the authored state.
 
-**Expected:** Every change is revisioned, undoable, schema-v2 persistent, and visible through the CPU
+**Expected:** Every change is revisioned, undoable, schema-v3 persistent, and visible through the CPU
 reference renderer. Unsupported title, transition, blend, or effect frames fall back from GPU to CPU
 without disabling later compatible GPU frames.
 
@@ -311,16 +316,28 @@ track-gain batch. Device loss is detected within roughly one second, pauses safe
 selected/default endpoint recovers only while playback is still intended. Report any xrun, audible
 glitch, restart after Pause/Stop, or growing A/V offset.
 
-### 7. Captions
+### 7. Captions and local transcription
 
-1. Import UTF-8 SRT and WebVTT files.
-2. Add, search, edit, and delete caption cues.
+1. Import UTF-8 SRT and WebVTT files, then add, search, edit, and delete cues.
+2. Edit alignment, vertical position, safe margin, colors, emphasis, and outline.
 3. Save/reopen the project and export SRT and WebVTT sidecars.
-4. In Deliver, test caption burn-in and burn-in plus sidecar.
+4. In Deliver, test styled caption burn-in and burn-in plus sidecar.
+5. Choose the explicit model download. Cancel once during transfer and, if practical, once while it
+   says `Verifying model`, then complete it. Verify the panel reports ready only after exact size and
+   digest checks and that cancellation leaves no `.staging-*` directory in the model cache.
+6. Select a speech clip, start local transcription, cancel once, then complete a new job. Activate a
+   timed word and verify exact transcript navigation.
+7. Review `Measured silence` and `Transcript filler` items. Verify measured silence starts selected,
+   fillers start unselected, individual toggles work, Apply is one undo step, and an intervening edit
+   makes the old review stale.
 
-**Expected:** Caption edits are undoable and persistent. Sidecars round to millisecond timing and
-write atomically. Burned captions appear in video exports. Styling preview, word timing, embedded
-subtitle streams, and transcription are not implemented.
+**Expected:** Caption words, provenance, and style are undoable and schema-v3 persistent. Sidecars
+round to millisecond timing and write atomically. Burn-in honors the canonical style. Model bytes
+are size-bounded while streaming, staged outside the project, verified off the UI thread, and a
+cancel/mismatch is discarded. Transcription runs in a restartable
+worker without uploading media. Accepted captions plus selected cuts commit atomically; cancel,
+failure, discard, or a stale revision leaves the project unchanged. A build configured without
+`VIDEO_EDITOR_ENABLE_WHISPER_CPP=ON` must truthfully report the backend unavailable.
 
 ### 8. Proxy workflow
 
@@ -376,8 +393,10 @@ Do not report these as regressions unless behavior is worse than described:
 - GPU preview downloads an offscreen libplacebo result into Qt; there is no native swapchain,
   zero-copy decode, complete GPU effect/color parity, or HDR mastering.
 - H.264/AAC export is disabled. Creator delivery currently uses FOSS VP9/Opus WebM.
-- Local whisper.cpp transcription, model management, word timing, and transcript/silence edit
-  proposals are not implemented.
+- Local transcription requires the separately built pinned whisper.cpp backend and an on-demand
+  approximately 141 MiB base model. Physical multilingual accuracy, Vulkan acceleration, and
+  worker-death validation are not release-qualified yet. The deterministic bitmap caption renderer
+  does not provide production font-family shaping or embedded subtitle streams.
 - Media-bin thumbnails, timeline waveforms, metadata editing, relinking, persistent proxy discovery,
   and a unified cache browser are incomplete.
 - Source-monitor insert/overwrite editing, shortcut remapping, full LUT/color breadth, and the
@@ -449,7 +468,7 @@ cmake --preset dev \
 
 ### FFmpeg version mismatch
 
-The source currently requires FFmpeg 9.0 library ABIs exactly. Check which pkg-config files are
+The source currently requires FFmpeg 9.0.1 library ABIs exactly. Check which pkg-config files are
 visible:
 
 ```bash
@@ -483,6 +502,24 @@ ffmpeg -hide_banner -encoders | grep -E 'libvpx-vp9|libopus|vp9_vaapi'
 
 `libvpx-vp9` is required for creator video and `libopus` is required when the preset contains audio.
 VAAPI is optional; its failure should fall back to libvpx.
+
+### Transcription says the backend is unavailable
+
+Manual captions still work. To test inference, build whisper.cpp 1.9.2 at commit
+`306c88f4d1286aec1bf96e544632897886af5501`, then
+configure with explicit include/library paths:
+
+```bash
+cmake --preset dev \
+  -DVIDEO_EDITOR_ENABLE_WHISPER_CPP=ON \
+  -DVIDEO_EDITOR_TRANSCRIPTION_WHISPER_INCLUDE_DIR=/absolute/path/to/whisper.cpp/include \
+  -DVIDEO_EDITOR_TRANSCRIPTION_WHISPER_LIBRARY=/absolute/path/to/libwhisper.so
+```
+
+Add `-DVIDEO_EDITOR_WHISPER_CPP_VULKAN_ASSERTED=ON` only if that exact library was built and linked
+with its Vulkan backend. This records a compiled capability; upstream whisper.cpp does not expose a
+runtime-used Vulkan assertion through this adapter. The model is downloaded only after the tester
+requests it in the application.
 
 ### Offscreen smoke test fails
 

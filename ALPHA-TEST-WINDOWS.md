@@ -1,152 +1,106 @@
-# Video Editor — Alpha Test (Windows)
+<!-- SPDX-License-Identifier: MPL-2.0 -->
 
-> **Version:** 0.1.0-alpha  
-> **Status:** Pre-release, not for public distribution  
-> **Last updated:** 2026-08-10
+# Video Editor — Alpha Test Guide for Windows
 
-Thanks for helping test! This document walks you through building and running the video editor from source on Windows. It requires LLVM clang-cl (not Microsoft's MSVC) because the project uses `__int128` for timeline arithmetic.
+> **Version:** 0.1.0-alpha
+>
+> **Status:** Engineering preview; not for public distribution or irreplaceable work
+>
+> **Last updated:** 2026-08-14
 
----
+This guide covers the current Windows source build and interactive alpha workflow. The editor is
+offline-first and needs no account. Keep original media and backups of important projects.
 
-## System Requirements
+See [Beta feature status](docs/beta-feature-status.md) for exact implementation state and the
+[User guide](docs/user-guide.md) for normal workflows.
 
-- **OS:** Windows 10 (22H2+) or Windows 11
-- **RAM:** 8 GB minimum, 16 GB recommended
-- **Disk:** ~15 GB free (tools + deps + build tree)
-- **GPU:** Not required. Optional Vulkan-capable GPU enables a libplacebo-accelerated preview path (D3D11 on Windows); CPU-only preview is fully supported.
+## System requirements
 
----
+- Windows 11 x86-64.
+- 8 GB RAM minimum; 16 GB recommended.
+- At least 15 GB for tools/dependencies/builds, plus media, caches, and exports.
+- LLVM `clang-cl` with C++20 support. MSVC's compiler is not supported because exact timeline
+  arithmetic uses 128-bit integer intermediates; the Visual Studio linker and Windows SDK are used.
+- CMake 3.30+, Ninja, Git, pkg-config support for the dependency prefix, and Python 3.
+- Optional D3D11/Vulkan-capable GPU; CPU preview remains available.
+- Optional miniaudio 0.11.25 header and usable output device for audible forward-1× playback.
 
-## 1. Install Required Tools
+## 1. Install build tools
 
-Install these in order. Each one is needed.
+Install Git for Windows, CMake, Ninja, LLVM, and Visual Studio 2022 Build Tools with the latest
+Windows 11 SDK and x64 C++ tools. Open an **x64 Native Tools** PowerShell, then verify:
 
-### 1a. Git for Windows
-
-Download: https://git-scm.com/download/win
-
-Default install options are fine.
-
-### 1b. CMake 3.30+
-
-Download: https://cmake.org/download/ → Windows x64 Installer
-
-✅ Check **"Add CMake to the system PATH"** during install.
-
-### 1c. Ninja
-
-Download: https://github.com/ninja-build/ninja/releases
-
-Get `ninja-win.zip`, extract `ninja.exe` somewhere, and add that folder to your PATH.  
-Or install via `winget`:
 ```powershell
-winget install Ninja-build.Ninja
-```
-
-### 1d. LLVM (clang-cl)
-
-**This is required — MSVC will not work.**
-
-Download: https://github.com/llvm/llvm-project/releases
-
-Get the latest **LLVM 19+** Windows x64 installer (e.g. `LLVM-19.x.x-win64.exe`).
-
-✅ Check **"Add LLVM to the system PATH for all users"** during install.
-
-Verify:
-```powershell
+git --version
+cmake --version
+ninja --version
 clang-cl --version
 ```
 
-### 1e. Visual Studio Build Tools (for Windows SDK + linker)
+## 2. Provide the pinned dependencies
 
-You still need the MSVC **linker** and **Windows SDK**, just not the compiler.
+`cmake/DependencyVersions.cmake` is authoritative. The current contracts are:
 
-Download: https://visualstudio.microsoft.com/downloads/ → "Build Tools for Visual Studio 2022"
+| Dependency | Required contract |
+| --- | --- |
+| Qt | 6.11.1 exact; Core, Concurrent, Gui, Widgets, Network |
+| FFmpeg | 9.0.1 shared LGPL-compatible build |
+| FFmpeg ABI | avformat/avcodec 63.1.101, avutil 61.1.101, swresample 7.1.101, swscale 10.1.101 |
+| Protobuf / Abseil | 35.1 / 20250512.1 exact |
+| libplacebo | 7.360.1 exact; optional D3D11/Vulkan preview |
+| libebur128 | 1.2.6 exact |
+| miniaudio | 0.11.25 header; optional physical audio adapter |
+| SQLite / OpenSSL | 3.45+ / 3.0+ |
+| whisper.cpp | 1.9.2 at `306c88f4d1286aec1bf96e544632897886af5501`; optional local transcription backend |
 
-In the installer, select:
-- **MSVC v143 - VS 2022 C++ x64/x86 build tools**
-- **Windows 11 SDK** (latest)
+Use reproducibly built shared dependencies in one prefix. A distribution build must disable FFmpeg
+GPL/nonfree configuration and carry the required notices/source offers. FOSS creator delivery needs
+`libvpx-vp9` and `libopus`; `vp9_qsv` is optional and always has a libvpx fallback.
 
-No need to install the full Visual Studio IDE.
-
-### 1f. PowerShell 7 (for MSI packaging, optional)
-
-```powershell
-winget install Microsoft.PowerShell
-```
-
----
-
-## 2. Install Dependencies
-
-The project requires **exact** versions of several libraries. You'll need to build or obtain them manually.
-
-### Required Versions
-
-| Dependency     | Required Version | Notes                          |
-|----------------|-----------------|--------------------------------|
-| Qt             | 6.11.1 (exact)  | Use Qt online installer        |
-| FFmpeg         | 8.1.2 (exact)   | BtbN builds or compile from source |
-| Protobuf       | 35.1 (exact)    | vcpkg or build from source     |
-| Abseil         | 20250512.1      | vcpkg or build from source     |
-| OpenSSL        | ≥ 3.0           | Strawberry Perl + build, or vcpkg |
-| SQLite         | ≥ 3.45          | amalgamation download          |
-| libplacebo     | 7.360.1         | Build from source              |
-| libebur128     | 1.2.6           | Build from source              |
-| GTest          | latest          | vcpkg or build from source     |
-
-### Recommended: Use vcpkg for most deps
+Example configuration:
 
 ```powershell
-git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
-cd C:\vcpkg
-.\bootstrap-vcpkg.bat
+$deps = 'C:\video-editor-deps'
+$env:CMAKE_PREFIX_PATH = "C:\Qt\6.11.1\msvc2022_64;$deps"
+$env:PATH = "C:\Qt\6.11.1\msvc2022_64\bin;$deps\bin;$env:PATH"
 
-# Install what vcpkg can handle
-.\vcpkg install protobuf abseil openssl sqlite3 gtest libplacebo libebur128
-```
-
-> ⚠️ **Qt 6.11.1** must be installed separately via the [Qt Online Installer](https://www.qt.io/download-qt-installer-oss). Install the `MSVC 2022 64-bit` component to e.g. `C:\Qt\6.11.1\msvc2022_64`. Note: the project builds with clang-cl, but uses the MSVC-targeting Qt build.
-
-> ⚠️ **FFmpeg 8.1.2** — grab pre-built dev + shared DLLs from [BtbN's GitHub releases](https://github.com/BtbN/FFmpeg-Builds/releases) (get `ffmpeg-n8.1.2-latest-win64-gpl-shared-8.1.zip`), or compile from source.
-
----
-
-## 3. Build
-
-Open **PowerShell** and run:
-
-```powershell
-cd C:\path\to\VideoEditor
-
-# Configure — uses the windows-dev preset (clang-cl)
 cmake --preset windows-dev `
-  -DCMAKE_PREFIX_PATH="C:\Qt\6.11.1\msvc2022_64;C:\vcpkg\installed\x64-windows" `
-  -DVCPKG_TARGET_TRIPLET=x64-windows
-
-# Build
-cmake --build build/windows-dev -j $env:NUMBER_OF_PROCESSORS
+  -DCMAKE_PREFIX_PATH="$env:CMAKE_PREFIX_PATH" `
+  -DVIDEO_EDITOR_MINIAUDIO_ROOT="$deps"
 ```
 
-This produces `build\windows-dev\src\app\VideoEditor.exe`.
+For local transcription inference, build the exact pinned whisper.cpp library and add:
 
-### If you installed deps manually (not vcpkg)
-
-Point CMake to each dependency:
 ```powershell
 cmake --preset windows-dev `
-  -DCMAKE_PREFIX_PATH="C:\Qt\6.11.1\msvc2022_64" `
-  -DFFMPEG_ROOT="C:\deps\ffmpeg" `
-  -DProtobuf_ROOT="C:\deps\protobuf" `
-  -Dabsl_ROOT="C:\deps\abseil" `
-  -DOPENSSL_ROOT_DIR="C:\deps\openssl" `
-  -DSQLite3_ROOT="C:\deps\sqlite" `
-  -Dlibplacebo_ROOT="C:\deps\libplacebo" `
-  -DEBUR128_ROOT="C:\deps\libebur128"
+  -DVIDEO_EDITOR_ENABLE_WHISPER_CPP=ON `
+  -DVIDEO_EDITOR_TRANSCRIPTION_WHISPER_INCLUDE_DIR='C:\deps\whisper.cpp\include' `
+  -DVIDEO_EDITOR_TRANSCRIPTION_WHISPER_LIBRARY='C:\deps\whisper.cpp\build\src\Release\whisper.lib'
 ```
 
----
+Only set `VIDEO_EDITOR_WHISPER_CPP_VULKAN_ASSERTED=ON` when that exact library was built with Vulkan.
+This is build provenance, not a claim that one inference used Vulkan. Transcription remains a
+truthful unavailable capability when whisper.cpp is omitted.
+
+## 3. Build and verify
+
+```powershell
+cmake --build build\windows-dev --parallel $env:NUMBER_OF_PROCESSORS
+ctest --test-dir build\windows-dev --output-on-failure
+```
+
+The executable is `build\windows-dev\src\app\VideoEditor.exe`. Ensure Qt, FFmpeg, libplacebo,
+libebur128, OpenSSL, and optional whisper runtime DLLs are on `PATH` or deployed beside it. Qt also
+needs `platforms\qwindows.dll`.
+
+Run the dependency audit before interactive testing:
+
+```powershell
+.\build\windows-dev\src\media_codec\video_editor_dependency_audit.exe
+```
+
+`expected_abi` must be `true`. A distributable runtime additionally requires
+`lgpl_compatible_configuration` to be `true`.
 
 ## 4. Run
 
@@ -154,224 +108,112 @@ cmake --preset windows-dev `
 .\build\windows-dev\src\app\VideoEditor.exe
 ```
 
-**Important:** Qt and FFmpeg DLLs must be on the PATH or next to the exe. Quick way:
-```powershell
-$env:PATH = "C:\Qt\6.11.1\msvc2022_64\bin;C:\deps\ffmpeg\bin;$env:PATH"
-.\build\windows-dev\src\app\VideoEditor.exe
-```
+Keep PowerShell open to preserve diagnostics.
 
-Or copy the required DLLs next to `VideoEditor.exe`:
-- `Qt6Core.dll`, `Qt6Gui.dll`, `Qt6Widgets.dll`, `Qt6Concurrent.dll`
-- `avcodec-62.dll`, `avformat-62.dll`, `avutil-60.dll`, `swresample-6.dll`, `swscale-9.dll`
-- `libcrypto-3-x64.dll`, `libssl-3-x64.dll`
-- Any platform plugins: `platforms/qwindows.dll`
+## Interactive alpha checklist
 
----
+Record pass, fail, or unavailable for each area.
 
-## 5. Run Tests (Optional)
+### 1. Projects and recovery
 
-```powershell
-cd build\windows-dev
-ctest --output-on-failure
-```
+Create, edit, save, close, and reopen a `.veproj`. With a disposable project, terminate the process
+after a completed edit but before checkpoint save, restart, and inspect recovery.
 
----
+**Expected:** Completed commands survive recovery; saved checkpoints are not corrupted. Media and
+caches are referenced, not embedded.
 
-## Test Checklist
+### 2. Import and professional timeline
 
-Walk through each item below. Check it off when it passes. If something fails, see [Reporting Issues](#reporting-issues).
+Import through the file dialog and drag/drop. Test linked A/V insertion, Ctrl/Shift multi-selection,
+move, normal/ripple/overwrite trims, roll/slip/slide, linked split/delete, exact frame nudges,
+playhead/marker/clip/frame snapping, track create/rename/reorder/lock/visibility/targeting, markers,
+gap closure, Escape cancellation, and one-step undo/redo.
 
-### 1. Project creation
+**Expected:** Each accepted gesture publishes one exact atomic revision; a rejected or locked batch
+does not partially edit the project.
 
-- [ ] Create a new project.
-- [ ] Save the project.
-- [ ] Close and reopen the editor.
-- [ ] Reopen the saved project and verify everything loads correctly.
+### 3. Titles, transitions, effects, and speed
 
-**Expected result:** The project file round-trips cleanly — all your settings and media references survive save/close/reopen without errors or missing data.
+Author a title; change its text/font/size/alignment/emphasis. Add and edit both transition presets.
+Set speed/reverse. Add color/crop/blur effects and Hold/Linear/Bezier keyframes. Save/reopen.
 
-### 2. Media import
+**Expected:** Authoring persists in schema-v3 snapshots and CPU preview/export. Unsupported GPU
+frames use per-frame CPU fallback without disabling later compatible GPU frames.
 
-- [ ] Drag a video file from Explorer into the media bin.
-- [ ] Use the file picker to import a second video file.
-- [ ] Verify both clips appear in the media bin with thumbnails.
+### 4. Preview and professional audio
 
-**Expected result:** Imported files show up in the media bin with visible thumbnail frames. No errors in the terminal.
+Play, pause/resume, seek, scrub, and use J/K/L. Select default and named output devices. Test clip
+and track gain/pan/fades, mute/solo, EQ, compressor, dialogue reduction, limiter, peak/RMS/LUFS
+meters, and loudness normalization. If safe, disconnect/reconnect a nonessential device.
 
-### 3. Timeline editing
+**Expected:** Forward 1× audio is the A/V master when miniaudio opens; otherwise the UI reports
+silent fallback. Device loss pauses safely and recovery only resumes intended playback. Reverse and
+non-1× audio remain silent. Report every xrun or growing drift.
 
-- [ ] Insert clips from the media bin onto the timeline.
-- [ ] Move a clip to a different position.
-- [ ] Trim (drag the edge of) a clip.
-- [ ] Split a clip at the playhead.
-- [ ] Ripple-delete a clip and verify the gap closes.
-- [ ] Test undo (Ctrl+Z) and redo (Ctrl+Y) for each operation above.
+### 5. Captions and local transcription
 
-**Expected result:** Every edit operation works as described. Undo/redo reverses and re-applies each change correctly without corruption.
+1. Import SRT/WebVTT, edit/search cues, and activate a result to seek.
+2. Edit alignment, vertical position, safe margin, colors, emphasis, and outline.
+3. Export sidecars and styled burn-in; save/reopen and compare.
+4. Explicitly download the optional base model. Cancel once during transfer and, if practical, once
+   during verification, then complete it. Check that no partial staging directory remains.
+5. Transcribe a selected speech clip, cancel once, then complete a new job and activate timed words.
+6. Review `Measured silence` and `Transcript filler` items. Toggle selections, apply, undo once, and
+   confirm an intervening edit makes an old review stale.
 
-### 4. Video preview
+**Expected:** Model bytes are bounded during transfer, verified off the UI thread before atomic
+install, and never embedded in the project. Cancellation removes partial staging data.
+Inference runs locally in a restartable worker and does not upload media. Measured silence starts
+selected; fillers start unselected. Accepted captions and cuts form one atomic revision. Cancel,
+failure, discard, or stale review leaves project state unchanged. A build without whisper.cpp must
+show the backend as unavailable without disabling manual captions.
 
-- [ ] Place clips on the timeline and press Play.
-- [ ] Scrub the timeline by dragging the playhead.
-- [ ] Verify that video frames update in the preview panel.
+### 6. Proxies and creator export
 
-**Expected result:** The preview shows async CPU-rendered video frames from your timeline. Frame updates may not be real-time on slower machines — that's expected.
+Create/cancel/recreate a recommended proxy, preview it, then export from originals. Test FFV1/MKV,
+ProRes/MOV when available, YouTube/vertical VP9+Opus WebM, Opus podcast, custom rate/resolution/
+bitrate, captions, cancellation, and existing-destination protection.
 
-> ⚠️ **No audio will play through speakers.** Realtime audio-device playback is not integrated. Audio data *is* rendered and exported, but you cannot audition it live during preview. This is a deliberate alpha boundary.
+**Expected:** Partial proxy/export files are not committed. A failed QSV attempt visibly restarts
+the complete export with `libvpx-vp9`. H.264/AAC are intentionally unavailable.
 
-### 5. Captions
+### 7. Stability and accessibility
 
-- [ ] Import an SRT or WebVTT subtitle file.
-- [ ] Verify it appears in the caption track on the timeline.
-- [ ] Search within the caption text.
-- [ ] Edit a caption entry (add text, modify text, delete an entry).
-- [ ] Export a subtitle file and verify the content matches your edits.
+Edit continuously for at least 20 minutes. Resize/dock panels, use keyboard focus and accessible
+names, monitor Task Manager, and inspect terminal output.
 
-**Expected result:** Captions load into a dedicated track, are searchable, and are fully editable. Exported SRT/WebVTT files round-trip correctly — what you edit is what you get.
+**Expected:** No crash, freeze, unbounded memory, corrupt project, stuck export, or worker left after
+exit.
 
-### 6. Proxy workflow
+## Known alpha limitations
 
-- [ ] Select a media clip in the bin.
-- [ ] Trigger proxy generation (right-click or menu).
-- [ ] Verify the half-resolution proxy file is created.
-- [ ] Confirm the timeline preview uses the proxy.
-- [ ] Switch back to original media and confirm the preview updates.
+- Physical one-hour zero-xrun and two-hour A/V drift qualification is incomplete across supported
+  Windows audio devices; hot-plug uses one-second polling.
+- GPU preview is offscreen and downloaded into Qt; native swapchain presentation, zero-copy decode,
+  full GPU effect/color parity, and HDR mastering are not implemented.
+- H.264/AAC remains disabled pending legal approval; creator delivery uses FOSS VP9/Opus.
+- Local transcription requires the optional pinned backend and an on-demand approximately 141 MiB
+  model. Physical multilingual accuracy, Vulkan inference, and worker-death matrices remain open.
+- Caption burn-in uses deterministic bitmap glyphs, not production font shaping; embedded subtitle
+  streams are not implemented.
+- Relinking, persistent proxy discovery, complete media reconstruction, desktop thumbnails/
+  waveforms/metadata, unified cache UI, packaging/signing, and the 200+ media corpus remain partial.
 
-**Expected result:** A proxy file is generated at half resolution. The timeline uses it for preview, and you can toggle between proxy and original without issues.
+## Reporting issues
 
-### 7. Reference export
-
-- [ ] Open the **Deliver** workspace.
-- [ ] Configure and export a master file.
-- [ ] Open the exported file in VLC or `ffplay`.
-
-**Expected result:** The export produces an FFV1/Matroska (`.mkv`) or ProRes/MOV (`.mov`) file. **Export is video-only with 48 kHz stereo PCM audio** (per ADR 0009). There are no H.264/AAC creator presets. The output file plays correctly with both video and audio in VLC or ffplay.
-
-### 8. Inspector properties
-
-- [ ] Select a clip on the timeline.
-- [ ] In the Inspector, adjust **transform** properties: position, scale, rotation, anchor point.
-- [ ] Adjust **crop**, **opacity**, and **blend mode**.
-- [ ] Adjust **clip gain**, **pan**, and **fade in/out**.
-- [ ] Verify each change appears in the preview.
-- [ ] Save the project, close, reopen, and verify the properties survived round-trip.
-
-**Expected result:** Every property adjustment is visible in the preview and persists across save/reload. No values reset or get lost.
-
-### 9. Stability
-
-- [ ] Use the editor for at least 15–20 minutes with multiple clips.
-- [ ] Watch for crashes, freezes, or unresponsiveness.
-- [ ] Check memory usage (Task Manager) — it should stay reasonable.
-
-**Expected result:** The editor remains stable. No hard crashes, no UI freezes longer than a few seconds, no runaway memory growth.
-
-### 10. UI polish
-
-- [ ] Look for overlapping widgets or unreadable text.
-- [ ] Check that layouts don't break at different window sizes.
-- [ ] Verify that interactive elements have accessible labels (check with a screen reader or inspect tool if you're able).
-
-**Expected result:** The UI is usable — no overlapping panels, no clipped text, no completely broken layouts.
-
----
-
-## Known Limitations
-
-These are **not bugs**. They are boundaries of the current alpha scope.
-
-- **No realtime audio-device playback** — Timeline audio is rendered for export but you cannot hear it through speakers during preview. This is a deliberate alpha boundary, not a bug.
-- **No integrated GPU presentation** — The preview path is CPU-rendered. An optional libplacebo backend exists for testing but native swapchain presentation is not wired up.
-- **No H.264/AAC creator export** — Only FFV1/Matroska and ProRes/MOV reference masters. Creator codecs are a legal/packaging gate.
-- **No automatic proxy scheduling** — Proxies are manually triggered only.
-- **No titles, transitions, effects, or color tools** — Model fields may exist but no complete authoring/render workflow.
-- **No local transcription** — The whisper.cpp worker is not integrated.
-- **Caption burn-in** — Not available; captions export as standalone SRT/WebVTT files only.
-
----
-
-## Reporting Issues
-
-When something breaks, please report it using the template below. The more detail you provide, the faster we can fix it.
-
-### Issue Template
-
-```
-**Summary:**
-One-line description of the problem.
-
-**Steps to Reproduce:**
-1. Open the editor
-2. ...
-3. ...
-
-**Expected Result:**
-What you expected to happen.
-
-**Actual Result:**
-What actually happened. Include any error messages.
-
-**Severity:**
-[ ] Crash — the app closes or becomes completely unresponsive
-[ ] Data loss — project files or media are corrupted or lost
-[ ] Visual — layout, rendering, or display problems
-[ ] Minor — cosmetic, inconvenience, or nice-to-have
-
-**System Info:**
-Paste the output of the PowerShell command below.
-
-**Build Version:**
-Paste the output of `git rev-parse HEAD` from the repo root.
-
-**Logs / Terminal Output:**
-Paste any error messages or warnings from the terminal where you launched the editor.
-```
-
-### Collecting System Info
-
-Run this in PowerShell from the repo root and paste the output into your issue report:
+Include summary, exact steps, expected/actual result, reproducibility, `git rev-parse HEAD`, terminal
+output, and:
 
 ```powershell
-# System info
-systeminfo | Select-Object "OS Name","OS Version","Total Physical Memory"
-
-# Build tools
+Get-ComputerInfo | Select-Object WindowsProductName, WindowsVersion, OsBuildNumber, CsTotalPhysicalMemory
+Get-CimInstance Win32_VideoController | Select-Object Name, DriverVersion
 cmake --version
 clang-cl --version
-
-# Git commit (build version)
 git rev-parse HEAD
-
-# GPU info (optional — helps with libplacebo issues)
-Get-CimInstance Win32_VideoController | Select-Object Name, DriverVersion
 ```
 
----
+For transcription include whether whisper/Vulkan were enabled, model state, selected clip format,
+worker error, and whether project state changed. For playback include output device and GPU/CPU
+status. For export include preset, actual encoder/fallback, caption mode, and destination safety.
 
-## Troubleshooting
-
-**"C++ compiler not found"** — Make sure LLVM is on PATH and you're using the `windows-dev` preset (which sets `clang-cl`).
-
-**"MSVC is not supported"** — This is expected. You must use LLVM clang-cl. Install LLVM and ensure `clang-cl` is on PATH.
-
-**"Qt6 not found"** — Set `CMAKE_PREFIX_PATH` to your Qt install:
-```powershell
-cmake --preset windows-dev -DCMAKE_PREFIX_PATH="C:\Qt\6.11.1\msvc2022_64"
-```
-
-**"DLL not found" at runtime** — Add Qt and FFmpeg bin directories to PATH, or copy DLLs next to the exe (see Step 4).
-
-**"Protobuf version mismatch"** — Must be exactly 35.1. Check with `protoc --version`.
-
-**"linker errors with __int128"** — You're probably using MSVC instead of clang-cl. Verify with `cmake --preset windows-dev` and check that the compiler is `clang-cl`.
-
-**Offscreen smoke test** — If you can't launch the GUI (e.g. headless CI or display issues), you can verify the app starts and renders a frame without a display:
-```powershell
-$env:QT_QPA_PLATFORM='offscreen'
-.\build\windows-dev\src\app\VideoEditor.exe --screenshot editor.png
-```
-This writes a single-frame screenshot to `editor.png` and exits. A successful run with no errors confirms the app initializes correctly.
-
----
-
-*This is an alpha build. Expect rough edges. Thank you for testing!*
+This alpha is intended to find correctness, reliability, and usability defects before public beta.

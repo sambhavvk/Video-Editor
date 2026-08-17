@@ -25,7 +25,7 @@ flatpak-builder --user --install-deps-from=flathub --force-clean \
 ```
 
 This is not yet expected to complete in a clean SDK. The application currently
-requires exact dependency ABIs, including the approved LGPL FFmpeg 8.1.2 build,
+requires exact dependency ABIs, including the approved LGPL FFmpeg 9.0.1 build,
 that are not bundled by this skeleton. A configure failure is therefore an
 honest indication that the release dependency lock is incomplete.
 

@@ -9,6 +9,7 @@
 #include "video_editor/desktop_ui/timeline_widget.hpp"
 
 #include <QAction>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDockWidget>
@@ -49,6 +50,7 @@ private slots:
   void audioMixerReflectsTrackState();
   void audioMixerDisplaysStableTrackMeters();
   void captionsPanelEmitsEditableCueActions();
+  void captionsPanelExposesTranscriptionAndWordNavigation();
   void timelineVirtualizesAndSeeks();
   void timelineEmitsTypedMovePreviewAndCommit();
   void timelineDistinguishesTrimRegions();
@@ -431,6 +433,62 @@ void EditorWindowTest::captionsPanelEmitsEditableCueActions() {
   remove->click();
   QCOMPARE(removed.count(), 1);
   QCOMPARE(removed.at(0).at(0).toInt(), 0);
+}
+
+void EditorWindowTest::captionsPanelExposesTranscriptionAndWordNavigation() {
+  video_editor::desktop_ui::CaptionsPanelWidget captions;
+  const video_editor::desktop_ui::CaptionRowView row{
+      .id = QStringLiteral("caption-id"),
+      .timecode = QStringLiteral("00:00:00:00 → 00:00:01:00"),
+      .text = QStringLiteral("Hello"),
+      .start = 0,
+      .end = 48'000,
+      .words = {{QStringLiteral("word-id"), QStringLiteral("Hello"), 240, 720, 0.91}}};
+  captions.setCaptionRows({row});
+  auto* languages = captions.findChild<QComboBox*>(QStringLiteral("transcriptionLanguage"));
+  QVERIFY(languages != nullptr);
+  QCOMPARE(languages->findData(QStringLiteral("en")) >= 0, true);
+  auto* words = captions.findChild<QListWidget*>(QStringLiteral("captionWordsList"));
+  QVERIFY(words != nullptr);
+  auto* timings = captions.findChild<QCheckBox*>(QStringLiteral("transcriptionWordTimings"));
+  QVERIFY(timings != nullptr);
+  QVERIFY(timings->isChecked());
+  QVERIFY(!timings->isEnabled());
+  QCOMPARE(words->count(), 1);
+  QSignalSpy wordActivated(&captions,
+                           &video_editor::desktop_ui::CaptionsPanelWidget::wordActivated);
+  words->setCurrentRow(0);
+  QTest::keyClick(words, Qt::Key_Return);
+  QCOMPARE(wordActivated.size(), 1);
+  QCOMPARE(wordActivated.at(0).at(0).toString(), QStringLiteral("word-id"));
+  QCOMPARE(wordActivated.at(0).at(1).toLongLong(), 240LL);
+
+  captions.setTranscriptionState(video_editor::desktop_ui::TranscriptionState::Downloading,
+                                 QStringLiteral("Downloading"), 30);
+  auto* progress = captions.findChild<QProgressBar*>(QStringLiteral("transcriptionProgress"));
+  QVERIFY(progress != nullptr);
+  QCOMPARE(progress->value(), 30);
+  captions.setTranscriptionState(video_editor::desktop_ui::TranscriptionState::Ready,
+                                 QStringLiteral("Ready"), 100);
+  auto* transcribe = captions.findChild<QPushButton*>(QStringLiteral("transcribeButton"));
+  QVERIFY(transcribe != nullptr);
+  QVERIFY(transcribe->isEnabled());
+
+  captions.setReviewProposals({
+      {QStringLiteral("silence-1"), QStringLiteral("Measured silence"),
+       QStringLiteral("Remove silent range"), QStringLiteral("00:00:01 → 00:00:02"),
+       QStringLiteral("Measured from rendered audio"), true, false, false},
+      {QStringLiteral("filler-1"), QStringLiteral("Transcript filler"),
+       QStringLiteral("Remove filler um"), QStringLiteral("00:00:02 → 00:00:02.2"),
+       QStringLiteral("Off by default"), false, false, false},
+  });
+  auto* review = captions.findChild<QListWidget*>(QStringLiteral("captionReviewList"));
+  QVERIFY(review != nullptr);
+  QCOMPARE(review->count(), 2);
+  QCOMPARE(review->item(0)->checkState(), Qt::Checked);
+  QCOMPARE(review->item(1)->checkState(), Qt::Unchecked);
+  QVERIFY(review->item(0)->text().contains(QStringLiteral("Measured silence")));
+  QVERIFY(review->item(1)->text().contains(QStringLiteral("Transcript filler")));
 }
 
 void EditorWindowTest::timelineVirtualizesAndSeeks() {

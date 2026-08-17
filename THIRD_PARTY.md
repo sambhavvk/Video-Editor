@@ -7,7 +7,7 @@ offers.
 | Component | Version contract | Official configuration | License |
 |---|---:|---|---|
 | Qt | 6.11.1 | Dynamically linked LGPL modules only | LGPL-3.0-only |
-| FFmpeg | 8.1.2 | Shared libraries, `--disable-gpl --disable-nonfree` | LGPL-2.1-or-later |
+| FFmpeg | 9.0.1 (libav* 63.1.101/61.1.101/7.1.101/10.1.101) | Shared libraries, `--disable-gpl --disable-nonfree` | LGPL-2.1-or-later |
 | libplacebo | 7.360.1 | Shared D3D11/Vulkan backends | LGPL-2.1-or-later |
 | miniaudio | 0.11.25 | Source-integrated device adapter; decoding disabled | MIT-0 |
 | SQLite | 3.45+ | Thread-safe, WAL support | Public domain blessing |
@@ -16,6 +16,8 @@ offers.
 | OpenSSL | 3.x | Crypto hashing only | Apache-2.0 |
 | libebur128 | 1.2.6 | Shared runtime | MIT |
 | GoogleTest | 1.17 | Tests only | BSD-3-Clause |
+| whisper.cpp | 1.9.2 (`306c88f4d1286aec1bf96e544632897886af5501`) | Optional local transcription backend; disabled unless explicitly enabled | MIT |
+| ggml-base.bin | `base`, 147,951,465 bytes, SHA-1 `465707469ff3a37a2b9b8d8f89f2f99de7299dac` | Downloaded on demand through an injected fetch boundary; verified before atomic install | NOASSERTION (review model terms before distribution) |
 
 The locally installed FFmpeg may be GPL-enabled and is allowed only for development and tests.
 Run `video_editor_dependency_audit --official` against the packaged runtime; a non-zero result blocks

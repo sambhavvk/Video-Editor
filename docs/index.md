@@ -13,8 +13,10 @@ miniaudio adapter; it reports submitted versus latency-compensated positions and
 The CPU reference graph renders titles, transitions, typed effect curves, color/crop/blur nodes,
 and the ordered track-audio DSP chain. FOSS creator delivery can use QSV/VAAPI VP9 with complete
 libvpx retry. Track/master meters, worker-owned EBU-R128 loudness, editable normalization, and
-polled audio-device recovery are connected. H.264/AAC approval, the physical audio/GPU matrix, and
-local transcription are not complete.
+polled audio-device recovery are connected. Local transcription has an explicitly downloaded,
+checksummed base model, a restartable typed worker, exact timed words, styled captions, and
+reviewable silence/filler cuts; builds without the pinned optional whisper.cpp backend report that
+capability truthfully. H.264/AAC approval and physical audio/GPU/transcription matrices remain.
 
 The desktop timeline now exposes atomic multi-selection edits, linked A/V split/delete,
 normal/ripple/overwrite trims, roll/slip/slide tools, track management, marker/gap interaction, and
@@ -42,11 +44,16 @@ Choose a starting point:
 
 ## Source API references
 
+- [Application orchestration](../src/app/doc/index.md)
 - [Desktop UI](../src/desktop_ui/doc/index.md)
 - [Edit model](../src/edit_model/doc/index.md)
 - [Project codec](../src/project_codec/doc/project_codec.md)
 - [Project store](../src/project_store/doc/ProjectStore.md)
 - [Render engine](../src/render_engine/doc/index.md)
+- [Caption service](../src/caption_service/doc/index.md)
+- [Transcription service](../src/transcription_service/doc/index.md)
+- [Worker job protocol](../src/job_service/doc/index.md)
+- [Audio render](../src/audio_render/doc/index.md)
 
 ## Architecture decisions
 
@@ -69,6 +76,7 @@ Accepted decisions live in [`architecture/`](architecture/):
 15. [Clip-local effect curves and CPU reference effects](architecture/0015-effect-parameter-authoring.md)
 16. [FOSS creator delivery with VP9 and Opus](architecture/0016-foss-creator-delivery.md)
 17. [Professional track audio, DSP, meters, and normalization](architecture/0017-professional-audio-workflow.md)
+18. [Local transcription, timed captions, and reviewable proposals](architecture/0018-local-transcription-and-caption-proposals.md)
 
 Source code and documentation in this repository use MPL-2.0. Third-party libraries and media
 fixtures retain their own licenses; see the repository's `THIRD_PARTY.md` and fixture manifests.

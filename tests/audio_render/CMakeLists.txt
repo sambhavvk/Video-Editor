@@ -5,7 +5,8 @@ find_program(VIDEO_EDITOR_TEST_FFMPEG_EXECUTABLE NAMES ffmpeg REQUIRED)
 add_executable(video_editor_audio_render_tests
   timeline_audio_renderer_test.cpp
   loudness_normalize_test.cpp
-  track_dsp_chain_test.cpp)
+  track_dsp_chain_test.cpp
+  silence_detector_test.cpp)
 
 target_compile_definitions(
   video_editor_audio_render_tests

@@ -13,14 +13,15 @@ not an official distribution bundle.
 
 | Dependency | Contract |
 | --- | --- |
-| Qt | 6.11.1 exact; Core, Concurrent, Gui, Widgets |
-| FFmpeg | See `cmake/DependencyVersions.cmake`, which is the active source contract. Static release/legal notices currently still name 8.1.2 and must be reconciled by the dependency-pin owners before release. |
+| Qt | 6.11.1 exact; Core, Concurrent, Gui, Widgets, Network |
+| FFmpeg | 9.0.1 exact; libavformat/libavcodec 63.1.101, libavutil 61.1.101, libswresample 7.1.101, libswscale 10.1.101 |
 | libplacebo | 7.360.1 exact; optional capability-gated D3D11/Vulkan backend with a truthful stub |
 | miniaudio | 0.11.25 exact header; optional physical output adapter with a manual callback fallback |
 | SQLite | 3.45 or newer |
 | Protobuf | 35.1, with Abseil 20250512.1 in the release lock |
 | OpenSSL | 3.0 or newer |
 | libebur128 | 1.2.6 |
+| whisper.cpp | 1.9.2 at `306c88f4d1286aec1bf96e544632897886af5501`; optional local transcription backend |
 | GTest | package-config target required when tests are enabled |
 
 Official packages must dynamically link approved LGPL Qt, FFmpeg, and libplacebo builds, with GPL
@@ -79,6 +80,26 @@ failures preserve a CPU result and latch CPU preview for the session. A native W
 no zero-copy decoder import. Official beta packages must contain and validate both the pinned
 miniaudio adapter and the platform GPU backend; the fallbacks keep project open/edit/recovery and CPU
 export usable, not release-ready.
+
+### Optional local transcription backend
+
+The worker and typed transcription protocol always build, but inference is deliberately disabled
+unless the exact pinned whisper.cpp library is supplied. Enable it with:
+
+```sh
+cmake --preset dev \
+  -DVIDEO_EDITOR_ENABLE_WHISPER_CPP=ON \
+  -DVIDEO_EDITOR_TRANSCRIPTION_WHISPER_INCLUDE_DIR=/absolute/path/to/whisper.cpp/include \
+  -DVIDEO_EDITOR_TRANSCRIPTION_WHISPER_LIBRARY=/absolute/path/to/libwhisper.so
+```
+
+Set `VIDEO_EDITOR_WHISPER_CPP_VULKAN_ASSERTED=ON` only when the linked library was built with its
+Vulkan backend; this provenance assertion reports a compiled capability, does not make a missing
+device usable, and does not claim that a particular inference used Vulkan. The desktop downloads
+the pinned base model only after an explicit user action. The configured manifest
+requires 147,951,465 bytes and SHA-1 `465707469ff3a37a2b9b8d8f89f2f99de7299dac`; staged bytes are
+bounded during transfer and verified off the Qt thread before atomic installation. Verification is
+cooperatively cancelable. Tests inject local fetchers and never download the live model.
 
 ## Linux development build
 

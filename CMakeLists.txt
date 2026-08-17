@@ -61,6 +61,9 @@ if(VIDEO_EDITOR_BUILD_MEDIA)
 endif()
 
 add_subdirectory(src/job_service)
+if(VIDEO_EDITOR_BUILD_MEDIA)
+  add_subdirectory(src/transcription_service)
+endif()
 
 if(VIDEO_EDITOR_BUILD_DESKTOP_UI)
   add_subdirectory(src/desktop_ui)

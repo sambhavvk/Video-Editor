@@ -4,6 +4,7 @@
 #include "video_editor/edit_model/model.h"
 #include "video_editor/render_engine/frame.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -39,6 +40,34 @@ CaptionStyle make_style(double font_size, ColorRgba text_color = {1.0, 1.0, 1.0,
   style.text_color = text_color;
   style.background_color = bg_color;
   return style;
+}
+
+struct PixelBounds final {
+  int left{0};
+  int top{0};
+  int right{-1};
+  int bottom{-1};
+
+  [[nodiscard]] bool empty() const noexcept {
+    return right < left || bottom < top;
+  }
+};
+
+PixelBounds non_black_bounds(const CpuFrame& frame) {
+  PixelBounds bounds;
+  for (int y = 0; y < frame.height(); ++y) {
+    for (int x = 0; x < frame.width(); ++x) {
+      const auto pixel = frame.pixel(x, y);
+      if (pixel[0] <= 0.01F && pixel[1] <= 0.01F && pixel[2] <= 0.01F) {
+        continue;
+      }
+      bounds.left = bounds.empty() ? x : std::min(bounds.left, x);
+      bounds.top = bounds.empty() ? y : std::min(bounds.top, y);
+      bounds.right = std::max(bounds.right, x);
+      bounds.bottom = std::max(bounds.bottom, y);
+    }
+  }
+  return bounds;
 }
 
 TEST(DrawCaptionTextTest, EmptyTextReturnsError) {
@@ -113,6 +142,127 @@ TEST(DrawCaptionTextTest, DrawsMultiLineText) {
       break;
   }
   EXPECT_TRUE(has_non_black_pixels);
+}
+
+TEST(DrawCaptionTextTest, HonorsHorizontalAlignmentInsideSafeMargins) {
+  const auto bounds_for = [](const CaptionAlignment alignment) {
+    CpuFrame frame(100, 80);
+    frame.clear(0.0, 0.0, 0.0, 1.0);
+    CaptionStyle style = make_style(8.0, {1.0, 1.0, 1.0, 1.0}, {0.0, 0.0, 0.0, 0.0});
+    style.alignment = alignment;
+    style.safe_margin = 0.1;
+    style.vertical_position = 0.5;
+    EXPECT_FALSE(draw_caption_text(frame, style, "A", 10).has_value());
+    return non_black_bounds(frame);
+  };
+
+  const PixelBounds left = bounds_for(CaptionAlignment::Left);
+  const PixelBounds center = bounds_for(CaptionAlignment::Center);
+  const PixelBounds right = bounds_for(CaptionAlignment::Right);
+  ASSERT_FALSE(left.empty());
+  ASSERT_FALSE(center.empty());
+  ASSERT_FALSE(right.empty());
+  EXPECT_EQ(left.left, 10);   // left safe edge
+  EXPECT_EQ(center.left, 47); // six-pixel cell centered in [10, 90)
+  EXPECT_EQ(right.left, 84);  // right edge at 90 px
+}
+
+TEST(DrawCaptionTextTest, HonorsNormalizedVerticalPosition) {
+  const auto bounds_for = [](const double position) {
+    CpuFrame frame(100, 80);
+    frame.clear(0.0, 0.0, 0.0, 1.0);
+    CaptionStyle style = make_style(8.0, {1.0, 1.0, 1.0, 1.0}, {0.0, 0.0, 0.0, 0.0});
+    style.safe_margin = 0.1;
+    style.vertical_position = position;
+    EXPECT_FALSE(draw_caption_text(frame, style, "A", 10).has_value());
+    return non_black_bounds(frame);
+  };
+
+  const PixelBounds upper = bounds_for(0.25);
+  const PixelBounds lower = bounds_for(0.75);
+  ASSERT_FALSE(upper.empty());
+  ASSERT_FALSE(lower.empty());
+  EXPECT_EQ(upper.top, 16); // safe top 8 + 25% of the 64 px safe height - 8 px cell
+  EXPECT_EQ(lower.top, 48);
+  EXPECT_EQ(upper.left, lower.left);
+}
+
+TEST(DrawCaptionTextTest, SafeMarginMovesAlignedTextAwayFromFrameEdge) {
+  const auto bounds_for = [](const double margin) {
+    CpuFrame frame(100, 80);
+    frame.clear(0.0, 0.0, 0.0, 1.0);
+    CaptionStyle style = make_style(8.0, {1.0, 1.0, 1.0, 1.0}, {0.0, 0.0, 0.0, 0.0});
+    style.alignment = CaptionAlignment::Left;
+    style.safe_margin = margin;
+    style.vertical_position = 0.5;
+    EXPECT_FALSE(draw_caption_text(frame, style, "A", 10).has_value());
+    return non_black_bounds(frame);
+  };
+
+  EXPECT_EQ(bounds_for(0.0).left, 0);
+  EXPECT_EQ(bounds_for(0.2).left, 20);
+}
+
+TEST(DrawCaptionTextTest, OutlineAddsDeterministicColoredPixelsAroundGlyph) {
+  CpuFrame plain_frame(100, 80);
+  CpuFrame outlined_frame(100, 80);
+  plain_frame.clear(0.0, 0.0, 0.0, 1.0);
+  outlined_frame.clear(0.0, 0.0, 0.0, 1.0);
+
+  CaptionStyle plain = make_style(8.0, {1.0, 0.0, 0.0, 1.0}, {0.0, 0.0, 0.0, 0.0});
+  plain.safe_margin = 0.1;
+  plain.vertical_position = 0.5;
+  CaptionStyle outlined = plain;
+  outlined.outline_width = 2.0;
+  outlined.outline_color = {0.0, 0.0, 1.0, 1.0};
+
+  EXPECT_FALSE(draw_caption_text(plain_frame, plain, "A", 10).has_value());
+  EXPECT_FALSE(draw_caption_text(outlined_frame, outlined, "A", 10).has_value());
+  const PixelBounds plain_bounds = non_black_bounds(plain_frame);
+  const PixelBounds outlined_bounds = non_black_bounds(outlined_frame);
+  ASSERT_FALSE(plain_bounds.empty());
+  ASSERT_FALSE(outlined_bounds.empty());
+  EXPECT_LT(outlined_bounds.left, plain_bounds.left);
+  EXPECT_LT(outlined_bounds.top, plain_bounds.top);
+
+  bool found_blue_outline = false;
+  for (int y = 0; y < outlined_frame.height(); ++y) {
+    for (int x = 0; x < outlined_frame.width(); ++x) {
+      const auto pixel = outlined_frame.pixel(x, y);
+      if (pixel[2] > 0.5F && pixel[0] < 0.5F) {
+        found_blue_outline = true;
+        break;
+      }
+    }
+    if (found_blue_outline) {
+      break;
+    }
+  }
+  EXPECT_TRUE(found_blue_outline);
+}
+
+TEST(DrawCaptionTextTest, DefaultStyleFieldsRemainAStableCenteredBottomLayout) {
+  CpuFrame default_frame(100, 80);
+  CpuFrame explicit_frame(100, 80);
+  default_frame.clear(0.0, 0.0, 0.0, 1.0);
+  explicit_frame.clear(0.0, 0.0, 0.0, 1.0);
+
+  CaptionStyle default_style = make_style(8.0, {1.0, 1.0, 1.0, 1.0}, {0.0, 0.0, 0.0, 0.0});
+  CaptionStyle explicit_style = default_style;
+  explicit_style.alignment = CaptionAlignment::Center;
+  explicit_style.vertical_position = 0.9;
+  explicit_style.safe_margin = 0.05;
+  explicit_style.outline_width = 0.0;
+  explicit_style.outline_color = {0.0, 0.0, 0.0, 1.0};
+
+  EXPECT_FALSE(draw_caption_text(default_frame, default_style, "A", 10).has_value());
+  EXPECT_FALSE(draw_caption_text(explicit_frame, explicit_style, "A", 10).has_value());
+  EXPECT_TRUE(std::equal(default_frame.pixels().begin(), default_frame.pixels().end(),
+                         explicit_frame.pixels().begin(), explicit_frame.pixels().end()));
+  const PixelBounds bounds = non_black_bounds(default_frame);
+  ASSERT_FALSE(bounds.empty());
+  EXPECT_EQ(bounds.left, 47);
+  EXPECT_EQ(bounds.bottom, 68); // legacy bottom margin of 10 px is retained
 }
 
 TEST(DrawCaptionTextTest, UnsupportedGlyphsRenderReplacement) {

@@ -12,8 +12,13 @@ namespace {
 
 [[nodiscard]] captions::CaptionCue cue(std::string text, edit::Time start = edit::Time{},
                                        edit::Time duration = edit::Time(4, 1)) {
-  return {
-      .identifier = "cue-id", .range = edit::TimeRange(start, duration), .text = std::move(text)};
+  return {.identifier = "cue-id",
+          .range = edit::TimeRange(start, duration),
+          .text = std::move(text),
+          .settings = {},
+          .source_line = 0,
+          .words = {},
+          .provenance = {}};
 }
 
 TEST(CaptionReflow, WrapsAndSplitsWithoutBreakingWords) {
@@ -105,7 +110,11 @@ TEST(CaptionConversion, ConvertsToAndFromEditCaptions) {
   const auto identifier = edit::EntityId::generate();
   captions::CaptionCue source{.identifier = identifier.toString(),
                               .range = edit::TimeRange(edit::Time(2, 1), edit::Time(3, 1)),
-                              .text = "Caption text"};
+                              .text = "Caption text",
+                              .settings = {},
+                              .source_line = 0,
+                              .words = {},
+                              .provenance = {}};
   edit::CaptionStyle style;
   style.bold = true;
 

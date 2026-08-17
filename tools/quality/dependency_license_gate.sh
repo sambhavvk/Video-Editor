@@ -85,6 +85,23 @@ else
       fail "${variable} must be an exact numeric version in ${dependency_file}"
     fi
   done
+  for variable in VIDEO_EDITOR_WHISPER_CPP_COMMIT VIDEO_EDITOR_WHISPER_MODEL_ID \
+                  VIDEO_EDITOR_WHISPER_MODEL_FILENAME VIDEO_EDITOR_WHISPER_MODEL_BYTES \
+                  VIDEO_EDITOR_WHISPER_MODEL_DIGEST_ALGORITHM VIDEO_EDITOR_WHISPER_MODEL_DIGEST \
+                  VIDEO_EDITOR_WHISPER_MODEL_URL; do
+    if ! grep -Eq "^set\\(${variable} \"[^\"]+\"\\)$" "${dependency_file}"; then
+      fail "${variable} must be explicitly pinned in ${dependency_file}"
+    fi
+  done
+  if ! grep -Eq '^set\(VIDEO_EDITOR_WHISPER_CPP_VERSION "[0-9]+(\.[0-9]+)+"\)$' "${dependency_file}"; then
+    fail "VIDEO_EDITOR_WHISPER_CPP_VERSION must be an exact numeric version"
+  fi
+  if ! grep -Eq '^set\(VIDEO_EDITOR_WHISPER_MODEL_DIGEST "[0-9a-f]{40}"\)$' "${dependency_file}"; then
+    fail "VIDEO_EDITOR_WHISPER_MODEL_DIGEST must be an explicit SHA-1 digest"
+  fi
+  if ! grep -Eq '^set\(VIDEO_EDITOR_WHISPER_CPP_COMMIT "[0-9a-f]{40}"\)$' "${dependency_file}"; then
+    fail "VIDEO_EDITOR_WHISPER_CPP_COMMIT must be an explicit 40-character commit"
+  fi
 fi
 
 for source_file in \

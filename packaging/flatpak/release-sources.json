@@ -13,7 +13,7 @@
       "requiredResolution": "Use an immutable release archive and record its real HTTPS URL and SHA-256."
     },
     {
-      "name": "ffmpeg-lgpl-8.1.2",
+      "name": "ffmpeg-lgpl-9.0.1",
       "status": "release-blocking",
       "archiveUrl": null,
       "sha256": null,

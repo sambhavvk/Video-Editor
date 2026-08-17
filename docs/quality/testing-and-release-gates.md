@@ -40,9 +40,10 @@ The repository currently includes tests for:
   close/stale rejection, NTSC frame math, snap clip/marker exclusions and stable ties, validated
   clip properties, audio-track mute/solo/gain/pan/effects, canonical titles, transition invariants,
   typed effect validation, and Hold/Linear/Bezier curve evaluation;
-- deterministic schema-v2 snapshot serialization, strict validation, schema-v1 backward reads,
-  v1-field smuggling rejection (including additive track flags), old-v2 visible/targeted defaults,
-  new track-state/title/transition round trips, and unknown-effect preservation;
+- deterministic schema-v3 snapshot serialization, strict validation, schema-v1/v2 backward reads,
+  older-field smuggling rejection (including additive track and caption fields), old-v2 caption and
+  track defaults, timed-word/provenance/style round trips, track-state/title/transition round trips,
+  and unknown-effect preservation;
 - SQLite schema, revision conflicts, checkpoint cycles, transactional v1→v2 migration with validated
   pre-migration backup, failed-migration rollback, v1/v2 recovery discovery, recovery status, catalog
   sorting, corrupt candidates, and candidate bounds;
@@ -51,7 +52,8 @@ The repository currently includes tests for:
   dip-to-black transition boundaries, source-handle mapping, provider-failure propagation, request
   epochs and cache keys, deterministic video plus PCM export, VP9/Opus WebM creator output,
   aspect-preserving scale/letterbox, exact output-rate frame counts, podcast audio-only topology,
-  caption burn-in/sidecars, exact decode-back frame/sample spans, and cancellation safety;
+  styled caption burn-in/sidecars including alignment, vertical position, safe margin, outline and
+  legacy defaults, exact decode-back frame/sample spans, and cancellation safety;
 - pure GPU backend selection and unavailable-stub diagnostics, plus real Vulkan
   create/upload/normal-composite/download parity, per-clip GPU transform/composition behavior, and
   device-loss state when the exact dependency and a permitted device are available. Title and
@@ -60,7 +62,9 @@ The repository currently includes tests for:
   per-clip GPU preview becomes active;
 - proxy profile resolution, PTS-map validation/round-trip, transcode behavior, cancellation, and
   destination safety;
-- subtitle validation/round-trip/reflow/search and caption application workflows;
+- subtitle validation/round-trip, timed-word reflow/search/navigation, deterministic caption
+  change sets, exact 48 kHz silence boundaries, linked timeline-cut proposals, stale/no-op/locked
+  rejection, and atomic caption-plus-cut apply/undo workflows;
 - audio block, ring-buffer, DSP, and libebur128 primitives, plus exact originals-only timeline audio
   ranges, offsets, rate/reverse, overlap mix, clip/track gain/pan/fades, mute/solo, ordered
   EQ/compressor/dialogue-denoise/limiter processing, block-partition state continuity,
@@ -75,8 +79,11 @@ The repository currently includes tests for:
   selected/default loss-return recovery, delayed stop, canceled recovery, stale normalization
   generations, and an opt-in 48 kHz physical-device smoke check with zero xruns. Accelerated one-hour
   zero-xrun and two-hour drift simulations are available through `VE_RUN_LONG_TESTS=1`;
-- Protobuf framing/protocol compatibility and cancellation registry, plus worker probe/proxy request
-  validation, preset mapping, monotonic event sequences, and terminal errors;
+- Protobuf framing/protocol compatibility and cancellation registry, plus worker probe/proxy and
+  typed transcription-v2 request/range validation, monotonic events, streaming model byte ceilings,
+  digest cancellation and atomic-replacement failures, exact FFmpeg source-window seek and
+  16/44.1/48-kHz-to-mono-16-kHz trim boundaries, malformed/oversized backend-word rejection,
+  unavailable-backend behavior, and a real framed worker-host transcription integration fixture;
 - Qt window/workspace/actions/accessibility basics, timeline interactions, and an end-to-end
   application import/edit/save/reopen/caption/export slice. Desktop coverage includes title,
   transition, speed, effect/keyframe/curve authoring, current-value mixer DSP controls,
@@ -85,7 +92,9 @@ The repository currently includes tests for:
   replace/toggle/range multi-selection, rich tool edge/body constraints, preview/single
   commit/Escape, canonical resolver and Shift bypass, exact frame-count nudging, marker/gap
   interaction, non-destructive context menus, track commands, linked split/delete, targeted
-  insertion, and atomic controller batches.
+  insertion, atomic controller batches, caption style controls, model/review states, and proposal
+  defaults. Live model inference, worker death, and physical Vulkan transcription remain matrix
+  tests rather than ordinary local tests.
 
 Always use `ctest -N` for the count in the current build; the number changes as beta work lands.
 
@@ -134,8 +143,8 @@ No public beta should ship until all of the following are demonstrated on the su
 
 The current application does not meet these gates because physical-device xrun/drift and latency
 calibration, native event-driven hot-plug validation, non-1× realtime audio, native GPU
-presentation/effect-color parity, H.264/AAC approval, worker, corpus, and production-packaging
-paths are incomplete. See the
+presentation/effect-color parity, H.264/AAC approval, physical multilingual/Vulkan transcription,
+worker fault injection, corpus, and production-packaging paths are incomplete. See the
 [feature-status matrix](../beta-feature-status.md).
 
 ## Packaging gates

@@ -56,6 +56,10 @@ if(TARGET video_editor_job_service AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/job_s
   add_subdirectory(job_service)
 endif()
 
+if(TARGET video_editor_transcription_service AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/transcription_service/CMakeLists.txt")
+  add_subdirectory(transcription_service)
+endif()
+
 if(TARGET video_editor_worker_dispatch AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/workers/CMakeLists.txt")
   add_subdirectory(workers)
 endif()

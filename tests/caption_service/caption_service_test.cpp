@@ -182,7 +182,11 @@ TEST(CaptionSerialization, RequiresExplicitRoundingForFrameBasedTimes) {
   captions::CaptionDocument document;
   document.cues.push_back({.identifier = "frame",
                            .range = edit::TimeRange(edit::Time(1, 24), edit::Time(1, 1)),
-                           .text = "Frame-aligned"});
+                           .text = "Frame-aligned",
+                           .settings = {},
+                           .source_line = 0,
+                           .words = {},
+                           .provenance = {}});
 
   const auto exact = captions::serializeSrt(document);
   ASSERT_FALSE(exact);

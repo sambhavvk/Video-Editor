@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "video_editor/workers/job_dispatch.h"
 
+#include "video_editor/job_service/framing.h"
 #include "video_editor/job_service/job_id.h"
 #include "video_editor/proxy_service/proxy_service.h"
+#include "video_editor/transcription_service/transcription_service.h"
 
 #include <gtest/gtest.h>
 
@@ -125,6 +127,20 @@ private:
   spec.add_input_uris(utf8_string(source));
   spec.set_output_uri(utf8_string(destination));
   spec.set_preset_id("video-editor.proxy.ffv1-half.v1");
+  return spec;
+}
+
+[[nodiscard]] protocol::JobSpec valid_transcribe_spec(const std::filesystem::path& source) {
+  protocol::JobSpec spec;
+  spec.set_job_id(jobs::make_job_id());
+  spec.set_kind(protocol::JOB_KIND_TRANSCRIBE);
+  spec.add_input_uris(utf8_string(source));
+  spec.set_preset_id("video-editor.transcribe.whisper-base.v1");
+  protocol::TranscribeOptions options;
+  options.set_schema_version(transcription::kTranscriptionSchemaVersion);
+  options.set_model_id("base");
+  options.set_language("auto");
+  EXPECT_TRUE(options.SerializeToString(spec.mutable_options()));
   return spec;
 }
 
@@ -253,6 +269,73 @@ TEST(WorkerProxyDispatch, MakesSynchronousCancellationLimitationExplicit) {
   ASSERT_EQ(events.size(), 1U);
   EXPECT_EQ(events.front().event().state(), protocol::JOB_STATE_FAILED);
   EXPECT_EQ(events.front().event().error().category(), "unsupported-cancellation");
+}
+
+TEST(WorkerTranscriptionDispatch, ReportsTypedBackendUnavailableWithoutBackend) {
+  TemporaryDirectory directory;
+  const auto source = directory.path() / "source.wav";
+  std::ofstream(source, std::ios::binary) << "fixture";
+  const protocol::JobSpec spec = valid_transcribe_spec(source);
+  std::vector<protocol::WorkerEvent> events;
+  ASSERT_TRUE(dispatch_job(spec, [&events](const protocol::WorkerEvent& event) {
+    events.push_back(event);
+    return true;
+  }));
+  ASSERT_EQ(events.size(), 2U);
+  EXPECT_EQ(events.back().event().state(), protocol::JOB_STATE_FAILED);
+  EXPECT_EQ(events.back().event().error().category(), "backend-unavailable");
+}
+
+TEST(WorkerTranscriptionDispatch, RejectsMalformedTypedOptionsBeforeInputIo) {
+  TemporaryDirectory directory;
+  protocol::JobSpec spec = valid_transcribe_spec(directory.path() / "missing.wav");
+  spec.set_options("not-a-protobuf");
+  std::vector<protocol::WorkerEvent> events;
+  ASSERT_TRUE(dispatch_job(spec, [&events](const protocol::WorkerEvent& event) {
+    events.push_back(event);
+    return true;
+  }));
+  ASSERT_EQ(events.size(), 2U);
+  EXPECT_EQ(events.back().event().error().category(), "invalid-argument");
+}
+
+TEST(WorkerHost, FramedTranscriptionRequestReportsBackendUnavailable) {
+#ifndef VIDEO_EDITOR_WORKER_HOST
+  GTEST_SKIP() << "worker host path is not configured";
+#else
+  TemporaryDirectory directory;
+  const auto source = directory.path() / "source.wav";
+  std::ofstream(source, std::ios::binary) << "fixture";
+  const auto input = directory.path() / "request.bin";
+  const auto output = directory.path() / "events.bin";
+  {
+    std::ofstream stream(input, std::ios::binary | std::ios::trunc);
+    protocol::WorkerRequest request;
+    request.set_protocol_major(jobs::kProtocolMajor);
+    request.set_protocol_minor(jobs::kProtocolMinor);
+    *request.mutable_start()->mutable_spec() = valid_transcribe_spec(source);
+    ASSERT_TRUE(jobs::write_frame(stream, request).ok);
+  }
+  const std::string command = shell_quote(VIDEO_EDITOR_WORKER_HOST) + " < " +
+                              shell_quote(input.string()) + " > " + shell_quote(output.string());
+  ASSERT_EQ(std::system(command.c_str()), 0);
+
+  std::ifstream stream(output, std::ios::binary);
+  ASSERT_TRUE(stream);
+  std::vector<protocol::WorkerEvent> events;
+  while (true) {
+    protocol::WorkerEvent event;
+    const auto result = jobs::read_frame(stream, event);
+    if (result.status == jobs::ReadStatus::EndOfStream)
+      break;
+    ASSERT_TRUE(result.ok) << result.message;
+    events.push_back(std::move(event));
+  }
+  ASSERT_EQ(events.size(), 2U);
+  EXPECT_EQ(events.front().event().state(), protocol::JOB_STATE_ACCEPTED);
+  EXPECT_EQ(events.back().event().state(), protocol::JOB_STATE_FAILED);
+  EXPECT_EQ(events.back().event().error().category(), "backend-unavailable");
+#endif
 }
 
 } // namespace

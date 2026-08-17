@@ -33,6 +33,12 @@ flowchart LR
     Import --> MediaCache["Media cache: thumbnails, waveforms, metadata"]
     MediaCache --> CacheStore["Content-addressed LRU store"]
     Jobs["Protobuf job protocol"] --> Worker["Worker host: probe and proxy"]
+    Controller -->|"one framed job"| TranscribeWorker["Transcription worker"]
+    TranscribeWorker --> Whisper["Optional whisper.cpp"]
+    TranscribeWorker --> Captions["Timed caption proposal"]
+    AudioRender --> Silence["Measured-silence proposal"]
+    Captions --> Edit
+    Silence --> Edit
 ```
 
 The diagram describes the engine contracts and current desktop wiring. The engine decodes active
@@ -45,16 +51,17 @@ effects. The desktop does not yet supply a native presentation surface, zero-cop
 GPU effect parity. Forward 1× desktop transport connects the timeline audio renderer to the realtime
 pre-render ring and selected miniaudio output; its latency-compensated
 sample position, not the end of the submitted device buffer, drives video requests. Other shuttle
-rates and unavailable/failed devices use an explicit silent timer fallback. The worker can execute
-probe and proxy requests, but desktop process
-launch/IPC routing and export/transcription workers are not connected.
+rates and unavailable/failed devices use an explicit silent timer fallback. The worker host can
+execute probe, proxy, and typed transcription requests. The desktop launches a fresh framed worker
+process for each local transcription job; proxy/export remain in-process and the generic named-pipe
+or Unix-socket job service is not connected.
 
 ## Module boundaries
 
 | Module | Owns | Must not be mistaken for |
 | --- | --- | --- |
 | `edit_model` | Exact `Time`, project entities including canonical titles/transitions and track state, validation, typed commands, atomic command batches, revisions, immutable snapshots, undo/redo, derived gaps, snapping | A renderer, database, or UI toolkit |
-| `project_codec` | Deterministic schema-v2 Protobuf serialization plus a backward schema-v1 reader | The `.veproj` container or command history |
+| `project_codec` | Deterministic schema-v3 Protobuf serialization plus backward schema-v1/v2 readers | The `.veproj` container or command history |
 | `project_store` | SQLite schema-v2 journal payload versions, forward migration/backups, WAL working database, checkpoint save, integrity checks, recovery catalog | Media storage or timeline semantics |
 | `media_codec` | Narrow FFmpeg runtime/version checks and media probing | Timeline ownership |
 | `asset_service` | File fingerprints, import/relink validation, proxy recommendation policy | A persistent media-bin database |
@@ -65,9 +72,10 @@ launch/IPC routing and export/transcription workers are not connected.
 | `export_service` | Revision-bound originals-only FFV1/ProRes masters and FOSS VP9/Opus WebM creator delivery, exact frame/sample spans, scale/frame-rate controls, caption burn-in/sidecars, optional QSV/VAAPI VP9 with complete libvpx retry, and atomic media commit | H.264/AAC approval, embedded subtitle streams, or render queue |
 | `audio_engine` | Planar float blocks, SPSC rings, DSP, callback-safe peak/RMS, worker-owned realtime/offline libebur128, fixed-format pre-render/sample clock, device enumeration/stable IDs, and optional miniaudio adapter | Timeline decode, revision ownership, native OS hot-plug events, or calibrated hardware timestamps |
 | `audio_render` | Originals-only FFmpeg decode/resample, deterministic immutable-snapshot mixing, track gain/pan, ordered stateful EQ/compressor/dialogue-denoise/limiter, and sample-range/stable-ID track meters in exact 48 kHz stereo blocks | An audio-device callback, arbitrary buses, or muxer |
-| `caption_service` | SRT/WebVTT parse, validate, reflow, search, serialize, and edit-model conversion | Speech recognition or caption rendering |
+| `caption_service` | SRT/WebVTT parse/serialize, timed-word reflow/search, deterministic caption and timeline-cut proposal planning | Speech recognition or caption rendering |
+| `transcription_service` | Pinned model manifest/verification, exact FFmpeg source-window seek and mono 16 kHz trim, optional whisper.cpp backend, typed errors and validated source-absolute word results | Model download UI, project mutation, or a cloud service |
 | `job_service` | Versioned Protobuf messages, framing, job IDs, and cancellation registry | Process spawning or a durable job scheduler |
-| `workers` | Framed worker executable with fail-closed probe and synchronous proxy jobs plus versioned events | Desktop process orchestration or a complete cancellable export/transcription farm |
+| `workers` | Framed worker executable with fail-closed probe, synchronous proxy, and typed transcription jobs plus versioned events | A durable multiprocess scheduler or network service |
 | `desktop_ui` | Qt Widgets shell, docks, workspaces, virtualized multi-selection timeline surface, professional tool/header interaction, panels, accessibility labels | Editorial truth or an independent snap algorithm |
 | `app` | Cross-module orchestration, transient selection, exact UI/model time conversion, current project lifecycle, async import/preview/proxy/export, view models | A reusable core contract |
 
@@ -116,23 +124,26 @@ contract is recorded in `cmake/DependencyVersions.cmake`.
 
 Authoritative state consists of the project entities, journal revisions, project metadata, media
 references/fingerprints, title payloads, transitions, track name/order/lock/visibility/targeting,
-effect parameters, captions, and schema versions. Clip/marker/gap selection and derived gap keys are
+effect parameters, timed captions/provenance/style, and schema versions. Clip/marker/gap selection
+and derived gap keys are
 presentation state, not project entities. Original media remains
 authoritative for image/audio content but is referenced rather than embedded.
 
 Proxies, PTS sidecars, thumbnails, waveforms, decoded frames, render results, GPU textures, and
-transcription models are rebuildable and stay outside `.veproj`. Proxies, a per-asset thumbnail
+checksummed transcription models are rebuildable and stay outside `.veproj`. Proxies, a per-asset thumbnail
 service, a waveform pyramid service, a metadata document service, and a shared content-addressed
 cache store with a 100 GB LRU budget are implemented in `media_cache`; the unified budget is not
 yet shared across proxies and these artifacts, and a cache browser UI remains future work.
 
 ## Concurrency and cancellation
 
-Import, preview, proxy generation, and export run away from the Qt UI thread. Preview uses request
+Import, preview, proxy generation, export, model verification, transcription, and silence analysis
+run away from the Qt UI thread. Preview uses request
 epochs. Proxy and export use C++ stop tokens and only atomically commit finished files. The present
 desktop runs proxy and export work in-process through QtConcurrent. Process isolation is represented
-by `job_service`; the worker host supports probe and synchronous proxy jobs, but the desktop does
-not launch or route work to it and proxy cancellation cannot be consumed during the blocking job.
+by `job_service`; transcription uses one desktop-launched worker process and framed standard I/O so
+process termination is a truthful job cancellation boundary. Proxy/export do not yet use that
+process path, and proxy cancellation cannot be consumed during the blocking worker job.
 
 The realtime audio path has a dedicated pre-render worker and a fixed 48 kHz stereo float32 device
 boundary. Its callback performs ring reads, deterministic zero-fill, and atomic diagnostics only.
@@ -161,3 +172,4 @@ notifications and calibrated hardware timestamps remain outside the current wiri
 - [Clip-local effect curves and CPU reference effects](0015-effect-parameter-authoring.md)
 - [FOSS creator delivery with VP9 and Opus](0016-foss-creator-delivery.md)
 - [Professional track audio, DSP, meters, and normalization](0017-professional-audio-workflow.md)
+- [Local transcription, timed captions, and reviewable proposals](0018-local-transcription-and-caption-proposals.md)

@@ -1,0 +1,21 @@
+// SPDX-License-Identifier: MPL-2.0
+#pragma once
+
+#include <cstdint>
+#include <string_view>
+
+namespace video_editor::transcription {
+
+// Version 2 appends an optional source-relative audio window and makes result
+// timestamps explicitly source-absolute. Field numbers from v1 are unchanged.
+inline constexpr std::uint32_t kTranscriptionSchemaVersion = 2;
+inline constexpr std::string_view kWhisperModelId{"@VIDEO_EDITOR_WHISPER_MODEL_ID@"};
+inline constexpr std::string_view kWhisperModelFilename{"@VIDEO_EDITOR_WHISPER_MODEL_FILENAME@"};
+inline constexpr std::string_view kWhisperModelUrl{"@VIDEO_EDITOR_WHISPER_MODEL_URL@"};
+inline constexpr std::string_view kWhisperModelDigestAlgorithm{
+    "@VIDEO_EDITOR_WHISPER_MODEL_DIGEST_ALGORITHM@"};
+inline constexpr std::string_view kWhisperModelDigest{
+    "@VIDEO_EDITOR_WHISPER_MODEL_DIGEST@"};
+inline constexpr std::uintmax_t kWhisperModelBytes{@VIDEO_EDITOR_WHISPER_MODEL_BYTES@U};
+
+} // namespace video_editor::transcription

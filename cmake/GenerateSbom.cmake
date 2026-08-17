@@ -35,6 +35,8 @@ file(WRITE "${VIDEO_EDITOR_SBOM_OUTPUT}" [=[
     {"SPDXID":"SPDXRef-OpenSSL","name":"OpenSSL","versionInfo":"3.6.3","licenseConcluded":"Apache-2.0"},
     {"SPDXID":"SPDXRef-libebur128","name":"libebur128","versionInfo":"1.2.6","licenseConcluded":"MIT"},
     {"SPDXID":"SPDXRef-GTest","name":"GoogleTest","versionInfo":"1.17.0","licenseConcluded":"BSD-3-Clause"}
+    ,{"SPDXID":"SPDXRef-whisper.cpp","name":"whisper.cpp","versionInfo":"]=] "${VIDEO_EDITOR_WHISPER_CPP_VERSION}" [=[","licenseConcluded":"MIT"}
+    ,{"SPDXID":"SPDXRef-ggml-base","name":"ggml-base.bin","versionInfo":"]=] "${VIDEO_EDITOR_WHISPER_MODEL_ID}" [=[","downloadLocation":"]=] "${VIDEO_EDITOR_WHISPER_MODEL_URL}" [=[","licenseConcluded":"NOASSERTION","copyrightText":"SHA-1 digest=]=] "${VIDEO_EDITOR_WHISPER_MODEL_DIGEST}" [=[; expectedBytes=]=] "${VIDEO_EDITOR_WHISPER_MODEL_BYTES}" [=["}
   ]
 }
 ]=])
