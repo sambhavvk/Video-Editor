@@ -295,6 +295,68 @@ constexpr std::size_t kMaximumTrackNameBytes = 256;
   return error(EditErrorCode::InvalidArgument, "title horizontal alignment is not supported");
 }
 
+[[nodiscard]] std::optional<EditError> validateCaption(const Caption& caption) {
+  constexpr std::size_t kMaximumCaptionTextBytes = 64U * 1024U;
+  if (caption.id.isNil() || !validUtf8(caption.text) ||
+      caption.text.size() > kMaximumCaptionTextBytes || caption.range.start.isNegative() ||
+      caption.range.duration <= Time{}) {
+    return error(EditErrorCode::InvalidArgument,
+                 "caption requires valid UTF-8 text and a positive non-negative range");
+  }
+  if (caption.style.font_family.empty() || !validUtf8(caption.style.font_family) ||
+      !inClosedRange(caption.style.font_size, 1.0, 4096.0) ||
+      !inClosedRange(caption.style.vertical_position, 0.0, 1.0) ||
+      !inClosedRange(caption.style.safe_margin, 0.0, 0.5) ||
+      !inClosedRange(caption.style.outline_width, 0.0, 128.0)) {
+    return error(EditErrorCode::InvalidArgument, "caption style is outside supported bounds");
+  }
+  if (const auto issue = validateColor(caption.style.text_color, "caption text")) {
+    return issue;
+  }
+  if (const auto issue = validateColor(caption.style.background_color, "caption background")) {
+    return issue;
+  }
+  if (const auto issue = validateColor(caption.style.outline_color, "caption outline")) {
+    return issue;
+  }
+  switch (caption.style.alignment) {
+  case CaptionAlignment::Left:
+  case CaptionAlignment::Center:
+  case CaptionAlignment::Right:
+    break;
+  default:
+    return error(EditErrorCode::InvalidArgument, "caption alignment is not supported");
+  }
+  switch (caption.provenance.source) {
+  case CaptionWordSource::Unknown:
+  case CaptionWordSource::Imported:
+  case CaptionWordSource::LocalTranscription:
+  case CaptionWordSource::UserEdited:
+    break;
+  default:
+    return error(EditErrorCode::InvalidArgument, "caption provenance is not supported");
+  }
+  if (!validUtf8(caption.provenance.model_identity)) {
+    return error(EditErrorCode::InvalidArgument, "caption provenance identity must be UTF-8");
+  }
+  std::unordered_set<EntityId> word_ids;
+  std::optional<Time> previous_end;
+  for (const auto& word : caption.words) {
+    if (word.id.isNil() || !word_ids.emplace(word.id).second || !validUtf8(word.text) ||
+        word.text.empty() || word.range.start.isNegative() || word.range.duration <= Time{} ||
+        !caption.range.contains(word.range) || !inClosedRange(word.probability, 0.0, 1.0)) {
+      return error(EditErrorCode::InvalidArgument,
+                   "caption words must be unique, valid, contained, and have probability [0,1]");
+    }
+    if (previous_end && word.range.start < *previous_end) {
+      return error(EditErrorCode::InvalidArgument,
+                   "caption words must be ordered and non-overlapping");
+    }
+    previous_end = word.range.end();
+  }
+  return std::nullopt;
+}
+
 [[nodiscard]] bool validTransitionKind(const TransitionKind kind) noexcept {
   switch (kind) {
   case TransitionKind::CrossDissolve:
@@ -560,9 +622,14 @@ validateTransition(const Project& project, const Sequence& sequence, const Trans
       if (!addId(caption.id)) {
         return error(EditErrorCode::DuplicateId, "project contains a duplicate or nil caption id");
       }
-      if (caption.range.start.isNegative() || caption.range.duration <= Time{}) {
-        return error(EditErrorCode::InvalidArgument,
-                     "caption range must have a non-negative start and positive duration");
+      if (const auto issue = validateCaption(caption)) {
+        return issue;
+      }
+      for (const auto& word : caption.words) {
+        if (!addId(word.id)) {
+          return error(EditErrorCode::DuplicateId,
+                       "project contains a duplicate or nil caption word id");
+        }
       }
     }
     for (const auto& transition : sequence.transitions) {
@@ -1607,6 +1674,111 @@ struct PlannedClip final {
             sequence->captions.erase(found);
             return std::nullopt;
           },
+          [&](const ApplyCaptionChangeSetCommand& command) -> std::optional<EditError> {
+            if (command.added.empty() && command.updated.empty() && command.removed.empty()) {
+              return error(EditErrorCode::InvalidArgument, "caption change set cannot be empty");
+            }
+            auto* sequence = mutableSequence(project, command.sequence_id);
+            if (sequence == nullptr) {
+              return error(EditErrorCode::EntityNotFound, "sequence was not found");
+            }
+            std::unordered_set<EntityId> touched;
+            for (const auto& id : command.removed) {
+              if (id.isNil() || !touched.emplace(id).second) {
+                return error(EditErrorCode::DuplicateId,
+                             "caption change set contains duplicate removal ids");
+              }
+              const auto found =
+                  std::find_if(sequence->captions.begin(), sequence->captions.end(),
+                               [id](const Caption& caption) { return caption.id == id; });
+              if (found == sequence->captions.end()) {
+                return error(EditErrorCode::EntityNotFound, "caption removal target was not found");
+              }
+            }
+            for (const auto& caption : command.updated) {
+              if (!touched.emplace(caption.id).second || validateCaption(caption)) {
+                return error(EditErrorCode::InvalidArgument,
+                             "caption change set contains duplicate or invalid updates");
+              }
+              const auto found =
+                  std::find_if(sequence->captions.begin(), sequence->captions.end(),
+                               [&](const Caption& existing) { return existing.id == caption.id; });
+              if (found == sequence->captions.end()) {
+                return error(EditErrorCode::EntityNotFound, "caption update target was not found");
+              }
+            }
+            for (const auto& caption : command.added) {
+              if (!touched.emplace(caption.id).second || validateCaption(caption) ||
+                  std::any_of(sequence->captions.begin(), sequence->captions.end(),
+                              [&](const Caption& existing) { return existing.id == caption.id; })) {
+                return error(EditErrorCode::DuplicateId,
+                             "caption change set contains duplicate or existing ids");
+              }
+            }
+            for (const auto id : command.removed) {
+              const auto found =
+                  std::find_if(sequence->captions.begin(), sequence->captions.end(),
+                               [id](const Caption& caption) { return caption.id == id; });
+              sequence->captions.erase(found);
+            }
+            for (const auto& caption : command.updated) {
+              const auto found =
+                  std::find_if(sequence->captions.begin(), sequence->captions.end(),
+                               [&](const Caption& existing) { return existing.id == caption.id; });
+              *found = caption;
+            }
+            sequence->captions.insert(sequence->captions.end(), command.added.begin(),
+                                      command.added.end());
+            return std::nullopt;
+          },
+          [&](const ApplyTimelineCutChangeSetCommand& command) -> std::optional<EditError> {
+            if (command.tracks.empty()) {
+              return error(EditErrorCode::InvalidArgument,
+                           "timeline cut change set cannot be empty");
+            }
+            auto* sequence = mutableSequence(project, command.sequence_id);
+            if (sequence == nullptr) {
+              return error(EditErrorCode::EntityNotFound, "sequence was not found");
+            }
+            std::unordered_set<EntityId> replacement_ids;
+            for (const auto& replacement : command.tracks) {
+              if (replacement.track_id.isNil() ||
+                  !replacement_ids.emplace(replacement.track_id).second) {
+                return error(EditErrorCode::DuplicateId, "timeline cut repeats a track id");
+              }
+              auto* track = mutableTrack(*sequence, replacement.track_id);
+              if (track == nullptr) {
+                return error(EditErrorCode::EntityNotFound, "timeline cut track was not found");
+              }
+              if (track->kind != replacement.kind) {
+                return error(EditErrorCode::InvalidTrackKind, "timeline cut track kind changed");
+              }
+              if (track->kind == TrackKind::Caption) {
+                return error(EditErrorCode::InvalidTrackKind,
+                             "timeline cut replacements cannot target caption tracks");
+              }
+              if (track->locked) {
+                return error(EditErrorCode::TrackLocked, "cannot cut a locked track");
+              }
+              const Clip* previous = nullptr;
+              for (const auto& clip : replacement.clips) {
+                if (!trackAccepts(*track, clip) ||
+                    (previous != nullptr &&
+                     (previous->timeline_range.start > clip.timeline_range.start ||
+                      previous->timeline_range.overlaps(clip.timeline_range))) ||
+                    validateClip(project, *track, clip)) {
+                  return error(EditErrorCode::InvalidArgument,
+                               "timeline cut replacement contains invalid or overlapping clips");
+                }
+                previous = &clip;
+              }
+            }
+            for (const auto& replacement : command.tracks) {
+              auto* track = mutableTrack(*sequence, replacement.track_id);
+              track->clips = replacement.clips;
+            }
+            return std::nullopt;
+          },
           [&](const AddClipEffectCommand& command) -> std::optional<EditError> {
             auto* sequence = mutableSequence(project, command.sequence_id);
             if (sequence == nullptr) {
@@ -2070,6 +2242,10 @@ std::string commandName(const EditCommand& command) {
           return "Update caption";
         if constexpr (std::is_same_v<T, RemoveCaptionCommand>)
           return "Remove caption";
+        if constexpr (std::is_same_v<T, ApplyCaptionChangeSetCommand>)
+          return "Apply caption change set";
+        if constexpr (std::is_same_v<T, ApplyTimelineCutChangeSetCommand>)
+          return "Apply timeline cut change set";
         if constexpr (std::is_same_v<T, AddClipEffectCommand>)
           return "Add clip effect";
         if constexpr (std::is_same_v<T, RemoveClipEffectCommand>)

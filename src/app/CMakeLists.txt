@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MPL-2.0
 
-find_package(Qt6 ${VIDEO_EDITOR_QT_VERSION} EXACT REQUIRED COMPONENTS Core Concurrent Gui Widgets)
+find_package(Qt6 ${VIDEO_EDITOR_QT_VERSION} EXACT REQUIRED COMPONENTS Core Concurrent Gui Widgets Network)
 
 add_library(video_editor_app_controller
   editor_controller.cpp
@@ -18,16 +18,18 @@ target_link_libraries(
     video_editor_edit_model
     video_editor::asset_service
     video_editor::audio_engine
+    video_editor::audio_render
     VideoEditor::CaptionService
   PRIVATE
     video_editor::project_warnings
     video_editor::project_store
     video_editor::project_codec
     video_editor::playback
-    video_editor::audio_render
     video_editor::proxy_service
     video_editor::render_engine
     VideoEditor::ExportService
+    video_editor::transcription_service
+    Qt6::Network
     Qt6::Concurrent)
 
 set_target_properties(video_editor_app_controller PROPERTIES AUTOMOC ON)

@@ -158,6 +158,25 @@ struct RemoveCaptionCommand final {
   EntityId sequence_id;
   EntityId caption_id;
 };
+struct ApplyCaptionChangeSetCommand final {
+  EntityId sequence_id;
+  std::vector<Caption> added;
+  std::vector<Caption> updated;
+  std::vector<EntityId> removed;
+};
+
+struct TrackClipReplacement final {
+  EntityId track_id;
+  TrackKind kind{TrackKind::Video};
+  std::vector<Clip> clips;
+};
+
+// The replacement list is complete for every listed track. Proposal planners
+// materialize all fragment IDs before this command is submitted.
+struct ApplyTimelineCutChangeSetCommand final {
+  EntityId sequence_id;
+  std::vector<TrackClipReplacement> tracks;
+};
 struct AddClipEffectCommand final {
   EntityId sequence_id;
   EntityId clip_id;
@@ -255,7 +274,8 @@ using EditOperation = std::variant<
     SetClipTitleCommand, SetClipSpeedCommand, AddTransitionCommand, UpdateTransitionCommand,
     RemoveTransitionCommand, RenameTrackCommand, ReorderTrackCommand, SetTrackLockedCommand,
     SetTrackVisibilityCommand, SetTrackTargetedCommand, CloseGapCommand, SetTrackAudioMixCommand,
-    AddTrackEffectCommand, RemoveTrackEffectCommand, SetTrackEffectParameterCommand>;
+    AddTrackEffectCommand, RemoveTrackEffectCommand, SetTrackEffectParameterCommand,
+    ApplyCaptionChangeSetCommand, ApplyTimelineCutChangeSetCommand>;
 
 struct EditCommand final {
   EditOperation operation;

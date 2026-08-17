@@ -43,6 +43,57 @@ void fill_background_rect(render::CpuFrame& frame, int left, int top, int right,
   }
 }
 
+[[nodiscard]] int safe_margin_pixels(const double safe_margin, const int extent) noexcept {
+  if (!std::isfinite(safe_margin)) {
+    return 0;
+  }
+  return std::clamp(static_cast<int>(std::lround(std::clamp(safe_margin, 0.0, 0.5) * extent)), 0,
+                    extent / 2);
+}
+
+[[nodiscard]] int aligned_left(const edit::CaptionAlignment alignment, const int safe_left,
+                               const int safe_right, const int content_width) noexcept {
+  switch (alignment) {
+  case edit::CaptionAlignment::Left:
+    return safe_left;
+  case edit::CaptionAlignment::Right:
+    return safe_right - content_width;
+  case edit::CaptionAlignment::Center:
+    return safe_left + (safe_right - safe_left - content_width) / 2;
+  }
+  return safe_left + (safe_right - safe_left - content_width) / 2;
+}
+
+[[nodiscard]] bool uses_legacy_default_position(const edit::CaptionStyle& style) noexcept {
+  // These defaults were introduced with the canonical fields. Keep the
+  // original frame-relative bottom anchor for old snapshots and callers that
+  // construct a default CaptionStyle, while allowing any edited value to use
+  // normalized safe-area placement.
+  return std::abs(style.vertical_position - 0.9) <= 1.0e-12 &&
+         std::abs(style.safe_margin - 0.05) <= 1.0e-12;
+}
+
+void draw_glyph_with_outline(render::CpuFrame& frame, const render::Glyph& glyph,
+                             const int origin_x, const int origin_y, const int scale,
+                             const edit::CaptionStyle& style, const int outline_pixels) noexcept {
+  if (outline_pixels > 0 && style.outline_color.alpha > 0.0) {
+    for (int offset_y = -outline_pixels; offset_y <= outline_pixels; ++offset_y) {
+      for (int offset_x = -outline_pixels; offset_x <= outline_pixels; ++offset_x) {
+        const auto squared_distance = static_cast<long long>(offset_x) * offset_x +
+                                      static_cast<long long>(offset_y) * offset_y;
+        const auto squared_radius = static_cast<long long>(outline_pixels) * outline_pixels;
+        if (squared_distance > squared_radius) {
+          continue;
+        }
+        render::draw_glyph(frame, glyph, origin_x + offset_x, origin_y + offset_y, scale,
+                           style.outline_color, style.bold, style.italic);
+      }
+    }
+  }
+  render::draw_glyph(frame, glyph, origin_x, origin_y, scale, style.text_color, style.bold,
+                     style.italic);
+}
+
 } // namespace
 
 std::optional<CaptionBurnInError> draw_caption_text(render::CpuFrame& frame,
@@ -84,23 +135,45 @@ std::optional<CaptionBurnInError> draw_caption_text(render::CpuFrame& frame,
     return CaptionBurnInError::FrameTooSmall;
   }
   const int total_height = static_cast<int>(lines.size()) * cell_height;
-  const int x_start = (frame.width() - total_width) / 2;
-  const int y_bottom = frame.height() - bottom_margin_pixels;
+  const int safe_left = safe_margin_pixels(style.safe_margin, frame.width());
+  const int safe_top = safe_margin_pixels(style.safe_margin, frame.height());
+  const int safe_right = frame.width() - safe_left;
+  const int safe_bottom = frame.height() - safe_top;
+  const int content_left = aligned_left(style.alignment, safe_left, safe_right, total_width);
+
+  // `bottom_margin_pixels` remains part of this low-level API for callers from
+  // before normalized caption positioning existed. Edited canonical positions
+  // take precedence; the legacy value is retained for invalid positions and
+  // the canonical defaults so old snapshots render identically.
+  const double normalized_position = std::isfinite(style.vertical_position)
+                                         ? std::clamp(style.vertical_position, 0.0, 1.0)
+                                         : std::numeric_limits<double>::quiet_NaN();
+  const int y_bottom =
+      std::isfinite(normalized_position) && !uses_legacy_default_position(style)
+          ? static_cast<int>(std::lround(safe_top + normalized_position * (safe_bottom - safe_top)))
+          : frame.height() - bottom_margin_pixels;
+  const double bounded_outline_width =
+      std::isfinite(style.outline_width)
+          ? std::clamp(style.outline_width, 0.0,
+                       static_cast<double>(std::max(frame.width(), frame.height())))
+          : 0.0;
+  const int outline_pixels = static_cast<int>(std::ceil(bounded_outline_width));
   const int y_start = y_bottom - total_height;
 
-  fill_background_rect(frame, x_start - 4, y_start - 4, x_start + total_width + 4, y_bottom + 4,
+  const int padding = 4 + outline_pixels;
+  fill_background_rect(frame, content_left - padding, y_start - padding,
+                       content_left + total_width + padding, y_bottom + padding,
                        style.background_color);
 
   int line_y = y_start;
   for (const auto& line : lines) {
     const int line_width = static_cast<int>(line.size()) * cell_width;
-    int line_x = (frame.width() - line_width) / 2;
+    int line_x = aligned_left(style.alignment, safe_left, safe_right, line_width);
     for (const char32_t codepoint : line) {
       const render::Glyph glyph = render::supported_glyph(codepoint)
                                       ? render::glyph_for_ascii(codepoint)
                                       : render::replacement_glyph();
-      render::draw_glyph(frame, glyph, line_x, line_y, scale, style.text_color, style.bold,
-                         style.italic);
+      draw_glyph_with_outline(frame, glyph, line_x, line_y, scale, style, outline_pixels);
       line_x += cell_width;
     }
     line_y += cell_height;

@@ -13,6 +13,8 @@
 #include "video_editor/desktop_ui/program_viewer.hpp"
 #include "video_editor/desktop_ui/timeline_widget.hpp"
 #include "video_editor/export_service/export_service.h"
+#include "video_editor/job_service/framing.h"
+#include "video_editor/job_service/protocol.h"
 #include "video_editor/playback/asset_registry.h"
 #include "video_editor/playback/ffmpeg_frame_provider.h"
 #include "video_editor/project_codec/project_codec.h"
@@ -22,6 +24,7 @@
 #include "video_editor/render_engine/frame.h"
 #include "video_editor/render_engine/gpu_backend.h"
 #include "video_editor/render_engine/gpu_timeline_renderer.h"
+#include "video_editor/transcription_service/transcription_service.h"
 
 #include <QtConcurrent/QtConcurrentRun>
 
@@ -35,7 +38,12 @@
 #include <QImage>
 #include <QLocale>
 #include <QMessageBox>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QPointer>
+#include <QProcess>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QSettings>
 #include <QStandardPaths>
@@ -80,9 +88,95 @@ evaluateAudioDevicePoll(const std::span<const audio::AudioDeviceInfo> previous,
           .default_recovered = has_default(current) && !has_default(previous)};
 }
 
+std::vector<edit::CaptionWord> mapTranscriptionWordsToTimeline(
+    const std::span<const edit::CaptionWord> source_words, const edit::TimeRange source_range,
+    const edit::TimeRange timeline_range, const edit::Rate playback_rate, const bool reversed) {
+  std::vector<edit::CaptionWord> mapped;
+  if (source_range.empty() || timeline_range.empty() || playback_rate.numerator() == 0U ||
+      playback_rate.denominator() == 0U) {
+    return mapped;
+  }
+
+  const auto map_source_time = [&](const edit::Time source_time) {
+    const edit::Time source_offset =
+        reversed ? source_range.end() - source_time : source_time - source_range.start;
+    const edit::Time timeline_offset =
+        source_offset.scaled(playback_rate.denominator(), playback_rate.numerator(),
+                             edit::RoundingMode::NearestTiesEven);
+    const edit::Time timeline_time = timeline_range.start + timeline_offset;
+    return std::clamp(timeline_time, timeline_range.start, timeline_range.end());
+  };
+
+  mapped.reserve(source_words.size());
+  for (const auto& source_word : source_words) {
+    const edit::Time start =
+        source_word.range.start < source_range.start ? source_range.start : source_word.range.start;
+    const edit::Time end =
+        source_word.range.end() > source_range.end() ? source_range.end() : source_word.range.end();
+    if (end <= start) {
+      continue;
+    }
+    const edit::Time mapped_start = map_source_time(start);
+    const edit::Time mapped_end = map_source_time(end);
+    const edit::Time timeline_start = std::min(mapped_start, mapped_end);
+    const edit::Time timeline_end = std::max(mapped_start, mapped_end);
+    if (timeline_end <= timeline_start) {
+      continue;
+    }
+    auto word = source_word;
+    word.range = edit::TimeRange(timeline_start, timeline_end - timeline_start);
+    mapped.push_back(std::move(word));
+  }
+  std::stable_sort(mapped.begin(), mapped.end(), [](const auto& lhs, const auto& rhs) {
+    if (lhs.range.start != rhs.range.start) {
+      return lhs.range.start < rhs.range.start;
+    }
+    return lhs.range.end() < rhs.range.end();
+  });
+  return mapped;
+}
+
+QString resolveTranscriptionWorkerPath(const QString& application_directory,
+                                       const QString& configured_path) {
+  if (!configured_path.trimmed().isEmpty()) {
+    return configured_path;
+  }
+#ifdef Q_OS_WIN
+  constexpr auto executable = "video_editor_worker_host.exe";
+#else
+  constexpr auto executable = "video_editor_worker_host";
+#endif
+  const QDir app_dir(application_directory);
+  const QString same_directory = app_dir.filePath(QString::fromUtf8(executable));
+  if (QFileInfo(same_directory).isExecutable()) {
+    return QDir::cleanPath(QFileInfo(same_directory).absoluteFilePath());
+  }
+  const QString development_directory = QDir::cleanPath(
+      app_dir.filePath(QStringLiteral("../workers/%1").arg(QString::fromUtf8(executable))));
+  if (QFileInfo(development_directory).isExecutable()) {
+    return QDir::cleanPath(QFileInfo(development_directory).absoluteFilePath());
+  }
+  return QStandardPaths::findExecutable(QString::fromUtf8(executable));
+}
+
+bool modelDownloadSizeAllowed(const std::uintmax_t bytes_received,
+                              const std::int64_t content_length,
+                              const std::uintmax_t expected_bytes) noexcept {
+  if (bytes_received > expected_bytes)
+    return false;
+  return content_length < 0 || static_cast<std::uintmax_t>(content_length) == expected_bytes;
+}
+
 namespace {
 
 constexpr qint64 kUiTimescale = 48'000;
+constexpr qint64 kModelNetworkReadBufferBytes = 1'048'576;
+
+[[nodiscard]] qint64 modelReplyContentLength(const QNetworkReply& reply) {
+  bool valid = false;
+  const qint64 value = reply.header(QNetworkRequest::ContentLengthHeader).toLongLong(&valid);
+  return valid && value >= 0 ? value : -1;
+}
 
 using desktop_ui::MediaItemView;
 using desktop_ui::TimelineClipView;
@@ -312,6 +406,9 @@ std::optional<std::uint32_t> projectSnapshotSchema(const store::JournalEntry& en
   if (entry.command_type == "project.snapshot.v2") {
     return 2U;
   }
+  if (entry.command_type == "project.snapshot.v3") {
+    return 3U;
+  }
   return std::nullopt;
 }
 
@@ -407,6 +504,7 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
       audio_registry_(std::make_shared<audio_render::OriginalAudioRegistry>()),
       frame_provider_(std::make_shared<playback::FfmpegFrameProvider>(playback_registry_)),
       renderer_(std::make_shared<render::CpuRenderer>(frame_provider_)) {
+  transcription_network_ = new QNetworkAccessManager(this);
   if (auto gpu = render::GpuRenderer::create(); gpu != nullptr) {
     const render::GpuCapabilities capabilities = gpu->capabilities();
     if (capabilities.available() && capabilities.offscreen_rendering) {
@@ -455,6 +553,8 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::chooseCaptionExport);
   connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::captionActivated, this,
           &EditorController::seekCaption);
+  connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::wordActivated, this,
+          [this](const QString&, const qint64 start) { seek(start); });
   connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::addCaptionRequested, this,
           &EditorController::addCaptionAtPlayhead);
   connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::removeCaptionRequested, this,
@@ -465,9 +565,29 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           this, &EditorController::searchTranscript);
   connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::transcribeRequested, this,
           [this] {
-            window_.showTransientMessage(
-                tr("Local transcription requires the optional checksummed Whisper model"));
+            window_.captionsPanel()->setTranscriptionState(
+                desktop_ui::TranscriptionState::ModelMissing,
+                tr("Download the optional checksummed Whisper model before transcribing."));
           });
+  connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::downloadModelRequested, this,
+          &EditorController::downloadTranscriptionModel);
+  connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::transcribeWithOptionsRequested,
+          this, &EditorController::startTranscription);
+  connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::cancelTranscriptionRequested,
+          this, &EditorController::cancelTranscription);
+  connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::applyReviewRequested, this,
+          &EditorController::applyCaptionReview);
+  connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::discardReviewRequested, this,
+          &EditorController::discardCaptionReview);
+  connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::reviewProposalToggled, this,
+          [this](const QString& id, const bool selected) {
+            for (auto& proposal : caption_proposals_) {
+              if (proposal.id == id)
+                proposal.selected = selected;
+            }
+          });
+  connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::captionStyleEdited, this,
+          &EditorController::captionStyleEdited);
   connect(&window_, &desktop_ui::EditorWindow::exportRequested, this,
           &EditorController::chooseVideoExport);
   connect(window_.deliverPanel(), &desktop_ui::DeliverPanelWidget::destinationBrowseRequested, this,
@@ -618,6 +738,10 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
                                                    normalization_review_.target_lufs);
     }
   });
+  connect(&caption_analysis_watcher_, &QFutureWatcher<CaptionAnalysisOutcome>::finished, this,
+          &EditorController::captionAnalysisFinished);
+  connect(&model_verification_watcher_, &QFutureWatcher<ModelVerificationOutcome>::finished, this,
+          &EditorController::modelVerificationFinished);
   connect(
       &audio_devices_watcher_, &QFutureWatcher<std::vector<audio::AudioDeviceInfo>>::finished, this,
       [this] {
@@ -684,11 +808,35 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::refreshAudioDevices);
   audio_device_poll_timer_.start();
   refreshAudioDevices();
+  refreshTranscriptionState();
   newProject();
 }
 
 EditorController::~EditorController() {
   stopAudioPlayback();
+  if (model_download_reply_ != nullptr) {
+    model_download_reply_->abort();
+  }
+  if (model_verification_watcher_.isRunning())
+    model_verification_stop_source_.request_stop();
+  if (model_verification_watcher_.isRunning())
+    model_verification_watcher_.waitForFinished();
+  if (transcription_process_ != nullptr) {
+    transcription_process_->kill();
+    transcription_process_->waitForFinished(1'000);
+  }
+  caption_analysis_stop_source_.request_stop();
+  if (caption_analysis_future_.isRunning())
+    caption_analysis_future_.waitForFinished();
+  if (model_download_file_ != nullptr) {
+    model_download_file_->close();
+    delete model_download_file_;
+    model_download_file_ = nullptr;
+  }
+  if (!model_download_staging_.isEmpty()) {
+    QDir(model_download_staging_).removeRecursively();
+    model_download_staging_.clear();
+  }
   export_stop_source_.request_stop();
   for (const auto& [asset_id, cancellation] : proxy_jobs_) {
     Q_UNUSED(asset_id)
@@ -2315,6 +2463,899 @@ void EditorController::searchTranscript(const QString& query) {
   refreshCaptionView();
 }
 
+bool EditorController::selectedAudioInput(std::filesystem::path& path, edit::TimeRange& range,
+                                          edit::EntityId& clipId) const {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || !active_clip_id_.has_value()) {
+    return false;
+  }
+  const edit::Clip* clip = edit::findClip(*sequence, *active_clip_id_);
+  if (clip == nullptr ||
+      (clip->kind != edit::ClipKind::Audio && clip->kind != edit::ClipKind::Video)) {
+    return false;
+  }
+  const edit::Asset* asset =
+      edit::findAsset(*editor_->projectAt(editor_->revision()), clip->asset_id);
+  if (asset == nullptr || !asset->has_audio || asset->source_uri.empty()) {
+    return false;
+  }
+  path = pathFromUtf8String(asset->source_uri);
+  range = clip->timeline_range;
+  clipId = clip->id;
+  return true;
+}
+
+void EditorController::refreshTranscriptionState() {
+  const auto cache = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) +
+                     QStringLiteral("/models");
+  QPointer<EditorController> guard(this);
+  auto* watcher = new QFutureWatcher<bool>(this);
+  connect(watcher, &QFutureWatcher<bool>::finished, this, [guard, watcher] {
+    const bool ready = watcher->result();
+    watcher->deleteLater();
+    if (guard && guard->transcription_process_ == nullptr &&
+        guard->model_download_reply_ == nullptr &&
+        !guard->model_verification_watcher_.isRunning()) {
+      guard->window_.captionsPanel()->setTranscriptionState(
+          ready ? desktop_ui::TranscriptionState::Ready
+                : desktop_ui::TranscriptionState::ModelMissing,
+          ready ? QObject::tr("Model ready; transcription is on demand.")
+                : QObject::tr("Model not installed; download is optional."));
+    }
+  });
+  watcher->setFuture(QtConcurrent::run([cache] {
+    auto fetcher = transcription::make_unavailable_model_fetcher();
+    transcription::ModelManager manager(pathFromQString(cache), *fetcher);
+    return manager.verify();
+  }));
+}
+
+void EditorController::downloadTranscriptionModel(const QString& modelId) {
+  if (model_download_reply_ != nullptr || transcription_process_ != nullptr ||
+      model_verification_watcher_.isRunning()) {
+    window_.showTransientMessage(tr("A transcription operation is already running"));
+    return;
+  }
+  if (modelId != QString::fromUtf8(transcription::kWhisperModelId.data())) {
+    window_.showTransientMessage(tr("That transcription model is not available"));
+    return;
+  }
+  const QString cache = QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
+                            .filePath(QStringLiteral("models"));
+  QDir().mkpath(cache);
+  const QString staging =
+      QDir(cache).filePath(QStringLiteral(".staging-%1")
+                               .arg(QString::fromStdString(edit::EntityId::generate().toString())));
+  model_download_staging_ = staging;
+  if (!QDir().mkpath(staging)) {
+    model_download_staging_.clear();
+    window_.showTransientMessage(tr("Could not create the model staging directory"));
+    return;
+  }
+  const QString stagedPath =
+      QDir(staging).filePath(QString::fromUtf8(transcription::kWhisperModelFilename.data()));
+  model_download_file_ = new QFile(stagedPath, this);
+  model_download_write_failed_ = false;
+  model_download_bytes_written_ = 0;
+  model_download_size_rejected_ = false;
+  model_download_user_cancelled_ = false;
+  if (!model_download_file_->open(QIODevice::WriteOnly)) {
+    delete model_download_file_;
+    model_download_file_ = nullptr;
+    QDir(staging).removeRecursively();
+    model_download_staging_.clear();
+    window_.showTransientMessage(tr("Could not open the model staging file"));
+    return;
+  }
+  const QUrl url(QString::fromUtf8(transcription::kWhisperModelUrl.data()));
+  QNetworkRequest request(url);
+  request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                       QNetworkRequest::NoLessSafeRedirectPolicy);
+  model_download_reply_ = transcription_network_->get(request);
+  model_download_reply_->setReadBufferSize(kModelNetworkReadBufferBytes);
+  window_.captionsPanel()->setTranscriptionState(desktop_ui::TranscriptionState::Downloading,
+                                                 tr("Downloading model…"), 0);
+  connect(model_download_reply_, &QNetworkReply::readyRead, this, [this] {
+    if (model_download_reply_ == nullptr || model_download_size_rejected_)
+      return;
+    const qint64 contentLength = modelReplyContentLength(*model_download_reply_);
+    const auto expected = transcription::kWhisperModelBytes;
+    if (!modelDownloadSizeAllowed(model_download_bytes_written_, contentLength, expected)) {
+      model_download_size_rejected_ = true;
+      model_download_reply_->abort();
+      return;
+    }
+    if (model_download_file_ != nullptr) {
+      const qint64 available = model_download_reply_->bytesAvailable();
+      const auto remaining = expected - model_download_bytes_written_;
+      if (available < 0 || static_cast<std::uintmax_t>(available) > remaining) {
+        model_download_size_rejected_ = true;
+        model_download_reply_->abort();
+        return;
+      }
+      const QByteArray bytes = model_download_reply_->readAll();
+      if (!modelDownloadSizeAllowed(model_download_bytes_written_ +
+                                        static_cast<std::uintmax_t>(bytes.size()),
+                                    contentLength, expected)) {
+        model_download_size_rejected_ = true;
+        model_download_reply_->abort();
+        return;
+      }
+      if (model_download_file_->write(bytes) != bytes.size()) {
+        model_download_write_failed_ = true;
+        model_download_reply_->abort();
+      } else {
+        model_download_bytes_written_ += static_cast<std::uintmax_t>(bytes.size());
+      }
+    }
+  });
+  connect(model_download_reply_, &QNetworkReply::downloadProgress, this,
+          [this](const qint64 received, const qint64 total) {
+            window_.captionsPanel()->setModelDownloadState(
+                {.modelId = QString::fromUtf8(transcription::kWhisperModelId.data()),
+                 .filename = QString::fromUtf8(transcription::kWhisperModelFilename.data()),
+                 .digestAlgorithm = QStringLiteral("sha1"),
+                 .digest = QString::fromUtf8(transcription::kWhisperModelDigest.data()),
+                 .receivedBytes = received,
+                 .totalBytes = total,
+                 .status = tr("Downloading model…"),
+                 .state = desktop_ui::TranscriptionState::Downloading});
+          });
+  connect(model_download_reply_, &QNetworkReply::finished, this, [this, staging, stagedPath] {
+    QNetworkReply* reply = model_download_reply_;
+    model_download_reply_ = nullptr;
+    const qint64 contentLength = modelReplyContentLength(*reply);
+    if (model_download_file_ != nullptr) {
+      if (!model_download_size_rejected_) {
+        const qint64 available = reply->bytesAvailable();
+        const auto remaining = transcription::kWhisperModelBytes - model_download_bytes_written_;
+        if (available < 0 || static_cast<std::uintmax_t>(available) > remaining) {
+          model_download_size_rejected_ = true;
+        } else {
+          const QByteArray bytes = reply->readAll();
+          if (model_download_file_->write(bytes) != bytes.size()) {
+            model_download_write_failed_ = true;
+          } else {
+            model_download_bytes_written_ += static_cast<std::uintmax_t>(bytes.size());
+          }
+        }
+      }
+      model_download_file_->close();
+      delete model_download_file_;
+      model_download_file_ = nullptr;
+    }
+    const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const bool httpOk = httpStatus == 0 || (httpStatus >= 200 && httpStatus < 300);
+    const bool download_ok = !model_download_write_failed_ && !model_download_size_rejected_ &&
+                             model_download_bytes_written_ == transcription::kWhisperModelBytes &&
+                             modelDownloadSizeAllowed(model_download_bytes_written_, contentLength,
+                                                      transcription::kWhisperModelBytes) &&
+                             httpOk && reply->error() == QNetworkReply::NoError;
+    if (!download_ok) {
+      QDir(staging).removeRecursively();
+      model_download_staging_.clear();
+      if (model_download_size_rejected_) {
+        window_.captionsPanel()->setTranscriptionState(
+            desktop_ui::TranscriptionState::Failed,
+            tr("Model download exceeded the pinned size limit; the staged file was discarded."));
+      } else if (model_download_user_cancelled_ &&
+                 reply->error() == QNetworkReply::OperationCanceledError) {
+        window_.captionsPanel()->setTranscriptionState(desktop_ui::TranscriptionState::ModelMissing,
+                                                       tr("Model download cancelled."));
+      } else if (model_download_write_failed_) {
+        window_.captionsPanel()->setTranscriptionState(
+            desktop_ui::TranscriptionState::Failed,
+            tr("Could not write the model download; the staged file was discarded."));
+      } else {
+        window_.captionsPanel()->setTranscriptionState(
+            desktop_ui::TranscriptionState::Failed,
+            reply->error() == QNetworkReply::NoError && httpOk
+                ? tr("Model verification failed; the staged file was discarded.")
+                : tr("Model download failed: %1").arg(reply->errorString()));
+      }
+      reply->deleteLater();
+      return;
+    }
+    const QString cacheRoot =
+        QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
+            .filePath(QStringLiteral("models"));
+    model_download_cache_root_ = cacheRoot;
+    window_.captionsPanel()->setTranscriptionState(desktop_ui::TranscriptionState::Downloading,
+                                                   tr("Verifying model…"), 100);
+    model_verification_stop_source_ = std::stop_source{};
+    const std::uint64_t generation = ++model_verification_generation_;
+    const std::stop_token cancellation = model_verification_stop_source_.get_token();
+    model_verification_watcher_.setFuture(
+        QtConcurrent::run([staging, cacheRoot, generation, cancellation] {
+          ModelVerificationOutcome outcome;
+          outcome.generation = generation;
+          auto fetcher = transcription::make_unavailable_model_fetcher();
+          transcription::ModelManager staged(pathFromQString(staging), *fetcher);
+          outcome.staged_verified = staged.verify(cancellation);
+          outcome.cancelled = cancellation.stop_requested();
+          if (outcome.staged_verified && !outcome.cancelled) {
+            transcription::ModelManager existing(pathFromQString(cacheRoot), *fetcher);
+            outcome.existing_verified = existing.verify(cancellation);
+            outcome.cancelled = cancellation.stop_requested();
+          }
+          return outcome;
+        }));
+    window_.captionsPanel()->setTranscriptionState(desktop_ui::TranscriptionState::Downloading,
+                                                   tr("Verifying model…"), 100);
+    reply->deleteLater();
+  });
+}
+
+void EditorController::modelVerificationFinished() {
+  const auto outcome = model_verification_watcher_.result();
+  const QString staging = std::exchange(model_download_staging_, {});
+  const QString cacheRoot = std::exchange(model_download_cache_root_, {});
+  const QString stagedPath =
+      QDir(staging).filePath(QString::fromUtf8(transcription::kWhisperModelFilename.data()));
+  const QString destination =
+      QDir(cacheRoot).filePath(QString::fromUtf8(transcription::kWhisperModelFilename.data()));
+  if (outcome.generation != model_verification_generation_ || outcome.cancelled) {
+    QDir(staging).removeRecursively();
+    if (outcome.cancelled)
+      window_.captionsPanel()->setTranscriptionState(desktop_ui::TranscriptionState::ModelMissing,
+                                                     tr("Model verification cancelled."));
+    return;
+  }
+  if (!outcome.staged_verified) {
+    QDir(staging).removeRecursively();
+    window_.captionsPanel()->setTranscriptionState(
+        desktop_ui::TranscriptionState::Failed,
+        tr("Model verification failed; the staged file was discarded."));
+    return;
+  }
+  if (outcome.existing_verified) {
+    QDir(staging).removeRecursively();
+    window_.captionsPanel()->setTranscriptionState(
+        desktop_ui::TranscriptionState::Ready, tr("Model ready; transcription is on demand."), 100);
+    return;
+  }
+  if (QFileInfo::exists(destination)) {
+    const QString backup = QDir(cacheRoot).filePath(
+        QStringLiteral(".%1.invalid-%2")
+            .arg(QString::fromUtf8(transcription::kWhisperModelFilename.data()))
+            .arg(QString::fromStdString(edit::EntityId::generate().toString())));
+    if (!QFile::rename(destination, backup) || !QFile::rename(stagedPath, destination)) {
+      if (QFileInfo::exists(backup) && !QFileInfo::exists(destination))
+        QFile::rename(backup, destination);
+      QDir(staging).removeRecursively();
+      window_.captionsPanel()->setTranscriptionState(
+          desktop_ui::TranscriptionState::Failed,
+          tr("Could not safely replace the invalid installed model."));
+    } else {
+      QFile::remove(backup);
+      QDir(staging).removeRecursively();
+      window_.captionsPanel()->setTranscriptionState(
+          desktop_ui::TranscriptionState::Ready,
+          tr("Verified model replaced the invalid installed model."), 100);
+    }
+    return;
+  }
+  if (!QFile::rename(stagedPath, destination)) {
+    QDir(staging).removeRecursively();
+    window_.captionsPanel()->setTranscriptionState(desktop_ui::TranscriptionState::Failed,
+                                                   tr("Could not install the verified model."));
+    return;
+  }
+  QDir(staging).removeRecursively();
+  window_.captionsPanel()->setTranscriptionState(
+      desktop_ui::TranscriptionState::Ready, tr("Model ready; transcription is on demand."), 100);
+}
+
+void EditorController::startTranscription(const desktop_ui::TranscriptionOptionsView& options) {
+  if (transcription_process_ != nullptr || model_download_reply_ != nullptr ||
+      model_verification_watcher_.isRunning())
+    return;
+  std::filesystem::path input;
+  edit::TimeRange range;
+  edit::EntityId clipId;
+  if (!selectedAudioInput(input, range, clipId)) {
+    window_.showTransientMessage(tr("Select an audio clip before transcribing."));
+    return;
+  }
+  const edit::Sequence* selectedSequence = currentSequence();
+  const edit::Clip* selected =
+      selectedSequence == nullptr ? nullptr : edit::findClip(*selectedSequence, clipId);
+  if (selected == nullptr) {
+    window_.showTransientMessage(tr("The selected clip is no longer available."));
+    return;
+  }
+  const auto cache = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) +
+                     QStringLiteral("/models");
+  // Do not checksum the ~148 MiB model on the GUI thread. The worker owns the
+  // authoritative verification immediately before inference and reports a
+  // typed model error if the cache was removed or corrupted after the async
+  // readiness check.
+  jobs::v1::TranscribeOptions transcribeOptions;
+  transcribeOptions.set_schema_version(transcription::kTranscriptionSchemaVersion);
+  transcribeOptions.set_model_id(options.modelId.toStdString());
+  transcribeOptions.set_language(options.language.isEmpty() ? "auto"
+                                                            : options.language.toStdString());
+  transcribeOptions.set_translate(options.translate);
+  transcribeOptions.set_thread_count(
+      static_cast<std::uint32_t>(std::clamp(options.threadCount, 0, 256)));
+  // Timed words are the canonical caption/edit contract; the worker always
+  // emits them even if an older UI payload omitted the option.
+  transcribeOptions.set_word_timestamps(true);
+  transcribeOptions.set_prefer_vulkan(options.preferVulkan);
+  try {
+    const auto startCentiseconds =
+        selected->source_range.start.rescaledTo(100U, edit::RoundingMode::Floor).value();
+    const auto endCentiseconds =
+        selected->source_range.end().rescaledTo(100U, edit::RoundingMode::Ceil).value();
+    const auto durationCentiseconds = endCentiseconds - startCentiseconds;
+    if (startCentiseconds < 0 || endCentiseconds <= startCentiseconds ||
+        durationCentiseconds <= 0) {
+      window_.showTransientMessage(tr("The selected clip has an invalid source range."));
+      return;
+    }
+    transcribeOptions.set_source_start_centiseconds(startCentiseconds);
+    transcribeOptions.set_source_duration_centiseconds(durationCentiseconds);
+  } catch (const std::exception&) {
+    window_.showTransientMessage(tr("The selected source range is too large to transcribe."));
+    return;
+  }
+  jobs::v1::JobSpec spec;
+  transcription_job_id_ = QString::fromStdString(edit::EntityId::generate().toString());
+  spec.set_job_id(transcription_job_id_.toStdString());
+  spec.set_kind(jobs::v1::JOB_KIND_TRANSCRIBE);
+  spec.add_input_uris(utf8StringFromPath(input));
+  spec.set_preset_id("video-editor.transcribe.whisper-base.v1");
+  if (!transcribeOptions.SerializeToString(spec.mutable_options())) {
+    window_.showTransientMessage(tr("Could not encode transcription options."));
+    return;
+  }
+  jobs::v1::WorkerRequest request;
+  request.set_protocol_major(jobs::kProtocolMajor);
+  request.set_protocol_minor(jobs::kProtocolMinor);
+  *request.mutable_start()->mutable_spec() = spec;
+  std::string encoded;
+  if (!request.SerializeToString(&encoded) || encoded.size() > jobs::kMaximumFrameBytes) {
+    window_.showTransientMessage(tr("Could not start transcription."));
+    return;
+  }
+  QByteArray frame(4, Qt::Uninitialized);
+  const std::uint32_t size = static_cast<std::uint32_t>(encoded.size());
+  for (int i = 0; i < 4; ++i)
+    frame[i] = static_cast<char>((size >> (8 * i)) & 0xffU);
+  frame.append(encoded.data(), static_cast<qsizetype>(encoded.size()));
+
+  // Publish every piece of request and revision state before starting the
+  // process. QProcess start/failure signals can arrive as soon as control
+  // returns to the event loop, and must never observe the previous job's
+  // frame or output tail.
+  transcription_base_revision_ = editor_->revision().value;
+  transcription_clip_id_ = clipId;
+  transcription_clip_range_ = range;
+  transcription_source_range_ = selected->source_range;
+  transcription_playback_rate_ = selected->playback_rate;
+  transcription_reversed_ = selected->reversed;
+  transcription_output_buffer_.clear();
+  transcription_request_frame_ = std::move(frame);
+  pending_caption_additions_.clear();
+  transcription_terminal_ = false;
+  transcription_succeeded_ = false;
+  transcription_reported_failure_ = false;
+  caption_proposals_.clear();
+  proposal_cut_ranges_.clear();
+  proposal_caption_indices_.clear();
+  window_.captionsPanel()->setReviewProposals({});
+  window_.captionsPanel()->setTranscriptionState(desktop_ui::TranscriptionState::Running,
+                                                 tr("Transcribing selected audio…"), 0);
+
+  transcription_process_ = new QProcess(this);
+  const QString worker = resolveTranscriptionWorkerPath(
+      QCoreApplication::applicationDirPath(), qEnvironmentVariable("VIDEO_EDITOR_WORKER_HOST"));
+  QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+  environment.insert(QStringLiteral("VIDEO_EDITOR_TRANSCRIPTION_MODEL_DIR"), cache);
+  transcription_process_->setProcessEnvironment(environment);
+  connect(transcription_process_, &QProcess::readyReadStandardOutput, this,
+          &EditorController::transcriptionReadyRead);
+  connect(transcription_process_, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+          &EditorController::transcriptionProcessFinished);
+  connect(transcription_process_, &QProcess::started, this, [this] {
+    if (transcription_process_ != nullptr && !transcription_request_frame_.isEmpty()) {
+      if (transcription_process_->write(transcription_request_frame_) !=
+          transcription_request_frame_.size()) {
+        transcription_terminal_ = true;
+        transcription_reported_failure_ = true;
+        window_.captionsPanel()->setTranscriptionState(
+            desktop_ui::TranscriptionState::Failed,
+            tr("Could not send the transcription request to the worker."));
+        transcription_process_->kill();
+        return;
+      }
+      transcription_request_frame_.clear();
+      transcription_process_->closeWriteChannel();
+    }
+  });
+  connect(transcription_process_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError) {
+    QProcess* process = transcription_process_;
+    if (process == nullptr)
+      return;
+    transcription_terminal_ = true;
+    transcription_succeeded_ = false;
+    transcription_reported_failure_ = false;
+    transcription_output_buffer_.clear();
+    transcription_request_frame_.clear();
+    transcription_process_ = nullptr;
+    process->deleteLater();
+    window_.captionsPanel()->setTranscriptionState(
+        desktop_ui::TranscriptionState::Failed,
+        tr("The transcription worker could not be started."));
+  });
+  transcription_process_->start(worker);
+}
+
+void EditorController::cancelTranscription() {
+  if (model_verification_watcher_.isRunning()) {
+    model_verification_stop_source_.request_stop();
+    window_.captionsPanel()->setTranscriptionState(desktop_ui::TranscriptionState::Cancelling,
+                                                   tr("Cancelling model verification…"));
+  } else if (model_download_reply_ != nullptr) {
+    model_download_user_cancelled_ = true;
+    model_download_reply_->abort();
+    window_.captionsPanel()->setTranscriptionState(desktop_ui::TranscriptionState::Cancelling,
+                                                   tr("Cancelling model download…"));
+  } else if (transcription_process_ != nullptr) {
+    window_.captionsPanel()->setTranscriptionState(desktop_ui::TranscriptionState::Cancelling,
+                                                   tr("Cancelling transcription…"));
+    transcription_process_->kill();
+  }
+}
+
+void EditorController::transcriptionReadyRead() {
+  if (transcription_process_ == nullptr)
+    return;
+  transcription_output_buffer_.append(transcription_process_->readAllStandardOutput());
+  while (transcription_output_buffer_.size() >= 4) {
+    const auto byte = [this](const int index) {
+      return static_cast<std::uint32_t>(
+          static_cast<unsigned char>(transcription_output_buffer_.at(index)));
+    };
+    const std::uint32_t size = byte(0) | (byte(1) << 8U) | (byte(2) << 16U) | (byte(3) << 24U);
+    if (size > jobs::kMaximumFrameBytes) {
+      transcription_process_->kill();
+      window_.showTransientMessage(tr("Transcription worker sent an oversized frame."));
+      return;
+    }
+    if (transcription_output_buffer_.size() < static_cast<qsizetype>(size) + 4)
+      return;
+    const QByteArray payload = transcription_output_buffer_.mid(4, static_cast<qsizetype>(size));
+    transcription_output_buffer_.remove(0, static_cast<qsizetype>(size) + 4);
+    handleTranscriptionEvent(payload);
+  }
+}
+
+void EditorController::handleTranscriptionEvent(const QByteArray& frame) {
+  jobs::v1::WorkerEvent event;
+  if (!event.ParseFromArray(frame.constData(), static_cast<int>(frame.size())) ||
+      !event.has_event() || event.event().job_id() != transcription_job_id_.toStdString())
+    return;
+  if (event.protocol_major() != jobs::kProtocolMajor ||
+      event.protocol_minor() > jobs::kProtocolMinor) {
+    if (transcription_process_ != nullptr)
+      transcription_process_->kill();
+    return;
+  }
+  const auto& job = event.event();
+  const int percent = std::clamp(static_cast<int>(std::lround(job.progress() * 100.0)), 0, 100);
+  if (job.state() == jobs::v1::JOB_STATE_RUNNING) {
+    window_.captionsPanel()->setTranscriptionState(
+        desktop_ui::TranscriptionState::Running,
+        tr("Transcribing selected audio · %1").arg(QString::fromStdString(job.phase())), percent);
+    return;
+  }
+  if (job.state() != jobs::v1::JOB_STATE_SUCCEEDED) {
+    transcription_terminal_ = true;
+    if (job.has_error()) {
+      transcription_reported_failure_ = true;
+      window_.captionsPanel()->setTranscriptionState(
+          desktop_ui::TranscriptionState::Failed,
+          QString::fromStdString(job.error().user_message()));
+    }
+    return;
+  }
+  jobs::v1::TranscriptionResult result;
+  if (!result.ParseFromString(job.result()) ||
+      result.GetReflection()->GetUnknownFields(result).field_count() != 0 ||
+      result.schema_version() != transcription::kTranscriptionSchemaVersion) {
+    transcription_reported_failure_ = true;
+    window_.captionsPanel()->setTranscriptionState(desktop_ui::TranscriptionState::Failed,
+                                                   tr("Transcription result was invalid."));
+    return;
+  }
+  transcription_terminal_ = true;
+  transcription_succeeded_ = true;
+  const auto* sequence = currentSequence();
+  if (sequence == nullptr || transcription_clip_range_.duration <= edit::Time{} ||
+      result.duration_centiseconds() <= 0)
+    return;
+  edit::Caption caption;
+  caption.language = result.detected_language();
+  caption.provenance.source = edit::CaptionWordSource::LocalTranscription;
+  caption.provenance.model_identity = result.model_id() + ":" + result.model_digest();
+  std::vector<edit::CaptionWord> source_words;
+  source_words.reserve(static_cast<std::size_t>(result.words_size()));
+  for (const auto& item : result.words()) {
+    const QString wordText = QString::fromStdString(item.text()).trimmed();
+    if (wordText.isEmpty())
+      continue;
+    constexpr std::int64_t kCentisecondSamples = 160;
+    constexpr auto kMax = std::numeric_limits<std::int64_t>::max();
+    constexpr auto kMin = std::numeric_limits<std::int64_t>::min();
+    if (item.start_centiseconds() > kMax / kCentisecondSamples ||
+        item.start_centiseconds() < kMin / kCentisecondSamples ||
+        item.end_centiseconds() > kMax / kCentisecondSamples ||
+        item.end_centiseconds() < kMin / kCentisecondSamples) {
+      continue;
+    }
+    const edit::Time sourceStart =
+        edit::Time(item.start_centiseconds() * kCentisecondSamples, 16'000)
+            .rescaledTo(transcription_source_range_.start.timescale(),
+                        edit::RoundingMode::NearestTiesEven);
+    const edit::Time sourceEnd = edit::Time(item.end_centiseconds() * kCentisecondSamples, 16'000)
+                                     .rescaledTo(transcription_source_range_.start.timescale(),
+                                                 edit::RoundingMode::NearestTiesEven);
+    if (sourceEnd <= sourceStart) {
+      continue;
+    }
+    edit::CaptionWord word;
+    word.text = wordText.toStdString();
+    word.range = edit::TimeRange(sourceStart, sourceEnd - sourceStart);
+    word.probability = std::clamp(static_cast<double>(item.probability()), 0.0, 1.0);
+    source_words.push_back(std::move(word));
+  }
+  caption.words = mapTranscriptionWordsToTimeline(
+      source_words, transcription_source_range_, transcription_clip_range_,
+      transcription_playback_rate_, transcription_reversed_);
+  if (caption.words.empty())
+    return;
+  const QStringList words = [&caption] {
+    QStringList word_texts;
+    for (const auto& word : caption.words)
+      word_texts.push_back(QString::fromStdString(word.text));
+    return word_texts;
+  }();
+  caption.text = words.join(QLatin1Char(' ')).toStdString();
+  caption.range =
+      edit::TimeRange(caption.words.front().range.start,
+                      caption.words.back().range.end() - caption.words.front().range.start);
+
+  // Keep the worker's canonical timed result reviewable, but use the shared caption reflow
+  // policy so long transcripts become bounded 42-character/two-line cues without losing word
+  // timings.
+  const auto document =
+      caption_service::fromEditCaptions(std::span<const edit::Caption>(&caption, 1),
+                                        caption_service::SubtitleFormat::Srt, caption.language);
+  const auto reflowed = caption_service::reflow(document);
+  if (!reflowed) {
+    window_.captionsPanel()->setTranscriptionState(
+        desktop_ui::TranscriptionState::Failed,
+        tr("The timed transcript could not be formatted for captions: %1")
+            .arg(QString::fromStdString(reflowed.error().message)));
+    return;
+  }
+  auto additions = caption_service::toEditCaptions(reflowed.value(), caption.style);
+  if (additions.empty())
+    return;
+  const std::size_t first_addition = pending_caption_additions_.size();
+  for (auto& addition : additions) {
+    addition.style = caption.style;
+    pending_caption_additions_.push_back(std::move(addition));
+  }
+  const bool stale = editor_->revision().value != transcription_base_revision_;
+  const auto isFiller = [](QString token) {
+    token = token.toLower();
+    token.remove(QRegularExpression(QStringLiteral("[^a-z]")));
+    return token == QStringLiteral("um") || token == QStringLiteral("uh") ||
+           token == QStringLiteral("erm");
+  };
+  for (std::size_t index = first_addition; index < pending_caption_additions_.size(); ++index) {
+    const auto& addition = pending_caption_additions_[index];
+    const QString addition_text = QString::fromStdString(addition.text);
+    caption_proposals_.push_back(
+        {.id = QString::fromStdString(addition.id.toString()),
+         .kind = QStringLiteral("Transcript suggestion"),
+         .summary = tr("Add %1").arg(addition_text),
+         .previewRange =
+             tr("%1 → %2")
+                 .arg(timecodeText(toUiTime(addition.range.start), sequence->frame_rate))
+                 .arg(timecodeText(toUiTime(addition.range.end()), sequence->frame_rate)),
+         .confidence =
+             stale ? tr("Stale result; regenerate before applying") : tr("Review before applying"),
+         .selected = true});
+    proposal_cut_ranges_.push_back({});
+    proposal_caption_indices_.push_back(static_cast<int>(index));
+    for (const auto& word : addition.words) {
+      if (!isFiller(QString::fromStdString(word.text)))
+        continue;
+      caption_proposals_.push_back(
+          {.id = QString::fromStdString(word.id.toString()),
+           .kind = QStringLiteral("Transcript filler"),
+           .summary = tr("Remove filler “%1”").arg(QString::fromStdString(word.text)),
+           .previewRange = tr("%1 → %2")
+                               .arg(timecodeText(toUiTime(word.range.start), sequence->frame_rate))
+                               .arg(timecodeText(toUiTime(word.range.end()), sequence->frame_rate)),
+           .confidence = tr("Off by default; review transcript context"),
+           .selected = false});
+      proposal_cut_ranges_.push_back(word.range);
+      proposal_caption_indices_.push_back(-1);
+    }
+  }
+  window_.captionsPanel()->setReviewProposals(caption_proposals_);
+  if (!stale)
+    launchCaptionReviewAnalysis();
+  window_.captionsPanel()->setTranscriptionState(
+      desktop_ui::TranscriptionState::Ready,
+      stale ? tr("Result is stale because the project changed; regenerate before applying.")
+            : tr("Transcript ready for review; no edits have been applied."),
+      100);
+}
+
+void EditorController::transcriptionProcessFinished(const int exitCode,
+                                                    const QProcess::ExitStatus exitStatus) {
+  if (transcription_process_ == nullptr)
+    return;
+  transcriptionReadyRead();
+  transcription_output_buffer_.clear();
+  transcription_request_frame_.clear();
+  QProcess* process = transcription_process_;
+  transcription_process_ = nullptr;
+  process->deleteLater();
+  const bool abnormal = exitStatus != QProcess::NormalExit || exitCode != 0;
+  if ((abnormal || !transcription_terminal_) && !transcription_reported_failure_ &&
+      !transcription_succeeded_ && window_.captionsPanel() != nullptr) {
+    window_.captionsPanel()->setTranscriptionState(
+        desktop_ui::TranscriptionState::Failed,
+        abnormal ? tr("The transcription worker stopped unexpectedly.")
+                 : tr("Transcription ended without a reviewable result."));
+  }
+}
+
+void EditorController::launchCaptionReviewAnalysis() {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || editor_ == nullptr)
+    return;
+  const auto snapshotResult = editor_->snapshot(sequence->id, editor_->revision());
+  if (!snapshotResult) {
+    window_.showTransientMessage(tr("Measured silence is unavailable for this revision."));
+    return;
+  }
+  if (caption_analysis_watcher_.isRunning())
+    caption_analysis_stop_source_.request_stop();
+  caption_analysis_stop_source_ = std::stop_source{};
+  const std::uint64_t generation = ++caption_analysis_generation_;
+  const std::uint64_t baseRevision = editor_->revision().value;
+  const edit::TimeRange range = transcription_clip_range_;
+  const auto snapshot = std::move(snapshotResult).value();
+  const auto renderer = std::make_shared<audio_render::TimelineAudioRenderer>(audio_registry_);
+  const std::stop_token cancellation = caption_analysis_stop_source_.get_token();
+  caption_analysis_future_ = QtConcurrent::run([snapshot = std::move(snapshot), renderer, range,
+                                                generation, baseRevision, cancellation]() {
+    CaptionAnalysisOutcome outcome;
+    outcome.generation = generation;
+    outcome.base_revision = baseRevision;
+    const auto toSample = [](const edit::Time time) {
+      return time
+          .rescaledTo(audio_render::kTimelineAudioSampleRate, edit::RoundingMode::NearestTiesEven)
+          .value();
+    };
+    const std::int64_t start = toSample(range.start);
+    const std::int64_t end = toSample(range.end());
+    if (end <= start) {
+      outcome.error = QObject::tr("Measured silence range is empty.");
+      return outcome;
+    }
+    constexpr std::size_t kBlockSamples = 96'000U;
+    const std::size_t total = static_cast<std::size_t>(end - start);
+    audio_render::SilenceOptions options;
+    options.analysis_window_samples = 480U;
+    options.minimum_silence_samples = 2'400U;
+    options.merge_gap_samples = 2'400U;
+    audio_render::SilenceAccumulator detector(options);
+    std::size_t rendered_samples = 0;
+    while (rendered_samples < total) {
+      if (cancellation.stop_requested()) {
+        outcome.error = QObject::tr("Measured silence analysis cancelled.");
+        return outcome;
+      }
+      const std::size_t remaining = total - rendered_samples;
+      const std::size_t count = std::min(kBlockSamples, remaining);
+      const auto rendered = renderer->render(
+          snapshot, {.start_sample = start + static_cast<std::int64_t>(rendered_samples),
+                     .sample_count = count,
+                     .cancellation = cancellation});
+      if (!rendered) {
+        outcome.error = QString::fromStdString(rendered.error().message);
+        return outcome;
+      }
+      if (!detector.add(rendered.value())) {
+        outcome.error = QString::fromStdString(detector.error()->message);
+        return outcome;
+      }
+      rendered_samples += count;
+    }
+    const auto detected = detector.finish();
+    if (!detected) {
+      outcome.error = QString::fromStdString(detected.error().message);
+      return outcome;
+    }
+    outcome.silence_ranges = detected.value();
+    return outcome;
+  });
+  caption_analysis_watcher_.setFuture(caption_analysis_future_);
+}
+
+void EditorController::captionAnalysisFinished() {
+  const CaptionAnalysisOutcome outcome = caption_analysis_watcher_.result();
+  if (outcome.generation != caption_analysis_generation_ ||
+      outcome.base_revision != editor_->revision().value ||
+      outcome.base_revision != transcription_base_revision_) {
+    return;
+  }
+  if (!outcome.error.isEmpty()) {
+    window_.showTransientMessage(tr("Measured silence unavailable: %1").arg(outcome.error));
+    return;
+  }
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr)
+    return;
+  const std::int64_t clipStartSample =
+      transcription_clip_range_.start
+          .rescaledTo(audio_render::kTimelineAudioSampleRate, edit::RoundingMode::NearestTiesEven)
+          .value();
+  const std::int64_t clipEndSample =
+      transcription_clip_range_.end()
+          .rescaledTo(audio_render::kTimelineAudioSampleRate, edit::RoundingMode::NearestTiesEven)
+          .value();
+  constexpr std::int64_t kSilencePaddingSamples = 240; // 5 ms safe cut padding.
+  for (const auto& silence : outcome.silence_ranges) {
+    const audio_render::SilenceRange padded{
+        std::max(clipStartSample, silence.start_sample + kSilencePaddingSamples),
+        std::min(clipEndSample, silence.end_sample - kSilencePaddingSamples)};
+    if (padded.end_sample <= padded.start_sample)
+      continue;
+    const edit::TimeRange range = padded.time_range();
+    caption_proposals_.push_back(
+        {.id = QStringLiteral("silence-%1-%2").arg(silence.start_sample).arg(silence.end_sample),
+         .kind = QStringLiteral("Measured silence"),
+         .summary = tr("Remove measured silent range"),
+         .previewRange = tr("%1 → %2")
+                             .arg(timecodeText(toUiTime(range.start), sequence->frame_rate))
+                             .arg(timecodeText(toUiTime(range.end()), sequence->frame_rate)),
+         .confidence = tr("Measured from rendered 48 kHz timeline audio"),
+         .selected = true});
+    proposal_cut_ranges_.push_back(range);
+    proposal_caption_indices_.push_back(-1);
+  }
+  window_.captionsPanel()->setReviewProposals(caption_proposals_);
+}
+
+void EditorController::applyCaptionReview() {
+  if (pending_caption_additions_.empty() && proposal_cut_ranges_.isEmpty())
+    return;
+  if (editor_->revision().value != transcription_base_revision_) {
+    window_.showTransientMessage(
+        tr("The project changed; regenerate this transcript before applying."));
+    return;
+  }
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr)
+    return;
+  std::vector<edit::Caption> selected;
+  std::vector<edit::TimeRange> selectedRanges;
+  for (qsizetype index = 0; index < caption_proposals_.size(); ++index) {
+    if (!caption_proposals_.at(index).selected)
+      continue;
+    const int captionIndex = proposal_caption_indices_.value(index, -1);
+    if (captionIndex >= 0 && captionIndex < static_cast<int>(pending_caption_additions_.size())) {
+      selected.push_back(pending_caption_additions_.at(static_cast<std::size_t>(captionIndex)));
+    }
+    const edit::TimeRange cut = proposal_cut_ranges_.value(index);
+    if (!cut.empty())
+      selectedRanges.push_back(cut);
+  }
+  std::sort(selectedRanges.begin(), selectedRanges.end(),
+            [](const edit::TimeRange& left, const edit::TimeRange& right) {
+              return left.start < right.start;
+            });
+  std::vector<edit::TimeRange> merged;
+  for (const auto& range : selectedRanges) {
+    if (!merged.empty() && merged.back().end() >= range.start) {
+      const edit::Time end = std::max(merged.back().end(), range.end());
+      merged.back().duration = end - merged.back().start;
+    } else {
+      merged.push_back(range);
+    }
+  }
+  if (selected.empty() && merged.empty())
+    return;
+  std::vector<edit::EditCommand> commands;
+  if (!merged.empty()) {
+    const auto snapshot = editor_->snapshot(sequence->id, editor_->revision());
+    if (!snapshot) {
+      window_.showTransientMessage(tr("Could not capture the review revision."));
+      return;
+    }
+    auto proposal = caption_service::buildTimelineCutProposal(snapshot.value(), merged);
+    if (!proposal || !proposal.value().timeline_cuts.has_value()) {
+      window_.showTransientMessage(tr("Could not build the selected timeline cut proposal."));
+      return;
+    }
+    commands.push_back({.operation = *proposal.value().timeline_cuts, .coalescing_key = {}});
+    auto changes = proposal.value().caption_changes;
+    for (const auto& caption : selected) {
+      const auto mapped = caption_service::mapCaptionThroughCuts(caption, merged);
+      if (mapped.has_value())
+        changes.added.push_back(*mapped);
+    }
+    if (!changes.added.empty() || !changes.updated.empty() || !changes.removed.empty()) {
+      commands.push_back({.operation = std::move(changes), .coalescing_key = {}});
+    }
+  } else if (!selected.empty()) {
+    edit::ApplyCaptionChangeSetCommand changes;
+    changes.sequence_id = sequence->id;
+    changes.added = std::move(selected);
+    commands.push_back({.operation = std::move(changes), .coalescing_key = {}});
+  }
+  if (applyBatch(std::move(commands), tr("Could not apply caption review suggestions"))) {
+    pending_caption_additions_.clear();
+    caption_proposals_.clear();
+    proposal_cut_ranges_.clear();
+    proposal_caption_indices_.clear();
+    window_.captionsPanel()->setReviewProposals({});
+  }
+}
+
+void EditorController::discardCaptionReview() {
+  pending_caption_additions_.clear();
+  caption_proposals_.clear();
+  proposal_cut_ranges_.clear();
+  proposal_caption_indices_.clear();
+  window_.captionsPanel()->setReviewProposals({});
+  window_.showTransientMessage(tr("Transcript suggestions discarded"));
+}
+
+void EditorController::captionStyleEdited(const QString& captionId,
+                                          const desktop_ui::CaptionStyleView& style) {
+  const auto id = parseId(captionId);
+  const edit::Sequence* sequence = currentSequence();
+  if (!id.has_value() || sequence == nullptr)
+    return;
+  const auto it = std::find_if(sequence->captions.cbegin(), sequence->captions.cend(),
+                               [&id](const edit::Caption& caption) { return caption.id == *id; });
+  if (it == sequence->captions.cend())
+    return;
+  edit::Caption caption = *it;
+  caption.style.font_family = style.fontFamily.toStdString();
+  caption.style.font_size = style.fontSize;
+  caption.style.text_color = {style.textColor.redF(), style.textColor.greenF(),
+                              style.textColor.blueF(), style.textColor.alphaF()};
+  caption.style.background_color = {style.backgroundColor.redF(), style.backgroundColor.greenF(),
+                                    style.backgroundColor.blueF(), style.backgroundColor.alphaF()};
+  caption.style.bold = style.bold;
+  caption.style.italic = style.italic;
+  caption.style.vertical_position = style.verticalPosition;
+  caption.style.safe_margin = style.safeMargin;
+  caption.style.outline_width = style.outlineWidth;
+  caption.style.outline_color = {style.outlineColor.redF(), style.outlineColor.greenF(),
+                                 style.outlineColor.blueF(), style.outlineColor.alphaF()};
+  caption.style.alignment =
+      style.alignment == QStringLiteral("left")
+          ? edit::CaptionAlignment::Left
+          : (style.alignment == QStringLiteral("right") ? edit::CaptionAlignment::Right
+                                                        : edit::CaptionAlignment::Center);
+  (void)apply(
+      edit::EditCommand{.operation = edit::UpdateCaptionCommand{sequence->id, std::move(caption)},
+                        .coalescing_key = {}},
+      tr("Could not update caption style"));
+}
+
 void EditorController::updateSelectedClipProperty(const QString& parameterId,
                                                   const QVariant& value) {
   const edit::Sequence* sequence = currentSequence();
@@ -3335,7 +4376,7 @@ void EditorController::persistSnapshot(const std::string_view reason) {
   const auto project = editor_->projectAt(editor_->revision());
   const project_codec::ProjectBytes bytes = project_codec::serialize_project(*project);
   const auto metadata = store_->metadata();
-  store_->append_command("project.snapshot.v2", std::span<const std::byte>(bytes),
+  store_->append_command("project.snapshot.v3", std::span<const std::byte>(bytes),
                          metadata.head_revision, project_codec::kCurrentSchemaVersion);
   store_->update_heartbeat();
   (void)reason;
@@ -4144,10 +5185,8 @@ void EditorController::refreshMixerView() {
 void EditorController::refreshCaptionView() {
   const edit::Sequence* sequence = currentSequence();
   visible_caption_indices_.clear();
-  QStringList timecodes;
-  QStringList text;
   if (sequence == nullptr) {
-    window_.captionsPanel()->setCaptionRows(timecodes, text);
+    window_.captionsPanel()->setCaptionRows(QVector<desktop_ui::CaptionRowView>{});
     return;
   }
 
@@ -4169,19 +5208,58 @@ void EditorController::refreshCaptionView() {
     }
   }
 
-  timecodes.reserve(static_cast<qsizetype>(visible_caption_indices_.size()));
-  text.reserve(static_cast<qsizetype>(visible_caption_indices_.size()));
+  QVector<desktop_ui::CaptionRowView> rows;
+  rows.reserve(static_cast<qsizetype>(visible_caption_indices_.size()));
   for (const std::size_t index : visible_caption_indices_) {
     if (index >= sequence->captions.size()) {
       continue;
     }
     const edit::Caption& caption = sequence->captions[index];
-    timecodes.push_back(timecodeText(toUiTime(caption.range.start), sequence->frame_rate) +
-                        QStringLiteral("  →  ") +
-                        timecodeText(toUiTime(caption.range.end()), sequence->frame_rate));
-    text.push_back(QString::fromStdString(caption.text));
+    desktop_ui::CaptionRowView row;
+    row.id = QString::fromStdString(caption.id.toString());
+    row.timecode = timecodeText(toUiTime(caption.range.start), sequence->frame_rate) +
+                   QStringLiteral("  →  ") +
+                   timecodeText(toUiTime(caption.range.end()), sequence->frame_rate);
+    row.text = QString::fromStdString(caption.text);
+    row.language = QString::fromStdString(caption.language);
+    row.start = toUiTime(caption.range.start);
+    row.end = toUiTime(caption.range.end());
+    row.style.fontFamily = QString::fromStdString(caption.style.font_family);
+    row.style.fontSize = caption.style.font_size;
+    row.style.textColor = QColor::fromRgbF(static_cast<float>(caption.style.text_color.red),
+                                           static_cast<float>(caption.style.text_color.green),
+                                           static_cast<float>(caption.style.text_color.blue),
+                                           static_cast<float>(caption.style.text_color.alpha));
+    row.style.backgroundColor =
+        QColor::fromRgbF(static_cast<float>(caption.style.background_color.red),
+                         static_cast<float>(caption.style.background_color.green),
+                         static_cast<float>(caption.style.background_color.blue),
+                         static_cast<float>(caption.style.background_color.alpha));
+    row.style.bold = caption.style.bold;
+    row.style.italic = caption.style.italic;
+    row.style.alignment =
+        caption.style.alignment == edit::CaptionAlignment::Left
+            ? QStringLiteral("left")
+            : (caption.style.alignment == edit::CaptionAlignment::Right ? QStringLiteral("right")
+                                                                        : QStringLiteral("center"));
+    row.style.verticalPosition = caption.style.vertical_position;
+    row.style.safeMargin = caption.style.safe_margin;
+    row.style.outlineWidth = caption.style.outline_width;
+    row.style.outlineColor =
+        QColor::fromRgbF(static_cast<float>(caption.style.outline_color.red),
+                         static_cast<float>(caption.style.outline_color.green),
+                         static_cast<float>(caption.style.outline_color.blue),
+                         static_cast<float>(caption.style.outline_color.alpha));
+    for (const auto& word : caption.words) {
+      row.words.push_back({.id = QString::fromStdString(word.id.toString()),
+                           .text = QString::fromStdString(word.text),
+                           .start = toUiTime(word.range.start),
+                           .end = toUiTime(word.range.end()),
+                           .probability = word.probability});
+    }
+    rows.push_back(std::move(row));
   }
-  window_.captionsPanel()->setCaptionRows(timecodes, text);
+  window_.captionsPanel()->setCaptionRows(rows);
 }
 
 void EditorController::rebuildPlaybackRegistry() {

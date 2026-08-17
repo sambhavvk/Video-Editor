@@ -170,6 +170,8 @@ struct Marker final {
   friend bool operator==(const Marker&, const Marker&) = default;
 };
 
+enum class CaptionAlignment { Left, Center, Right };
+
 struct CaptionStyle final {
   std::string font_family{"sans-serif"};
   double font_size{48.0};
@@ -177,7 +179,31 @@ struct CaptionStyle final {
   ColorRgba background_color{0.0, 0.0, 0.0, 0.7};
   bool bold{false};
   bool italic{false};
+  CaptionAlignment alignment{CaptionAlignment::Center};
+  // Normalized coordinates. 0 is the top/left safe edge and 1 is the
+  // bottom/right safe edge.
+  double vertical_position{0.9};
+  double safe_margin{0.05};
+  double outline_width{0.0};
+  ColorRgba outline_color{0.0, 0.0, 0.0, 1.0};
   friend bool operator==(const CaptionStyle&, const CaptionStyle&) = default;
+};
+
+enum class CaptionWordSource { Unknown, Imported, LocalTranscription, UserEdited };
+
+struct CaptionProvenance final {
+  CaptionWordSource source{CaptionWordSource::Unknown};
+  // A model/checksum or import identity shared by all words in the caption.
+  std::string model_identity;
+  friend bool operator==(const CaptionProvenance&, const CaptionProvenance&) = default;
+};
+
+struct CaptionWord final {
+  EntityId id{EntityId::generate()};
+  std::string text;
+  TimeRange range{};
+  double probability{1.0};
+  friend bool operator==(const CaptionWord&, const CaptionWord&) = default;
 };
 
 struct Caption final {
@@ -186,6 +212,8 @@ struct Caption final {
   std::string text;
   std::string language;
   CaptionStyle style{};
+  CaptionProvenance provenance{};
+  std::vector<CaptionWord> words;
   friend bool operator==(const Caption&, const Caption&) = default;
 };
 

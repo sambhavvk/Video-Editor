@@ -3,14 +3,17 @@
 
 #include "video_editor/asset_service/asset_service.h"
 #include "video_editor/audio_engine/audio_device_manager.h"
+#include "video_editor/audio_render/silence_detector.h"
 #include "video_editor/desktop_ui/ui_types.hpp"
 #include "video_editor/edit_model/edit_model.h"
 
+#include <QByteArray>
 #include <QElapsedTimer>
 #include <QFuture>
 #include <QFutureWatcher>
 #include <QImage>
 #include <QObject>
+#include <QProcess>
 #include <QString>
 #include <QStringList>
 #include <QTimer>
@@ -28,6 +31,10 @@
 #include <vector>
 
 class QEvent;
+class QFile;
+class QNetworkAccessManager;
+class QNetworkReply;
+class QProcess;
 class QVariant;
 
 namespace video_editor::desktop_ui {
@@ -72,6 +79,22 @@ struct AudioDevicePollDecision final {
 evaluateAudioDevicePoll(std::span<const audio::AudioDeviceInfo> previous,
                         std::span<const audio::AudioDeviceInfo> current,
                         std::string_view selected_id) noexcept;
+
+// Maps asset-relative transcription words into the selected clip's timeline range. Words are
+// clipped to the source range and returned in playback order, including for reversed clips.
+[[nodiscard]] std::vector<edit::CaptionWord>
+mapTranscriptionWordsToTimeline(std::span<const edit::CaptionWord> source_words,
+                                edit::TimeRange source_range, edit::TimeRange timeline_range,
+                                edit::Rate playback_rate, bool reversed);
+
+[[nodiscard]] QString resolveTranscriptionWorkerPath(const QString& application_directory,
+                                                     const QString& configured_path = {});
+
+// Validates both a known Content-Length and the bytes already staged for the
+// pinned model. A negative content length means that the server omitted it.
+[[nodiscard]] bool modelDownloadSizeAllowed(std::uintmax_t bytes_received,
+                                            std::int64_t content_length,
+                                            std::uintmax_t expected_bytes) noexcept;
 
 struct NormalizationCompletionGate final {
   std::uint64_t generation{0};
@@ -160,6 +183,14 @@ private slots:
   void removeCaption(int visibleRow);
   void updateCaptionText(int visibleRow, const QString& text);
   void searchTranscript(const QString& query);
+  void downloadTranscriptionModel(const QString& modelId);
+  void startTranscription(const desktop_ui::TranscriptionOptionsView& options);
+  void cancelTranscription();
+  void applyCaptionReview();
+  void discardCaptionReview();
+  void captionStyleEdited(const QString& captionId, const desktop_ui::CaptionStyleView& style);
+  void transcriptionReadyRead();
+  void transcriptionProcessFinished(int exitCode, QProcess::ExitStatus status);
   void updateSelectedClipProperty(const QString& parameterId, const QVariant& value);
   void toggleSelectedClipKeyframe(const QString& parameterId);
   void addEffect(const QString& effectId);
@@ -224,6 +255,21 @@ private:
     QString error;
   };
 
+  struct CaptionAnalysisOutcome {
+    std::uint64_t generation{0};
+    std::uint64_t base_revision{0};
+    std::vector<audio_render::SilenceRange> silence_ranges;
+    std::vector<edit::TimeRange> filler_ranges;
+    QString error;
+  };
+
+  struct ModelVerificationOutcome {
+    std::uint64_t generation{0};
+    bool staged_verified{false};
+    bool existing_verified{false};
+    bool cancelled{false};
+  };
+
   struct ProxyOutcome {
     std::string asset_id;
     std::filesystem::path destination;
@@ -256,6 +302,13 @@ private:
   void refreshInspectorView();
   void refreshMixerView();
   void refreshCaptionView();
+  void refreshTranscriptionState();
+  [[nodiscard]] bool selectedAudioInput(std::filesystem::path& path, edit::TimeRange& range,
+                                        edit::EntityId& clipId) const;
+  void handleTranscriptionEvent(const QByteArray& frame);
+  void launchCaptionReviewAnalysis();
+  void captionAnalysisFinished();
+  void modelVerificationFinished();
   void rebuildPlaybackRegistry();
   void commitTimelineEdit(const QString& clipId, int destinationTrackIndex, qint64 startDelta,
                           qint64 durationDelta, int editMode, int editIntent);
@@ -370,6 +423,39 @@ private:
   NormalizationCompletionGate normalization_completion_gate_;
   std::uint64_t active_normalization_generation_{0};
   bool export_in_flight_{false};
+  QNetworkAccessManager* transcription_network_{nullptr};
+  QNetworkReply* model_download_reply_{nullptr};
+  QFutureWatcher<ModelVerificationOutcome> model_verification_watcher_;
+  std::stop_source model_verification_stop_source_;
+  std::uint64_t model_verification_generation_{0};
+  QString model_download_staging_;
+  QString model_download_cache_root_;
+  QProcess* transcription_process_{nullptr};
+  QFile* model_download_file_{nullptr};
+  bool model_download_write_failed_{false};
+  std::uintmax_t model_download_bytes_written_{0};
+  bool model_download_size_rejected_{false};
+  bool model_download_user_cancelled_{false};
+  QByteArray transcription_output_buffer_;
+  QByteArray transcription_request_frame_;
+  QString transcription_job_id_;
+  bool transcription_terminal_{false};
+  bool transcription_succeeded_{false};
+  bool transcription_reported_failure_{false};
+  std::uint64_t transcription_base_revision_{0};
+  edit::EntityId transcription_clip_id_{};
+  edit::TimeRange transcription_clip_range_{};
+  edit::TimeRange transcription_source_range_{};
+  edit::Rate transcription_playback_rate_{};
+  bool transcription_reversed_{false};
+  QVector<desktop_ui::CaptionProposalView> caption_proposals_;
+  QVector<edit::TimeRange> proposal_cut_ranges_;
+  QVector<int> proposal_caption_indices_;
+  std::vector<edit::Caption> pending_caption_additions_;
+  std::stop_source caption_analysis_stop_source_;
+  QFuture<CaptionAnalysisOutcome> caption_analysis_future_;
+  QFutureWatcher<CaptionAnalysisOutcome> caption_analysis_watcher_;
+  std::uint64_t caption_analysis_generation_{0};
   bool dirty_{false};
   bool closing_after_confirmation_{false};
   double playback_rate_{0.0};

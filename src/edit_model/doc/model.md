@@ -23,6 +23,8 @@ are immutable and may be read concurrently for the snapshot lifetime.
 | `ClipKind` | `Video`, `Audio`, `Title` | Determines media/title validation and render behavior. |
 | `BlendMode` | `Normal`, `Add`, `Multiply`, `Screen`, `Overlay` | Supported visual compositing operation. |
 | `TransitionKind` | `CrossDissolve`, `DipToBlack` | Supported CPU-reference transition. |
+| `CaptionAlignment` | `Left`, `Center`, `Right` | Horizontal caption placement inside its safe area. |
+| `CaptionWordSource` | `Unknown`, `Imported`, `LocalTranscription`, `UserEdited` | Provenance category for exact word timing. |
 
 ## Primitive and effect values
 
@@ -47,8 +49,10 @@ are immutable and may be read concurrently for the snapshot lifetime.
 | `Gap` | `timeline_range` | Derived half-open empty range. It has no persistent identity. |
 | `Track` | identity/kind/name, lock/mute/solo, `visible`, `targeted`, clips/effects, audio gain/pan | Ordered timeline lane. Visibility controls visual composition; targeting is an editorial routing hint. Audio tracks add canonical mixer state. |
 | `Marker` | identity, exact range, label, color | Sequence annotation. A zero-duration range is a point marker. |
-| `CaptionStyle` | font, size, text/background colors, bold/italic | Persistent caption styling. |
-| `Caption` | identity, exact range, text, language, style | Sequence-owned caption cue. |
+| `CaptionStyle` | font, size, text/background colors, bold/italic, alignment, normalized vertical position/safe margin, outline | Persistent renderer-actionable caption styling. |
+| `CaptionWord` | identity, text, exact half-open range, probability | Stable word-level timing contained by one cue. |
+| `CaptionProvenance` | word source, model identity | Origin of timed words without repeating model data per token. |
+| `Caption` | identity, exact range, text, language, style, ordered words, provenance | Sequence-owned caption cue. |
 | `Transition` | identity, outgoing/incoming clip IDs, exact range, kind, enabled | Sequence-owned relation over one adjacent video-track cut. |
 | `Sequence` | identity/name, frame rate/raster/audio format, ordered tracks, markers, captions, transitions | Complete editorial timeline. |
 | `Project` | identity/name, assets, sequences, metadata | Root authoritative state serialized into project snapshots. |
@@ -66,6 +70,11 @@ published; unknown future effects remain opaque and disabled.
 An enabled transition refers to adjacent clips on the same video track. Its range begins inside the
 outgoing clip, ends inside the incoming clip, strictly straddles their shared cut, and requires
 available source handles. Enabled transition ranges on one track cannot overlap.
+
+Caption words are nonempty, finite-probability, chronological, non-overlapping, and contained by the
+cue's half-open range. Style colors/channels and numeric layout fields are finite and bounded.
+Unknown or older snapshot caption state receives canonical defaults at the codec boundary rather
+than weakening model validation.
 
 ## Lookup and duration functions
 

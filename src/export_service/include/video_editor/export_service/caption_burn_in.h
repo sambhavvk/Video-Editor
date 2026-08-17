@@ -24,16 +24,18 @@ enum class CaptionBurnInError : std::uint8_t {
 // Draws all captions whose range contains `timeline_time` onto `frame`.
 // Uses the deterministic bitmap glyph rasterizer from render_engine so the
 // same caption payload produces identical pixels on every machine.
-// Captions are drawn bottom-centered with a semi-transparent background box,
-// matching common subtitle presentation. Multi-line text uses '\n'.
+// Captions honor the canonical style alignment, safe margin, normalized
+// vertical position, and outline fields. They use a semi-transparent
+// background box and deterministic bitmap glyphs; multi-line text uses '\n'.
 // Returns an error if the frame is too small for the requested font size;
 // otherwise draws silently (unsupported glyphs render as replacement glyphs).
 [[nodiscard]] std::optional<CaptionBurnInError>
 burn_in_captions(render::CpuFrame& frame, const std::vector<edit::Caption>& captions,
                  edit::Time timeline_time);
 
-// Lower-level: draws a single caption's text onto the frame at the given
-// vertical anchor. Exposed for testing and custom layout.
+// Lower-level: draws a single caption's text onto the frame. The legacy
+// bottom-margin argument is retained for the canonical default position and
+// for callers that provide an invalid normalized vertical position.
 [[nodiscard]] std::optional<CaptionBurnInError> draw_caption_text(render::CpuFrame& frame,
                                                                   const edit::CaptionStyle& style,
                                                                   std::string_view text,
