@@ -25,5 +25,8 @@ struct RuntimeInfo {
 
 [[nodiscard]] RuntimeInfo runtime_info();
 
+// Process-wide av_log filter for known-harmless decode noise.
+void install_quiet_ffmpeg_log_filter();
+
 } // namespace video_editor::media
 

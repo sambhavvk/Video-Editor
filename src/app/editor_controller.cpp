@@ -999,6 +999,9 @@ EditorController::~EditorController() {
   caption_analysis_stop_source_.request_stop();
   if (caption_analysis_future_.isRunning())
     caption_analysis_future_.waitForFinished();
+  normalization_stop_source_.request_stop();
+  if (normalization_future_.isRunning())
+    normalization_future_.waitForFinished();
   if (model_download_file_ != nullptr) {
     model_download_file_->close();
     delete model_download_file_;
@@ -4496,6 +4499,7 @@ void EditorController::analyzeLoudnessNormalization() {
     window_.audioMixer()->setNormalizationStatus(tr("Could not snapshot the current revision."));
     return;
   }
+  normalization_stop_source_ = std::stop_source{};
   auto snapshot = std::make_shared<edit::TimelineSnapshot>(std::move(snapshotResult).value());
   auto originals = audio_registry_;
   const auto reviewRevision = editor_->revision();
@@ -4504,11 +4508,13 @@ void EditorController::analyzeLoudnessNormalization() {
   const auto generation = active_normalization_generation_;
   window_.audioMixer()->setNormalizationBusy(true);
   normalization_review_ = {};
+  const std::stop_token cancellation = normalization_stop_source_.get_token();
   normalization_future_ = QtConcurrent::run([snapshot, originals, reviewRevision, targetLufs,
-                                             generation] {
+                                             generation, cancellation] {
     NormalizationReview review;
     review.revision = reviewRevision;
-    const auto result = audio_render::compute_normalization_gain(*snapshot, originals, targetLufs);
+    const auto result =
+        audio_render::compute_normalization_gain(*snapshot, originals, targetLufs, cancellation);
     if (!result) {
       review.error = QString::fromStdString(result.error().message);
       return review;

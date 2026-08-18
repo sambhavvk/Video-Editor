@@ -6,6 +6,7 @@
 
 #include <memory>
 #include <optional>
+#include <stop_token>
 #include <string>
 
 namespace video_editor::audio_render {
@@ -21,14 +22,13 @@ struct LoudnessNormalizeResult final {
 
 using LoudnessNormalizeOutcome = edit::Result<LoudnessNormalizeResult, LoudnessNormalizeError>;
 
-// Renders the entire timeline in blocks, measures integrated LUFS, and returns
-// the gain offset in dB to add to reach target_lufs. Returns an error if the
-// timeline is empty or rendering fails. Default target is -23 LUFS (EBU R128
-// broadcast standard). Block size is 960 frames (20ms at 48kHz) to match the
-// realtime render block.
+// Renders the timeline in multi-second blocks, measures integrated LUFS, and
+// returns the gain offset in dB to add to reach target_lufs. Returns an error
+// if the timeline is empty or rendering fails. Default target is -23 LUFS
+// (EBU R128 broadcast standard).
 [[nodiscard]] LoudnessNormalizeOutcome compute_normalization_gain(
     const edit::TimelineSnapshot& snapshot,
     std::shared_ptr<const OriginalAudioProvider> originals,
-    double target_lufs = -23.0);
+    double target_lufs = -23.0, std::stop_token cancellation = {});
 
 } // namespace video_editor::audio_render

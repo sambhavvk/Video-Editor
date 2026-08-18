@@ -2,6 +2,7 @@
 #include "video_editor/audio_render/loudness_normalize.h"
 
 #include "video_editor/audio_engine/loudness_meter.h"
+#include "video_editor/media_codec/format_open.h"
 
 #include <algorithm>
 #include <cmath>
@@ -13,7 +14,7 @@
 namespace video_editor::audio_render {
 namespace {
 
-constexpr std::size_t kNormalizationBlockFrames = 960;
+constexpr std::size_t kNormalizationBlockFrames = 5U * kTimelineAudioSampleRate;
 
 [[nodiscard]] LoudnessNormalizeOutcome failure(std::string message) {
   return LoudnessNormalizeOutcome::failure({.message = std::move(message)});
@@ -24,7 +25,8 @@ constexpr std::size_t kNormalizationBlockFrames = 960;
 LoudnessNormalizeOutcome compute_normalization_gain(
     const edit::TimelineSnapshot& snapshot,
     std::shared_ptr<const OriginalAudioProvider> originals,
-    const double target_lufs) {
+    const double target_lufs, const std::stop_token cancellation) {
+  media::install_quiet_ffmpeg_log_filter();
   const std::int64_t total_samples =
       snapshot.duration().rescaledTo(kTimelineAudioSampleRate, edit::RoundingMode::Ceil).value();
   if (total_samples <= 0) {
@@ -39,11 +41,16 @@ LoudnessNormalizeOutcome compute_normalization_gain(
   }
 
   for (std::int64_t start_sample = 0; start_sample < total_samples;) {
+    if (cancellation.stop_requested()) {
+      return failure("audio rendering failed: loudness analysis was cancelled");
+    }
     const auto remaining = total_samples - start_sample;
     const auto sample_count = static_cast<std::size_t>(
         std::min<std::int64_t>(remaining, static_cast<std::int64_t>(kNormalizationBlockFrames)));
     const auto rendered = renderer.render(
-        snapshot, {.start_sample = start_sample, .sample_count = sample_count, .cancellation = {}});
+        snapshot, {.start_sample = start_sample,
+                   .sample_count = sample_count,
+                   .cancellation = cancellation});
     if (!rendered) {
       return failure("audio rendering failed: " + rendered.error().message);
     }

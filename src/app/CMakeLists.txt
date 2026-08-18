@@ -41,7 +41,7 @@ target_link_libraries(
 set_target_properties(video_editor_app_controller PROPERTIES AUTOMOC ON)
 
 add_executable(video_editor main.cpp)
-target_link_libraries(video_editor PRIVATE video_editor_app_controller)
+target_link_libraries(video_editor PRIVATE video_editor_app_controller video_editor::media_codec)
 set_target_properties(video_editor PROPERTIES
   OUTPUT_NAME "VideoEditor"
   WIN32_EXECUTABLE ON)

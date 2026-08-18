@@ -457,6 +457,7 @@ open_session(const ResolvedAssetStream& source, const std::atomic<std::uint64_t>
   session->source = source;
   session->interrupt.current_epoch = &current_epoch;
   session->interrupt.request_epoch.store(request_epoch, std::memory_order_relaxed);
+  media::install_quiet_ffmpeg_log_filter();
   session->format.reset(avformat_alloc_context());
   if (!session->format) {
     return failure<std::unique_ptr<DecodeSession>>(render::RenderErrorCode::ProviderFailure,

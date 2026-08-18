@@ -11,6 +11,7 @@
 #include <fstream>
 #include <memory>
 #include <stdexcept>
+#include <stop_token>
 #include <string>
 #include <vector>
 
@@ -158,6 +159,17 @@ TEST(LoudnessNormalize, RespectsCustomTargetLufs) {
   ASSERT_TRUE(broadcast) << broadcast.error().message;
   ASSERT_TRUE(custom) << custom.error().message;
   EXPECT_NEAR(custom.value().gain_db - broadcast.value().gain_db, 5.0, 1e-12);
+}
+
+TEST(LoudnessNormalize, HonorsCancellation) {
+  const LoudnessFixture fixture;
+  std::stop_source source;
+  source.request_stop();
+  const auto result =
+      compute_normalization_gain(fixture.snapshot(), fixture.originals(), -23.0, source.get_token());
+
+  ASSERT_FALSE(result);
+  EXPECT_NE(result.error().message.find("cancelled"), std::string::npos);
 }
 
 } // namespace

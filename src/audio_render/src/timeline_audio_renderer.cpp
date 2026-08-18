@@ -405,6 +405,10 @@ decode_requested_samples(const OriginalAudioMedia& media,
     }
   };
 
+  constexpr unsigned kMaximumIdlePackets = 8'192U;
+  unsigned idle_packets = 0;
+  std::int64_t last_output_sample = next_output_sample;
+
   while (!beyond_requested_range && (status = av_read_frame(format.get(), packet.get())) >= 0) {
     if (is_cancelled(cancellation)) {
       return edit::Result<DecodedSamples, AudioRenderError>::failure(
@@ -422,9 +426,20 @@ decode_requested_samples(const OriginalAudioMedia& media,
       }
     }
     av_packet_unref(packet.get());
+    if (next_output_sample == last_output_sample) {
+      ++idle_packets;
+      if (idle_packets >= kMaximumIdlePackets) {
+        break;
+      }
+    } else {
+      idle_packets = 0;
+      last_output_sample = next_output_sample;
+    }
   }
   if (!beyond_requested_range) {
-    if (status != AVERROR_EOF && status < 0) {
+    const bool exhausted = status == AVERROR_EOF || status == AVERROR_INVALIDDATA ||
+                           status == AVERROR(EIO) || idle_packets >= kMaximumIdlePackets;
+    if (status != AVERROR_EOF && status < 0 && !exhausted) {
       const auto code = is_cancelled(cancellation) ? AudioRenderErrorCode::Cancelled
                                                    : AudioRenderErrorCode::DecodeFailed;
       return edit::Result<DecodedSamples, AudioRenderError>::failure(

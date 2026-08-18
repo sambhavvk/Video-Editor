@@ -487,6 +487,7 @@ private:
   bool audio_recovery_pending_{false};
   NormalizationCompletionGate normalization_completion_gate_;
   std::uint64_t active_normalization_generation_{0};
+  std::stop_source normalization_stop_source_;
   bool export_in_flight_{false};
   QNetworkAccessManager* transcription_network_{nullptr};
   QNetworkReply* model_download_reply_{nullptr};

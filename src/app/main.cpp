@@ -2,6 +2,7 @@
 #include "editor_controller.hpp"
 
 #include "video_editor/desktop_ui/editor_window.hpp"
+#include "video_editor/media_codec/runtime.h"
 
 #include <QApplication>
 #include <QCommandLineParser>
@@ -12,6 +13,7 @@
 #include <QTimer>
 
 int main(int argc, char* argv[]) {
+  video_editor::media::install_quiet_ffmpeg_log_filter();
   QApplication application(argc, argv);
   QCoreApplication::setOrganizationName(QStringLiteral("VideoEditor"));
   QCoreApplication::setOrganizationDomain(QStringLiteral("video-editor.local"));

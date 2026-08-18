@@ -4,8 +4,14 @@
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
+#include <libavutil/log.h>
 }
 
+#include <array>
+#include <cstdarg>
+#include <cstdio>
+#include <mutex>
+#include <string_view>
 #include <vector>
 
 namespace video_editor::media {
@@ -17,6 +23,37 @@ struct AttachmentTypeRestore {
 };
 
 } // namespace
+
+bool should_suppress_ffmpeg_log(const int level, const std::string_view message) noexcept {
+  if ((level & 0xff) > AV_LOG_WARNING || message.empty()) {
+    return false;
+  }
+  return message.find("Could not update timestamps for skipped samples") != std::string_view::npos ||
+         message.find("deprecated pixel format used") != std::string_view::npos;
+}
+
+namespace {
+
+void quiet_ffmpeg_log(void* pointer, const int level, const char* format, va_list arguments) {
+  if (format != nullptr) {
+    std::array<char, 512> buffer{};
+    va_list copied;
+    va_copy(copied, arguments);
+    const int written = vsnprintf(buffer.data(), buffer.size(), format, copied);
+    va_end(copied);
+    if (written > 0 && should_suppress_ffmpeg_log(level, buffer.data())) {
+      return;
+    }
+  }
+  av_log_default_callback(pointer, level, format, arguments);
+}
+
+} // namespace
+
+void install_quiet_ffmpeg_log_filter() {
+  static std::once_flag once;
+  std::call_once(once, [] { av_log_set_callback(quiet_ffmpeg_log); });
+}
 
 void apply_input_probe_options(AVFormatContext& context, const ProbeOptions& options) {
   context.probesize = options.probe_size_bytes;
