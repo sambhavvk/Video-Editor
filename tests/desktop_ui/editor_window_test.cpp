@@ -19,6 +19,7 @@
 #include <QListWidget>
 #include <QMouseEvent>
 #include <QProgressBar>
+#include <QPointer>
 #include <QPushButton>
 #include <QScrollBar>
 #include <QSettings>
@@ -29,6 +30,7 @@
 #include <QTest>
 #include <QToolBar>
 #include <QToolButton>
+#include <QWheelEvent>
 
 using video_editor::desktop_ui::EditorWindow;
 using video_editor::desktop_ui::TimelineClipView;
@@ -49,6 +51,7 @@ private slots:
   void mediaBinShowsProxyLifecycle();
   void audioMixerReflectsTrackState();
   void audioMixerDisplaysStableTrackMeters();
+  void audioMixerSetTracksKeepsStripsAliveForSameIds();
   void captionsPanelEmitsEditableCueActions();
   void captionsPanelExposesTranscriptionAndWordNavigation();
   void timelineVirtualizesAndSeeks();
@@ -385,6 +388,91 @@ void EditorWindowTest::audioMixerDisplaysStableTrackMeters() {
   QCOMPARE(reordered_dialogue->value(), 0);
   QVERIFY(!reordered_dialogue->isEnabled());
   QVERIFY(reordered_dialogue->toolTip().contains(QStringLiteral("inactive")));
+}
+
+void EditorWindowTest::audioMixerSetTracksKeepsStripsAliveForSameIds() {
+  video_editor::desktop_ui::AudioMixerWidget mixer;
+  QSignalSpy gainEdited(&mixer, &video_editor::desktop_ui::AudioMixerWidget::gainEdited);
+  QSignalSpy panEdited(&mixer, &video_editor::desktop_ui::AudioMixerWidget::panEdited);
+  QSignalSpy muteToggled(&mixer, &video_editor::desktop_ui::AudioMixerWidget::muteToggled);
+  QSignalSpy soloToggled(&mixer, &video_editor::desktop_ui::AudioMixerWidget::soloToggled);
+
+  mixer.setTracks({{.id = QStringLiteral("track-a"),
+                    .displayName = QStringLiteral("Dialogue"),
+                    .muted = false,
+                    .soloed = false,
+                    .gain_db = 0.0,
+                    .pan = 0.0},
+                   {.id = QStringLiteral("track-b"),
+                    .displayName = QStringLiteral("Music"),
+                    .muted = false,
+                    .soloed = false,
+                    .gain_db = 0.0,
+                    .pan = 0.0}});
+
+  auto* fader = mixer.findChild<QSlider*>(QStringLiteral("audioFader.0"));
+  auto* pan = mixer.findChild<QSlider*>(QStringLiteral("audioPan.0"));
+  auto* mute = mixer.findChild<QToolButton*>(QStringLiteral("mixerMute.0"));
+  auto* solo = mixer.findChild<QToolButton*>(QStringLiteral("mixerSolo.1"));
+  QVERIFY(fader != nullptr);
+  QVERIFY(pan != nullptr);
+  QVERIFY(mute != nullptr);
+  QVERIFY(solo != nullptr);
+  QPointer<QSlider> faderPtr(fader);
+  QPointer<QSlider> panPtr(pan);
+  QPointer<QToolButton> mutePtr(mute);
+  QPointer<QToolButton> soloPtr(solo);
+
+  mixer.setTracks({{.id = QStringLiteral("track-a"),
+                    .displayName = QStringLiteral("Dialogue"),
+                    .muted = true,
+                    .soloed = false,
+                    .gain_db = -6.0,
+                    .pan = -0.5},
+                   {.id = QStringLiteral("track-b"),
+                    .displayName = QStringLiteral("Music"),
+                    .muted = false,
+                    .soloed = true,
+                    .gain_db = 3.0,
+                    .pan = 0.25}});
+
+  QVERIFY(!faderPtr.isNull());
+  QVERIFY(!panPtr.isNull());
+  QVERIFY(!mutePtr.isNull());
+  QVERIFY(!soloPtr.isNull());
+  QCOMPARE(faderPtr->value(), -6);
+  QCOMPARE(panPtr->value(), -50);
+  QVERIFY(mutePtr->isChecked());
+  QVERIFY(soloPtr->isChecked());
+  QCOMPARE(gainEdited.count(), 0);
+  QCOMPARE(panEdited.count(), 0);
+  QCOMPARE(muteToggled.count(), 0);
+  QCOMPARE(soloToggled.count(), 0);
+
+  const QPointF localPos(faderPtr->width() / 2.0, faderPtr->height() / 2.0);
+  const QPointF globalPos = faderPtr->mapToGlobal(localPos.toPoint());
+  QWheelEvent wheel(localPos, globalPos, QPoint(0, 0), QPoint(0, 120), Qt::NoButton, Qt::NoModifier,
+                    Qt::ScrollUpdate, false);
+  QCoreApplication::sendEvent(faderPtr.data(), &wheel);
+
+  mixer.setTracks({{.id = QStringLiteral("track-a"),
+                    .displayName = QStringLiteral("Dialogue"),
+                    .muted = true,
+                    .soloed = false,
+                    .gain_db = -3.0,
+                    .pan = -0.25},
+                   {.id = QStringLiteral("track-b"),
+                    .displayName = QStringLiteral("Music"),
+                    .muted = false,
+                    .soloed = true,
+                    .gain_db = 6.0,
+                    .pan = 0.5}});
+  QVERIFY(!faderPtr.isNull());
+  QCOMPARE(faderPtr->value(), -3);
+  QCOMPARE(gainEdited.count(), 1);
+  QCOMPARE(panEdited.count(), 0);
+  QCOMPARE(muteToggled.count(), 0);
+  QCOMPARE(soloToggled.count(), 0);
 }
 
 void EditorWindowTest::audioMixerShowsSystemDefaultAndAuthoritativeLufsStates() {

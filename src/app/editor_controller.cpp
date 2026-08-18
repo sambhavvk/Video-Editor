@@ -2,6 +2,7 @@
 #include "editor_controller.hpp"
 #include "media_reconstruction.hpp"
 #include "path_utils.hpp"
+#include "session_event_log.hpp"
 #include "worker_host_session.hpp"
 
 #include "video_editor/audio_engine/async_realtime_playback.h"
@@ -1696,6 +1697,8 @@ void EditorController::importPaths(const QStringList& paths) {
   if (paths.isEmpty()) {
     return;
   }
+  SessionEventLog::instance().log_backend(
+      "importPaths", "count=" + std::to_string(static_cast<unsigned>(paths.size())));
   window_.showTransientMessage(tr("Importing %1 item(s)…").arg(paths.size()), 0);
   auto* watcher = new QFutureWatcher<std::vector<ImportOutcome>>(this);
   connect(watcher, &QFutureWatcher<std::vector<ImportOutcome>>::finished, this, [this, watcher] {
@@ -2455,6 +2458,8 @@ void EditorController::seek(const qint64 position) {
 }
 
 void EditorController::setPlaybackRate(const double rate) {
+  SessionEventLog::instance().log_backend("setPlaybackRate",
+                                           "rate=" + QString::number(rate, 'g', 6).toStdString());
   playback_rate_ = rate;
   if (std::abs(playback_rate_) < std::numeric_limits<double>::epsilon()) {
     audio_recovery_pending_ = false;
@@ -4550,6 +4555,7 @@ void EditorController::analyzeLoudnessNormalization() {
     return review;
   });
   normalization_watcher_.setFuture(normalization_future_);
+  SessionEventLog::instance().log_backend("analyzeLoudnessNormalization", "start");
 }
 
 void EditorController::applyLoudnessNormalization() {
@@ -4637,8 +4643,10 @@ void EditorController::persistSnapshot(const std::string_view reason) {
 }
 
 bool EditorController::apply(edit::EditCommand command, const QString& failureContext) {
+  const std::string operation = edit::commandName(command);
   const auto result = editor_->apply(std::move(command), editor_->revision());
   if (!result) {
+    SessionEventLog::instance().log_backend("apply", "failure op=" + operation);
     window_.showTransientMessage(QStringLiteral("%1: %2").arg(
         failureContext, QString::fromStdString(result.error().message)));
     return false;
@@ -4657,6 +4665,7 @@ bool EditorController::apply(edit::EditCommand command, const QString& failureCo
   }
   setDirty(true);
   refreshViews();
+  SessionEventLog::instance().log_backend("apply", "success op=" + operation);
   return true;
 }
 
@@ -4665,6 +4674,7 @@ bool EditorController::applyBatch(std::vector<edit::EditCommand> commands,
   if (commands.empty()) {
     return true;
   }
+  const std::size_t command_count = commands.size();
   const std::string batch_key = "batch:" + edit::EntityId::generate().toString();
   for (edit::EditCommand& command : commands) {
     command.coalescing_key = batch_key;
@@ -4672,6 +4682,8 @@ bool EditorController::applyBatch(std::vector<edit::EditCommand> commands,
   const auto result =
       editor_->applyBatch(std::move(commands), editor_->revision(), "Timeline batch", batch_key);
   if (!result) {
+    SessionEventLog::instance().log_backend("applyBatch",
+                                            "failure count=" + std::to_string(command_count));
     window_.showTransientMessage(QStringLiteral("%1: %2").arg(
         failureContext, QString::fromStdString(result.error().message)));
     refreshViews();
@@ -4691,6 +4703,8 @@ bool EditorController::applyBatch(std::vector<edit::EditCommand> commands,
   }
   setDirty(true);
   refreshViews();
+  SessionEventLog::instance().log_backend("applyBatch",
+                                          "success count=" + std::to_string(command_count));
   return true;
 }
 
@@ -5577,6 +5591,7 @@ bool EditorController::startAudioMasterPlayback() {
       window_.showTransientMessage(
           tr("The realtime audio-device adapter is unavailable; playback will be silent"), 8'000);
     }
+    SessionEventLog::instance().log_backend("startAudioMasterPlayback", "failure unavailable");
     return false;
   }
 
@@ -5592,6 +5607,7 @@ bool EditorController::startAudioMasterPlayback() {
       audio_control_intent_ = AudioControlIntent::None;
       audio_command_version_ = 0;
       audio_start_pending_ = true;
+      SessionEventLog::instance().log_backend("startAudioMasterPlayback", "success restart");
       return true;
     }
     audio_playback_.reset();
@@ -5599,6 +5615,7 @@ bool EditorController::startAudioMasterPlayback() {
 
   auto snapshot_result = editor_->snapshot(sequence->id, editor_->revision());
   if (!snapshot_result) {
+    SessionEventLog::instance().log_backend("startAudioMasterPlayback", "failure snapshot");
     return false;
   }
 
@@ -5609,6 +5626,7 @@ bool EditorController::startAudioMasterPlayback() {
             .rescaledTo(audio::kPlaybackAudioFormat.sample_rate, edit::RoundingMode::Ceil)
             .value();
     if (playhead_ < 0 || playhead_ >= end_sample) {
+      SessionEventLog::instance().log_backend("startAudioMasterPlayback", "failure playhead");
       return false;
     }
 
@@ -5635,6 +5653,7 @@ bool EditorController::startAudioMasterPlayback() {
             tr("Could not start realtime audio; using silent timer playback: %1").arg(failure),
             8'000);
       }
+      SessionEventLog::instance().log_backend("startAudioMasterPlayback", "failure start");
       return false;
     }
 
@@ -5646,6 +5665,7 @@ bool EditorController::startAudioMasterPlayback() {
     audio_control_intent_ = AudioControlIntent::Start;
     audio_command_version_ = receipt.version;
     last_audio_xrun_count_ = 0;
+    SessionEventLog::instance().log_backend("startAudioMasterPlayback", "success");
     return true;
   } catch (const std::exception& exception) {
     if (!audio_fallback_announced_) {
@@ -5655,6 +5675,7 @@ bool EditorController::startAudioMasterPlayback() {
               .arg(QString::fromUtf8(exception.what())),
           8'000);
     }
+    SessionEventLog::instance().log_backend("startAudioMasterPlayback", "failure exception");
     return false;
   }
 }

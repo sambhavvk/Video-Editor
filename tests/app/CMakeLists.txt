@@ -26,6 +26,20 @@ set_tests_properties(app.import_edit_undo PROPERTIES
   ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
   TIMEOUT ${VIDEO_EDITOR_APP_TEST_TIMEOUT})
 
+add_executable(video_editor_session_event_log_tests session_event_log_test.cpp)
+target_compile_features(video_editor_session_event_log_tests PRIVATE cxx_std_20)
+target_link_libraries(video_editor_session_event_log_tests
+  PRIVATE
+    video_editor_app_controller
+    video_editor::project_warnings
+    Qt6::Test
+    Qt6::Widgets)
+set_target_properties(video_editor_session_event_log_tests PROPERTIES AUTOMOC ON CXX_EXTENSIONS OFF)
+add_test(NAME app.session_event_log COMMAND video_editor_session_event_log_tests)
+set_tests_properties(app.session_event_log PROPERTIES
+  ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+  TIMEOUT ${VIDEO_EDITOR_APP_TEST_TIMEOUT})
+
 add_executable(video_editor_app_fault_injection_tests fault_injection_test.cpp)
 target_compile_features(video_editor_app_fault_injection_tests PRIVATE cxx_std_20)
 target_link_libraries(video_editor_app_fault_injection_tests

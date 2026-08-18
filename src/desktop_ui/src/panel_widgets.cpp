@@ -1176,20 +1176,161 @@ AudioMixerWidget::AudioMixerWidget(QWidget* parent) : QWidget(parent) {
   setTracks({});
 }
 
-void AudioMixerWidget::setTrackNames(const QStringList& names) {
-  QVector<AudioTrackView> tracks;
-  tracks.reserve(names.size());
-  for (const QString& name : names) {
-    tracks.push_back({.id = {}, .displayName = name, .effects = {}});
+namespace {
+
+bool effectsMatchStructure(const QVector<AudioTrackView::Effect>& left,
+                           const QVector<AudioTrackView::Effect>& right) {
+  if (left.size() != right.size()) {
+    return false;
   }
-  setTracks(tracks);
+  for (int index = 0; index < left.size(); ++index) {
+    if (left.at(index).id != right.at(index).id) {
+      return false;
+    }
+    const auto& leftParameters = left.at(index).parameters;
+    const auto& rightParameters = right.at(index).parameters;
+    if (leftParameters.size() != rightParameters.size()) {
+      return false;
+    }
+    for (int parameterIndex = 0; parameterIndex < leftParameters.size(); ++parameterIndex) {
+      if (leftParameters.at(parameterIndex).id != rightParameters.at(parameterIndex).id) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
-void AudioMixerWidget::setTracks(const QVector<AudioTrackView>& tracks) {
-  delete strips_->layout();
-  const auto children = strips_->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly);
-  qDeleteAll(children);
+void updatePanLabel(QLabel* panLabel, const int panValue) {
+  if (panValue == 0) {
+    panLabel->setText(QObject::tr("C"));
+  } else if (panValue < 0) {
+    panLabel->setText(QStringLiteral("L%1").arg(std::abs(panValue)));
+  } else {
+    panLabel->setText(QStringLiteral("R%1").arg(panValue));
+  }
+}
 
+void discardMixerStripWidget(QWidget* widget) {
+  widget->hide();
+  widget->setObjectName(QString{});
+  if (widget->property("trackId").isValid()) {
+    widget->setProperty("trackId", QVariant{});
+  }
+  for (QObject* child : widget->children()) {
+    if (auto* childWidget = qobject_cast<QWidget*>(child)) {
+      discardMixerStripWidget(childWidget);
+    }
+  }
+  widget->deleteLater();
+}
+
+}  // namespace
+
+bool AudioMixerWidget::canUpdateStripsInPlace(const QVector<AudioTrackView>& tracks) const {
+  if (tracks.size() != tracks_.size()) {
+    return false;
+  }
+  if (tracks.isEmpty()) {
+    return strips_->findChild<QLabel*>(QStringLiteral("mixerEmptyState"),
+                                       Qt::FindDirectChildrenOnly) != nullptr;
+  }
+  if (strips_->findChild<QLabel*>(QStringLiteral("mixerEmptyState"),
+                                   Qt::FindDirectChildrenOnly) != nullptr) {
+    return false;
+  }
+  for (int index = 0; index < tracks.size(); ++index) {
+    if (tracks.at(index).id != tracks_.at(index).id) {
+      return false;
+    }
+    if (!effectsMatchStructure(tracks.at(index).effects, tracks_.at(index).effects)) {
+      return false;
+    }
+    auto* strip =
+        strips_->findChild<QGroupBox*>(QStringLiteral("mixerStrip.%1").arg(index),
+                                       Qt::FindDirectChildrenOnly);
+    if (strip == nullptr) {
+      return false;
+    }
+    auto* meter = strip->findChild<QProgressBar*>(QStringLiteral("audioMeter.%1").arg(index));
+    if (meter == nullptr || meter->property("trackId").toString() != tracks.at(index).id) {
+      return false;
+    }
+  }
+  return strips_->findChild<QGroupBox*>(QStringLiteral("mixerStrip.%1").arg(tracks.size()),
+                                        Qt::FindDirectChildrenOnly) == nullptr;
+}
+
+void AudioMixerWidget::updateStripsInPlace(const QVector<AudioTrackView>& tracks) {
+  for (int index = 0; index < tracks.size(); ++index) {
+    const AudioTrackView& track = tracks.at(index);
+    auto* strip = strips_->findChild<QGroupBox*>(QStringLiteral("mixerStrip.%1").arg(index));
+    strip->setTitle(track.displayName);
+
+    auto* fader = strip->findChild<QSlider*>(QStringLiteral("audioFader.%1").arg(index));
+    auto* gainLabel = strip->findChild<QLabel*>(QStringLiteral("mixerGainValue.%1").arg(index));
+    auto* pan = strip->findChild<QSlider*>(QStringLiteral("audioPan.%1").arg(index));
+    auto* panLabel = strip->findChild<QLabel*>(QStringLiteral("mixerPanValue.%1").arg(index));
+    auto* mute = strip->findChild<QToolButton*>(QStringLiteral("mixerMute.%1").arg(index));
+    auto* solo = strip->findChild<QToolButton*>(QStringLiteral("mixerSolo.%1").arg(index));
+
+    const int gainValue = static_cast<int>(std::round(track.gain_db));
+    {
+      const QSignalBlocker blocker(fader);
+      fader->setValue(gainValue);
+    }
+    gainLabel->setText(QStringLiteral("%1 dB").arg(track.gain_db, 0, 'f', 1));
+
+    const int panValue = static_cast<int>(std::round(track.pan * 100.0));
+    {
+      const QSignalBlocker blocker(pan);
+      pan->setValue(panValue);
+    }
+    updatePanLabel(panLabel, panValue);
+
+    {
+      const QSignalBlocker muteBlocker(mute);
+      mute->setChecked(track.muted);
+    }
+    {
+      const QSignalBlocker soloBlocker(solo);
+      solo->setChecked(track.soloed);
+    }
+
+    for (const auto& effect : track.effects) {
+      for (const auto& parameter : effect.parameters) {
+        auto* spin = strip->findChild<QDoubleSpinBox*>(QStringLiteral("trackEffectParameter.%1.%2.%3")
+                                                           .arg(index)
+                                                           .arg(effect.id)
+                                                           .arg(parameter.id));
+        if (spin == nullptr) {
+          continue;
+        }
+        const QSignalBlocker blocker(spin);
+        spin->setValue(parameter.value.toDouble());
+      }
+    }
+  }
+}
+
+void AudioMixerWidget::discardStripWidgets() {
+  if (QLayout* layout = strips_->layout()) {
+    while (QLayoutItem* item = layout->takeAt(0)) {
+      if (QWidget* widget = item->widget()) {
+        discardMixerStripWidget(widget);
+      }
+      delete item;
+    }
+    delete layout;
+    return;
+  }
+  const auto children = strips_->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly);
+  for (QWidget* child : children) {
+    discardMixerStripWidget(child);
+  }
+}
+
+void AudioMixerWidget::buildStrips(const QVector<AudioTrackView>& tracks) {
   auto* layout = new QHBoxLayout(strips_);
   layout->setContentsMargins(0, 0, 0, 0);
   layout->setSpacing(8);
@@ -1378,6 +1519,34 @@ void AudioMixerWidget::setTracks(const QVector<AudioTrackView>& tracks) {
     layout->addWidget(strip);
   }
   layout->addStretch();
+}
+
+void AudioMixerWidget::rebuildStrips(const QVector<AudioTrackView>& tracks) {
+  discardStripWidgets();
+  buildStrips(tracks);
+}
+
+void AudioMixerWidget::setTrackNames(const QStringList& names) {
+  QVector<AudioTrackView> tracks;
+  tracks.reserve(names.size());
+  for (const QString& name : names) {
+    tracks.push_back({.id = {}, .displayName = name, .effects = {}});
+  }
+  setTracks(tracks);
+}
+
+void AudioMixerWidget::setTracks(const QVector<AudioTrackView>& tracks) {
+  if (canUpdateStripsInPlace(tracks)) {
+    if (tracks.isEmpty()) {
+      tracks_ = tracks;
+      return;
+    }
+    updateStripsInPlace(tracks);
+    tracks_ = tracks;
+    return;
+  }
+  rebuildStrips(tracks);
+  tracks_ = tracks;
 }
 
 void AudioMixerWidget::setMeterLevels(const int trackIndex, const QVector<float>& peakDbfs) {

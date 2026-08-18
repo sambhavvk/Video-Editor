@@ -8,6 +8,8 @@ add_library(video_editor_app_controller
   media_reconstruction.cpp
   media_reconstruction.hpp
   path_utils.hpp
+  session_event_log.cpp
+  session_event_log.hpp
   worker_host_session.cpp
   worker_host_session.hpp)
 

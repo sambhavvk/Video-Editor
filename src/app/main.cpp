@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "editor_controller.hpp"
+#include "path_utils.hpp"
+#include "session_event_log.hpp"
 
 #include "video_editor/desktop_ui/editor_window.hpp"
 #include "video_editor/media_codec/runtime.h"
@@ -9,6 +11,7 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QIcon>
+#include <QMessageBox>
 #include <QPixmap>
 #include <QTimer>
 
@@ -19,6 +22,10 @@ int main(int argc, char* argv[]) {
   QCoreApplication::setOrganizationDomain(QStringLiteral("video-editor.local"));
   QCoreApplication::setApplicationName(QStringLiteral("VideoEditor"));
   QCoreApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+
+  video_editor::app::SessionEventLog::install_crash_handlers();
+  const auto previous_crash_log = video_editor::app::SessionEventLog::take_previous_crash_log();
+  video_editor::app::SessionEventLog::instance().start();
 
   QCommandLineParser parser;
   parser.setApplicationDescription(
@@ -39,6 +46,14 @@ int main(int argc, char* argv[]) {
   video_editor::app::EditorController controller(window);
   window.show();
   if (!parser.isSet(screenshot_option)) {
+    if (previous_crash_log.has_value()) {
+      QMessageBox::warning(
+          &window, QStringLiteral("Video Editor"),
+          QObject::tr("Video Editor closed unexpectedly during the last session.\n\n"
+                      "A session log was saved at:\n%1\n\n"
+                      "Please check or attach this log if you report the issue.")
+              .arg(video_editor::app::qStringFromPath(*previous_crash_log)));
+    }
     (void)controller.offerRecoveryOnStartup();
   }
   const QStringList positional = parser.positionalArguments();
@@ -57,5 +72,7 @@ int main(int argc, char* argv[]) {
       application.exit(window.grab().save(screenshot_path) ? 0 : 2);
     });
   }
-  return application.exec();
+  const int exit_code = application.exec();
+  video_editor::app::SessionEventLog::instance().shutdown();
+  return exit_code;
 }

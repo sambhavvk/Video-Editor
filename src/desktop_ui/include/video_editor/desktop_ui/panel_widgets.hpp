@@ -202,6 +202,12 @@ signals:
   void normalizationTargetChanged(double targetLufs);
 
 private:
+  [[nodiscard]] bool canUpdateStripsInPlace(const QVector<AudioTrackView>& tracks) const;
+  void updateStripsInPlace(const QVector<AudioTrackView>& tracks);
+  void rebuildStrips(const QVector<AudioTrackView>& tracks);
+  void buildStrips(const QVector<AudioTrackView>& tracks);
+  void discardStripWidgets();
+
   QWidget* strips_{nullptr};
   QLabel* master_peak_{nullptr};
   QLabel* master_rms_{nullptr};
@@ -212,6 +218,7 @@ private:
   QPushButton* normalization_analyze_{nullptr};
   QPushButton* normalization_apply_{nullptr};
   QDoubleSpinBox* normalization_target_{nullptr};
+  QVector<AudioTrackView> tracks_;
 };
 
 class CaptionsPanelWidget final : public QWidget {
