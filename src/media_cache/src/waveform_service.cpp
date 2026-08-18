@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "video_editor/media_cache/waveform_service.h"
+#include "video_editor/media_codec/format_open.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -612,6 +613,7 @@ WaveformResult<Waveform> generate_waveform(const std::filesystem::path& asset_ur
       fail(WaveformErrorCode::Internal, "cannot allocate an input format context", AVERROR(ENOMEM));
     }
     raw_input->interrupt_callback = {.callback = interrupt_callback, .opaque = &interrupt};
+    media::apply_input_probe_options(*raw_input);
     const std::string path = native_path(asset_uri);
     const int open_result = avformat_open_input(&raw_input, path.c_str(), nullptr, nullptr);
     InputFormat input(raw_input); // takes ownership regardless of open result
@@ -619,7 +621,7 @@ WaveformResult<Waveform> generate_waveform(const std::filesystem::path& asset_ur
       check_cancelled(cancellation);
       require_ffmpeg(open_result, WaveformErrorCode::OpenFailed, "open waveform source");
     }
-    const int stream_info_result = avformat_find_stream_info(input.get(), nullptr);
+    const int stream_info_result = media::inspect_input_streams(*input);
     if (stream_info_result < 0) {
       check_cancelled(cancellation);
       require_ffmpeg(stream_info_result, WaveformErrorCode::OpenFailed,

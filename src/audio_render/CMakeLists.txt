@@ -34,6 +34,7 @@ target_link_libraries(
     video_editor::project_options
   PRIVATE
     video_editor::project_warnings
+    video_editor::media_codec
     PkgConfig::AUDIO_RENDER_AVFORMAT
     PkgConfig::AUDIO_RENDER_AVCODEC
     PkgConfig::AUDIO_RENDER_AVUTIL

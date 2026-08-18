@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "video_editor/proxy_service/proxy_service.h"
+#include "video_editor/media_codec/format_open.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -786,6 +787,7 @@ private:
       fail(ErrorCode::Internal, "cannot allocate an input format context", AVERROR(ENOMEM));
     }
     raw_input->interrupt_callback = {.callback = interrupt_callback, .opaque = &interrupt_};
+    media::apply_input_probe_options(*raw_input);
     const std::string path = native_path(request_.source);
     const int open_result = avformat_open_input(&raw_input, path.c_str(), nullptr, nullptr);
     input_.reset(raw_input);
@@ -793,7 +795,7 @@ private:
       check_cancelled(cancellation_);
       require_ffmpeg(open_result, ErrorCode::OpenFailed, "open proxy source");
     }
-    const int stream_info_result = avformat_find_stream_info(input_.get(), nullptr);
+    const int stream_info_result = media::inspect_input_streams(*input_);
     if (stream_info_result < 0) {
       check_cancelled(cancellation_);
       require_ffmpeg(stream_info_result, ErrorCode::OpenFailed, "inspect proxy source streams");

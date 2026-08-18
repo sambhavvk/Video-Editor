@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "video_editor/playback/ffmpeg_frame_provider.h"
+#include "video_editor/media_codec/format_open.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -463,6 +464,7 @@ open_session(const ResolvedAssetStream& source, const std::atomic<std::uint64_t>
   }
   session->format->interrupt_callback = {.callback = interrupt_callback,
                                          .opaque = &session->interrupt};
+  media::apply_input_probe_options(*session->format);
 
   AVFormatContext* raw_format = session->format.release();
   const std::string path = source.location.path.string();
@@ -475,7 +477,7 @@ open_session(const ResolvedAssetStream& source, const std::atomic<std::uint64_t>
         ffmpeg_message("cannot open playback media", open_result));
   }
 
-  const int information_result = avformat_find_stream_info(session->format.get(), nullptr);
+  const int information_result = media::inspect_input_streams(*session->format);
   if (information_result < 0) {
     return failure<std::unique_ptr<DecodeSession>>(
         stale(*session) ? render::RenderErrorCode::StaleRequest

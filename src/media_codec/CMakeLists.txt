@@ -48,6 +48,7 @@ set_property(TARGET PkgConfig::SWRESAMPLE PROPERTY IMPORTED_GLOBAL TRUE)
 set_property(TARGET PkgConfig::SWSCALE PROPERTY IMPORTED_GLOBAL TRUE)
 
 add_library(video_editor_media_codec
+  src/format_open.cpp
   src/probe.cpp
   src/runtime.cpp
   src/encoder_capabilities.cpp)

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "video_editor/transcription_service/transcription_service.h"
+#include "video_editor/media_codec/format_open.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -79,7 +80,12 @@ public:
       return Result<AudioData>::failure(
           failure(ErrorCode::InvalidInput, "invalid audio transcription source range"));
     }
-    AVFormatContext* raw_format = nullptr;
+    AVFormatContext* raw_format = avformat_alloc_context();
+    if (raw_format == nullptr) {
+      return Result<AudioData>::failure(
+          failure(ErrorCode::AudioDecodeFailed, "cannot allocate audio input format context"));
+    }
+    media::apply_input_probe_options(*raw_format);
     const std::string path = utf8_path(input);
     int status = avformat_open_input(&raw_format, path.c_str(), nullptr, nullptr);
     if (status < 0 || raw_format == nullptr) {
@@ -87,7 +93,7 @@ public:
           failure(ErrorCode::AudioDecodeFailed, "cannot open audio input", status));
     }
     Format format(raw_format);
-    status = avformat_find_stream_info(format.get(), nullptr);
+    status = media::inspect_input_streams(*format);
     if (status < 0) {
       return Result<AudioData>::failure(
           failure(ErrorCode::AudioDecodeFailed, "cannot inspect audio input", status));

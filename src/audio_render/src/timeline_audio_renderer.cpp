@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "video_editor/audio_render/timeline_audio_renderer.h"
 #include "video_editor/audio_render/track_dsp_chain.h"
+#include "video_editor/media_codec/format_open.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -206,6 +207,7 @@ decode_requested_samples(const OriginalAudioMedia& media,
         AudioRenderErrorCode::CannotOpenMedia, "could not allocate an FFmpeg format context"));
   }
   raw_format->interrupt_callback = {.callback = interrupt_requested, .opaque = &interrupt};
+  media::apply_input_probe_options(*raw_format);
 
   const std::string encoded_path = path_utf8(media.path);
   int status = avformat_open_input(&raw_format, encoded_path.c_str(), nullptr, nullptr);
@@ -220,7 +222,7 @@ decode_requested_samples(const OriginalAudioMedia& media,
   }
   FormatPtr format(raw_format);
 
-  status = avformat_find_stream_info(format.get(), nullptr);
+  status = media::inspect_input_streams(*format);
   if (status < 0) {
     const auto code = is_cancelled(cancellation) ? AudioRenderErrorCode::Cancelled
                                                  : AudioRenderErrorCode::CannotOpenMedia;

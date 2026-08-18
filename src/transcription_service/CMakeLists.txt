@@ -41,6 +41,7 @@ target_link_libraries(video_editor_transcription_service
          VideoEditor::EditModel
          video_editor::job_service
   PRIVATE video_editor::project_warnings
+          video_editor::media_codec
           OpenSSL::Crypto)
 
 target_link_libraries(video_editor_transcription_service PRIVATE

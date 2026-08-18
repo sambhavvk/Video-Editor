@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MPL-2.0
+#include "video_editor/media_codec/format_open.h"
 #include "video_editor/media_codec/probe.h"
 
 extern "C" {
@@ -210,8 +211,7 @@ Result<AssetDescriptor> probe(const std::filesystem::path& uri, const ProbeOptio
   FormatContextPtr context(raw_context);
   context->interrupt_callback = {.callback = interrupt_callback,
                                  .opaque = const_cast<std::atomic_bool*>(options.cancel)};
-  context->probesize = options.probe_size_bytes;
-  context->max_analyze_duration = options.analyze_duration_microseconds;
+  apply_input_probe_options(*context, options);
 
   AVFormatContext* opened_context = context.release();
   const std::string path = uri.string();
@@ -224,7 +224,7 @@ Result<AssetDescriptor> probe(const std::filesystem::path& uri, const ProbeOptio
         cancelled ? "media probe cancelled" : "cannot open media"));
   }
 
-  const int stream_result = avformat_find_stream_info(context.get(), nullptr);
+  const int stream_result = inspect_input_streams(*context);
   if (stream_result < 0) {
     const bool cancelled = options.cancel != nullptr && options.cancel->load();
     return Result<AssetDescriptor>::failure(make_error(
