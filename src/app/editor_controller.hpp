@@ -85,6 +85,16 @@ evaluateAudioDevicePoll(std::span<const audio::AudioDeviceInfo> previous,
                         std::span<const audio::AudioDeviceInfo> current,
                         std::string_view selected_id) noexcept;
 
+enum class AudioMixerOutputStatus : std::uint8_t {
+  BackendMissing,
+  SelectedUnavailable,
+  Ready,
+};
+
+// System default can open even when enumeration returns no named devices.
+[[nodiscard]] AudioMixerOutputStatus audioMixerOutputStatus(bool backend_available,
+                                                            bool selected_lost) noexcept;
+
 // Maps asset-relative transcription words into the selected clip's timeline range. Words are
 // clipped to the source range and returned in playback order, including for reversed clips.
 [[nodiscard]] std::vector<edit::CaptionWord>

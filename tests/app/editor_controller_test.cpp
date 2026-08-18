@@ -135,6 +135,7 @@ private slots:
   void audioDevicePollSteadyConnectedIsNotRecovered();
   void audioDevicePollLossReturnAndDelayedStopAreRetryable();
   void audioDevicePollPauseCancelsRecoveryIntent();
+  void audioMixerKeepsSystemDefaultWhenEnumerationIsEmpty();
   void normalizationGenerationRejectsObsoleteCompletionAndClearsBusy();
   void mapsAndClampsReversedTranscriptWordsInPlaybackOrder();
   void rejectsOversizedModelDownloadBoundaries();
@@ -202,6 +203,10 @@ void EditorControllerTest::audioDevicePollSteadyConnectedIsNotRecovered() {
   const auto defaultStillMissing = evaluateAudioDevicePoll(alternate, alternate, {});
   QVERIFY(defaultStillMissing.default_missing);
   QVERIFY(!defaultStillMissing.default_recovered);
+
+  const std::vector<AudioDeviceInfo> none{};
+  const auto emptyListKeepsDefault = evaluateAudioDevicePoll(none, none, {});
+  QVERIFY(!emptyListKeepsDefault.default_missing);
 }
 
 void EditorControllerTest::audioDevicePollLossReturnAndDelayedStopAreRetryable() {
@@ -230,6 +235,14 @@ void EditorControllerTest::audioDevicePollPauseCancelsRecoveryIntent() {
     recovery_pending = false;
   }
   QVERIFY(!recovery_pending);
+}
+
+void EditorControllerTest::audioMixerKeepsSystemDefaultWhenEnumerationIsEmpty() {
+  using video_editor::app::AudioMixerOutputStatus;
+  using video_editor::app::audioMixerOutputStatus;
+  QCOMPARE(audioMixerOutputStatus(false, false), AudioMixerOutputStatus::BackendMissing);
+  QCOMPARE(audioMixerOutputStatus(true, true), AudioMixerOutputStatus::SelectedUnavailable);
+  QCOMPARE(audioMixerOutputStatus(true, false), AudioMixerOutputStatus::Ready);
 }
 
 void EditorControllerTest::normalizationGenerationRejectsObsoleteCompletionAndClearsBusy() {

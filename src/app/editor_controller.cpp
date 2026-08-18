@@ -94,9 +94,20 @@ evaluateAudioDevicePoll(const std::span<const audio::AudioDeviceInfo> previous,
             .default_recovered = false};
   }
   return {.selected_missing = false,
-          .default_missing = !has_default(current),
+          .default_missing = !current.empty() && !has_default(current),
           .selected_recovered = false,
           .default_recovered = has_default(current) && !has_default(previous)};
+}
+
+AudioMixerOutputStatus audioMixerOutputStatus(const bool backend_available,
+                                              const bool selected_lost) noexcept {
+  if (!backend_available) {
+    return AudioMixerOutputStatus::BackendMissing;
+  }
+  if (selected_lost) {
+    return AudioMixerOutputStatus::SelectedUnavailable;
+  }
+  return AudioMixerOutputStatus::Ready;
 }
 
 std::vector<edit::CaptionWord> mapTranscriptionWordsToTimeline(
@@ -938,10 +949,21 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
             names.push_back(QString::fromStdString(device.name));
           }
         }
-        const bool available = audio::MiniaudioOutputDevice::available() && !ids.isEmpty();
-        const QString status =
-            available ? (selectedLost ? tr("Selected device unavailable") : tr("Ready"))
-                      : tr("No output device available");
+        const bool backend = audio::MiniaudioOutputDevice::available();
+        const auto presentation = audioMixerOutputStatus(backend, selectedLost);
+        const bool available = presentation != AudioMixerOutputStatus::BackendMissing;
+        QString status;
+        switch (presentation) {
+        case AudioMixerOutputStatus::BackendMissing:
+          status = tr("Realtime audio backend was not built into this executable");
+          break;
+        case AudioMixerOutputStatus::SelectedUnavailable:
+          status = tr("Selected device unavailable");
+          break;
+        case AudioMixerOutputStatus::Ready:
+          status = tr("Ready");
+          break;
+        }
         window_.audioMixer()->setOutputDevices(ids, names, selected_audio_device_id_, available,
                                                status);
       });

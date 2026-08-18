@@ -1079,6 +1079,19 @@ TEST(MiniaudioOutputDevice, UnavailableBuildReportsTypedFallbackWithoutOpeningHa
   EXPECT_FALSE(device.is_open());
 }
 
+TEST(MiniaudioDeviceEnumerator, EnumerateSucceedsOrReturnsEmptyWithoutThrowing) {
+  MiniaudioDeviceEnumerator enumerator;
+  const auto devices = enumerator.enumerate();
+  if (!MiniaudioOutputDevice::available()) {
+    EXPECT_TRUE(devices.empty());
+    return;
+  }
+  for (const auto& device : devices) {
+    EXPECT_FALSE(device.id.empty());
+    EXPECT_TRUE(device.id.starts_with("miniaudio:"));
+  }
+}
+
 TEST(Dsp, AppliesGainPanAndLimiterDeterministically) {
   AudioBlock block({.sample_rate = 48'000, .channels = 2}, 0, 1);
   block.channel(0)[0] = 2.0F;

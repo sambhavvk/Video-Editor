@@ -156,8 +156,10 @@ AudioDeviceResult MiniaudioOutputDevice::open(const AudioDeviceConfiguration& co
   impl_->context_initialized = true;
   ma_device_info* devices = nullptr;
   ma_uint32 device_count = 0;
-  if (ma_context_get_devices(&impl_->native_context, &devices, &device_count, nullptr, nullptr) !=
-      MA_SUCCESS) {
+  const bool enumerated =
+      ma_context_get_devices(&impl_->native_context, &devices, &device_count, nullptr, nullptr) ==
+      MA_SUCCESS;
+  if (!enumerated && !configuration.device_id.empty()) {
     close();
     return AudioDeviceResult::failure(AudioDeviceErrorCode::Unavailable,
                                       "could not enumerate miniaudio playback devices");
