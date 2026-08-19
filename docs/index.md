@@ -29,6 +29,8 @@ slice but do not imply that the other beta areas in the status matrix are finish
 
 Choose a starting point:
 
+- [Linux beta tester guide](../BETA-TEST-LINUX.md) — source build, session logger (what is stored
+  locally), and how to report issues. This beta is Linux exclusive.
 - [User guide](user-guide.md) — workflows that can be used in the current desktop build, current
   shortcuts, and visible limitations.
 - [Beta feature status](beta-feature-status.md) — implemented, partial, missing, and intentionally

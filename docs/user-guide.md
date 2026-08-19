@@ -38,6 +38,8 @@ often and keep the original media files available.
 - Project and internal schema compatibility are pre-beta and may change through migrations.
 
 See the [full status matrix](beta-feature-status.md) before relying on a capability.
+Linux testers: [beta tester guide](../BETA-TEST-LINUX.md) covers the local session logger and how
+to build from source.
 
 ## Workspaces
 
