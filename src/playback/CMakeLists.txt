@@ -29,6 +29,7 @@ target_link_libraries(
     video_editor_media_codec
     video_editor_render_engine
     video_editor_edit_model
+    video_editor::proxy_service
     video_editor::project_options
   PRIVATE
     video_editor::project_warnings

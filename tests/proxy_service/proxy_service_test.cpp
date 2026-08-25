@@ -341,6 +341,49 @@ TEST(ProxyPtsMap, RejectsCorruptAndFutureData) {
   EXPECT_EQ(future_result.error().code, ErrorCode::InvalidPtsMap);
 }
 
+TEST(ProxyPtsLookup, FindsFramesBySourceAndProxyPts) {
+  StreamPtsMap stream{
+      .source_stream_index = 0,
+      .proxy_stream_index = 0,
+      .source_time_base = {1, 25},
+      .proxy_time_base = {1, 25},
+      .source_origin_pts = 100,
+      .frames = {{.source_pts = 100,
+                  .source_duration = 25,
+                  .proxy_pts = 0,
+                  .proxy_duration = 25},
+                 {.source_pts = 125,
+                  .source_duration = 25,
+                  .proxy_pts = 25,
+                  .proxy_duration = 25},
+                 {.source_pts = 150,
+                  .source_duration = 25,
+                  .proxy_pts = 50,
+                  .proxy_duration = 25}},
+  };
+  const PtsMap map{.source_fingerprint = {}, .streams = {stream}};
+
+  ASSERT_NE(stream_pts_map(map, 0), nullptr);
+  ASSERT_NE(stream_pts_map(map, -1), nullptr);
+  EXPECT_EQ(*stream_pts_map(map, -1), stream);
+
+  const auto first = lookup_frame_by_source_pts(stream, 110);
+  ASSERT_TRUE(first.has_value());
+  EXPECT_EQ(first->source_pts, 100);
+  EXPECT_EQ(first->proxy_pts, 0);
+
+  const auto second = lookup_frame_by_source_pts(stream, 149);
+  ASSERT_TRUE(second.has_value());
+  EXPECT_EQ(second->source_pts, 125);
+
+  EXPECT_FALSE(lookup_frame_by_source_pts(stream, 99).has_value());
+  EXPECT_FALSE(lookup_frame_by_source_pts(stream, 175).has_value());
+
+  const auto by_proxy = lookup_frame_by_proxy_pts(stream, 50);
+  ASSERT_TRUE(by_proxy.has_value());
+  EXPECT_EQ(by_proxy->source_pts, 150);
+}
+
 TEST(ProxyGeneration, ReencodesVfrBFramesWithExactPtsMapAndAudio) {
   TemporaryDirectory directory;
   const auto source = directory.path() / "unusual-start-vfr.mkv";

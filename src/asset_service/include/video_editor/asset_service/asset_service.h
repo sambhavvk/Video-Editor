@@ -28,6 +28,7 @@ struct ProxyProfile {
 
 struct ProxyManifest {
   std::filesystem::path proxy_uri;
+  std::filesystem::path pts_map_path;
   ProxyProfile profile;
   FileFingerprint source_fingerprint;
   std::string engine_version;

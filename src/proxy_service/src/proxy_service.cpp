@@ -1531,6 +1531,7 @@ try_complete_proxy(const std::filesystem::path& proxy_path,
       .manifest =
           assets::ProxyManifest{
               .proxy_uri = proxy_path,
+              .pts_map_path = pts_map_path,
               .profile = {.codec = proxy_codec_from(map.value().video_codec),
                           .maximum_width = 1920,
                           .maximum_height = 1080,
@@ -1604,6 +1605,56 @@ discover_proxy(const std::string& asset_id, const assets::FileFingerprint& sourc
     }
   }
   return std::nullopt;
+}
+
+const StreamPtsMap* stream_pts_map(const PtsMap& map, const int source_stream_index) noexcept {
+  for (const StreamPtsMap& stream : map.streams) {
+    if (stream.source_stream_index == source_stream_index) {
+      return &stream;
+    }
+  }
+  if (source_stream_index < 0 && !map.streams.empty()) {
+    return &map.streams.front();
+  }
+  return nullptr;
+}
+
+namespace {
+
+[[nodiscard]] std::optional<FramePtsMapping>
+lookup_frame_by_monotonic_pts(const std::vector<FramePtsMapping>& frames,
+                              const std::int64_t pts, const std::int64_t FramePtsMapping::*pts_field,
+                              const std::int64_t FramePtsMapping::*duration_field) noexcept {
+  if (frames.empty()) {
+    return std::nullopt;
+  }
+  const auto iterator = std::partition_point(
+      frames.begin(), frames.end(),
+      [&](const FramePtsMapping& frame) { return frame.*pts_field <= pts; });
+  if (iterator == frames.begin()) {
+    return std::nullopt;
+  }
+  const FramePtsMapping& candidate = *std::prev(iterator);
+  const std::int64_t candidate_pts = candidate.*pts_field;
+  const std::int64_t candidate_duration = candidate.*duration_field;
+  if (pts < candidate_pts || pts >= candidate_pts + candidate_duration) {
+    return std::nullopt;
+  }
+  return candidate;
+}
+
+} // namespace
+
+std::optional<FramePtsMapping> lookup_frame_by_source_pts(const StreamPtsMap& stream,
+                                                          const std::int64_t source_pts) noexcept {
+  return lookup_frame_by_monotonic_pts(stream.frames, source_pts, &FramePtsMapping::source_pts,
+                                       &FramePtsMapping::source_duration);
+}
+
+std::optional<FramePtsMapping> lookup_frame_by_proxy_pts(const StreamPtsMap& stream,
+                                                         const std::int64_t proxy_pts) noexcept {
+  return lookup_frame_by_monotonic_pts(stream.frames, proxy_pts, &FramePtsMapping::proxy_pts,
+                                       &FramePtsMapping::proxy_duration);
 }
 
 } // namespace video_editor::proxy

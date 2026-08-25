@@ -215,6 +215,22 @@ struct GenerateResult {
 
 [[nodiscard]] Result<PtsMap> load_pts_map(const std::filesystem::path& path);
 
+// Returns the stream map for `source_stream_index`, or the first stream when
+// `source_stream_index` is negative and the map is non-empty.
+[[nodiscard]] const StreamPtsMap* stream_pts_map(const PtsMap& map,
+                                                 int source_stream_index) noexcept;
+
+// Binary search on monotonic `source_pts`. Returns the frame whose half-open
+// source interval [source_pts, source_pts + source_duration) contains the
+// requested absolute source presentation timestamp.
+[[nodiscard]] std::optional<FramePtsMapping>
+lookup_frame_by_source_pts(const StreamPtsMap& stream, std::int64_t source_pts) noexcept;
+
+// Binary search on monotonic `proxy_pts`. Returns the frame whose half-open
+// proxy interval contains the decoded proxy presentation timestamp.
+[[nodiscard]] std::optional<FramePtsMapping>
+lookup_frame_by_proxy_pts(const StreamPtsMap& stream, std::int64_t proxy_pts) noexcept;
+
 // Stable cache parameter hash for the default/resolved half-res proxy profile.
 [[nodiscard]] std::string proxy_parameter_hash(const ProxyProfile& profile);
 [[nodiscard]] std::string proxy_parameter_hash(const ResolvedProfile& profile);

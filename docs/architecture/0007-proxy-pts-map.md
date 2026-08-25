@@ -37,6 +37,9 @@ editorial truth or changing which original frame is used for final export.
   the current proxy profile and remain available only from originals.
 - Playback still needs full `.vepts`-driven seek integration and corpus proof before VFR proxy
   correctness can be considered beta-complete.
++ Playback consumes registered `.vepts` maps for proxy seek and rebuilds decoded presentation from
+  source PTS/duration. A missing, corrupt, or unregistered map fails closed to the original. VFR
+  corpus proof remains a release gate before proxy correctness is considered beta-complete.
 
 ## Verification
 

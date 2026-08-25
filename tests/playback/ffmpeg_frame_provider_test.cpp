@@ -143,24 +143,24 @@ void expect_dominant_color(const render::CpuFrame& frame, const std::size_t chan
 TEST(AssetRegistry, SelectsPresentProxyAndFallsBackWhenItIsMissing) {
   AssetRegistry registry;
   const edit::EntityId asset_id = edit::EntityId::generate();
-  EXPECT_FALSE(registry.register_asset({}, {{fixture().path(), 0}, std::nullopt}));
+  EXPECT_FALSE(registry.register_asset({}, {{fixture().path(), 0}, std::nullopt, std::nullopt}));
   EXPECT_TRUE(registry.register_asset(
-      asset_id, {{fixture().path(), 0}, AssetStreamLocation{fixture().path(), 0}}));
+      asset_id, {{fixture().path(), 0}, AssetStreamLocation{fixture().path(), 0}, std::nullopt}));
   EXPECT_EQ(registry.size(), 1U);
 
-  const auto proxy = registry.resolve(asset_id, true);
-  ASSERT_TRUE(proxy.has_value());
-  EXPECT_TRUE(proxy->is_proxy);
-  EXPECT_EQ(proxy->location.video_stream_index, 0);
+  const auto without_map = registry.resolve(asset_id, true);
+  ASSERT_TRUE(without_map.has_value());
+  EXPECT_FALSE(without_map->is_proxy);
 
   const auto original = registry.resolve(asset_id, false);
   ASSERT_TRUE(original.has_value());
   EXPECT_FALSE(original->is_proxy);
-  EXPECT_EQ(original->location.path, proxy->location.path);
+  EXPECT_EQ(original->location.path, fixture().path());
 
   EXPECT_TRUE(registry.register_asset(
       asset_id, {{fixture().path(), 0},
-                 AssetStreamLocation{fixture().path().parent_path() / "missing.mkv", 0}}));
+                 AssetStreamLocation{fixture().path().parent_path() / "missing.mkv", 0},
+                 std::nullopt}));
   const auto fallback = registry.resolve(asset_id, true);
   ASSERT_TRUE(fallback.has_value());
   EXPECT_FALSE(fallback->is_proxy);
@@ -172,7 +172,7 @@ TEST(AssetRegistry, SelectsPresentProxyAndFallsBackWhenItIsMissing) {
 TEST(FfmpegFrameProvider, SeeksExactlyAndUsesSequentialDecodeForNearbyFrames) {
   auto registry = std::make_shared<AssetRegistry>();
   const edit::EntityId asset_id = edit::EntityId::generate();
-  ASSERT_TRUE(registry->register_asset(asset_id, {{fixture().path(), 0}, std::nullopt}));
+  ASSERT_TRUE(registry->register_asset(asset_id, {{fixture().path(), 0}, std::nullopt, std::nullopt}));
   FfmpegFrameProvider provider(registry);
   provider.begin_epoch(7);
 
@@ -210,7 +210,7 @@ TEST(FfmpegFrameProvider, SeeksExactlyAndUsesSequentialDecodeForNearbyFrames) {
 TEST(FfmpegFrameProvider, UsesHalfOpenIntervalsAtAnExactFrameBoundary) {
   auto registry = std::make_shared<AssetRegistry>();
   const edit::EntityId asset_id = edit::EntityId::generate();
-  ASSERT_TRUE(registry->register_asset(asset_id, {{fixture().path(), 0}, std::nullopt}));
+  ASSERT_TRUE(registry->register_asset(asset_id, {{fixture().path(), 0}, std::nullopt, std::nullopt}));
   FfmpegFrameProvider provider(registry);
   provider.begin_epoch(21);
 
@@ -227,7 +227,7 @@ TEST(FfmpegFrameProvider, UsesHalfOpenIntervalsAtAnExactFrameBoundary) {
 TEST(FfmpegFrameProvider, RejectsStaleEpochBeforeOpeningMedia) {
   auto registry = std::make_shared<AssetRegistry>();
   const edit::EntityId asset_id = edit::EntityId::generate();
-  ASSERT_TRUE(registry->register_asset(asset_id, {{fixture().path(), 0}, std::nullopt}));
+  ASSERT_TRUE(registry->register_asset(asset_id, {{fixture().path(), 0}, std::nullopt, std::nullopt}));
   FfmpegFrameProvider provider(registry);
   provider.begin_epoch(101);
 
@@ -242,32 +242,32 @@ TEST(FfmpegFrameProvider, HonorsProxyPolicyAndExplicitSessionInvalidation) {
   auto registry = std::make_shared<AssetRegistry>();
   const edit::EntityId asset_id = edit::EntityId::generate();
   ASSERT_TRUE(registry->register_asset(
-      asset_id, {{fixture().path(), 0}, AssetStreamLocation{fixture().path(), 0}}));
+      asset_id, {{fixture().path(), 0}, AssetStreamLocation{fixture().path(), 0}, std::nullopt}));
   FfmpegFrameProvider provider(registry);
   provider.begin_epoch(33);
 
   const auto proxy =
       provider.request_with_timing(make_request(asset_id, edit::Time(1, 8), 33, true));
   ASSERT_TRUE(proxy) << proxy.error->message;
-  EXPECT_TRUE(proxy.value->used_proxy);
+  EXPECT_FALSE(proxy.value->used_proxy);
 
   const auto original =
       provider.request_with_timing(make_request(asset_id, edit::Time(1, 8), 33, false));
   ASSERT_TRUE(original) << original.error->message;
   EXPECT_FALSE(original.value->used_proxy);
-  EXPECT_EQ(provider.statistics().sessions_opened, 2U);
+  EXPECT_EQ(provider.statistics().sessions_opened, 1U);
 
   provider.invalidate(asset_id);
   const auto reopened =
       provider.request_with_timing(make_request(asset_id, edit::Time(1, 8), 33, false));
   ASSERT_TRUE(reopened) << reopened.error->message;
-  EXPECT_EQ(provider.statistics().sessions_opened, 3U);
+  EXPECT_EQ(provider.statistics().sessions_opened, 2U);
 }
 
 TEST(FfmpegFrameProvider, DiscardsFailedRecoveryBeforeTheNextRequest) {
   auto registry = std::make_shared<AssetRegistry>();
   const edit::EntityId asset_id = edit::EntityId::generate();
-  ASSERT_TRUE(registry->register_asset(asset_id, {{fixture().path(), 0}, std::nullopt}));
+  ASSERT_TRUE(registry->register_asset(asset_id, {{fixture().path(), 0}, std::nullopt, std::nullopt}));
   FfmpegFrameProvider provider(registry);
   provider.begin_epoch(45);
 

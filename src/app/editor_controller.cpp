@@ -296,6 +296,22 @@ waveformBucketsForUi(const media_cache::Waveform& waveform) {
           .allow_ffv1_fallback = true};
 }
 
+[[nodiscard]] playback::AssetPlaybackSources
+playbackSourcesFromRecord(const assets::AssetRecord& record) {
+  playback::AssetPlaybackSources sources{
+      .original = {.path = record.uri, .video_stream_index = -1},
+      .proxy = std::nullopt,
+      .pts_map_path = std::nullopt};
+  if (record.proxy.has_value() && record.proxy->complete) {
+    sources.proxy = playback::AssetStreamLocation{.path = record.proxy->proxy_uri,
+                                                  .video_stream_index = -1};
+    if (!record.proxy->pts_map_path.empty()) {
+      sources.pts_map_path = record.proxy->pts_map_path;
+    }
+  }
+  return sources;
+}
+
 void appendUniqueSearchDirectory(std::vector<std::filesystem::path>& directories,
                                  std::unordered_set<std::string>& seen,
                                  const std::filesystem::path& directory) {
@@ -1776,12 +1792,7 @@ void EditorController::addImportedAsset(assets::AssetRecord asset) {
   if (apply(edit::EditCommand{.operation = edit::AddAssetCommand{.asset = model_asset},
                               .coalescing_key = {}},
             tr("Could not add imported media"))) {
-    playback::AssetPlaybackSources sources{
-        .original = {.path = asset.uri, .video_stream_index = -1}, .proxy = std::nullopt};
-    if (asset.proxy.has_value() && asset.proxy->complete) {
-      sources.proxy =
-          playback::AssetStreamLocation{.path = asset.proxy->proxy_uri, .video_stream_index = -1};
-    }
+    playback::AssetPlaybackSources sources = playbackSourcesFromRecord(asset);
     if (playback_registry_->register_asset(model_asset.id, std::move(sources))) {
       registered_playback_assets_.push_back(model_asset.id);
     }
@@ -1940,11 +1951,13 @@ void EditorController::finishProxyJob(const std::string& asset_id, const ProxyOu
     manifest_profile.codec =
         outcome.ffv1 ? assets::ProxyCodec::Ffv1 : assets::ProxyCodec::ProResProxy;
     imported->proxy = assets::ProxyManifest{.proxy_uri = outcome.destination,
+                                            .pts_map_path = {},
                                             .profile = manifest_profile,
                                             .source_fingerprint = imported->fingerprint,
                                             .engine_version = "proxy-service-v1",
                                             .complete = true};
     std::filesystem::path playback_proxy = outcome.destination;
+    std::optional<std::filesystem::path> playback_pts_map;
     if (media_cache_ != nullptr) {
       if (cache_job_future_.isRunning()) {
         cache_job_future_.waitForFinished();
@@ -1970,14 +1983,25 @@ void EditorController::finishProxyJob(const std::string& asset_id, const ProxyOu
             .asset_id = outcome.asset_id,
             .kind = media_cache::CacheKind::ProxyPtsMap,
             .parameter_hash = proxy::proxy_parameter_hash(hash_profile)};
-        (void)media_cache_->put_file(pts_key, pts_source);
+        if (media_cache_->put_file(pts_key, pts_source)) {
+          if (auto cached_pts = media_cache_->path_for(pts_key)) {
+            playback_pts_map = cached_pts.value();
+          }
+        }
+        if (!playback_pts_map.has_value()) {
+          playback_pts_map = pts_source;
+        }
       }
+    }
+    if (playback_pts_map.has_value()) {
+      imported->proxy->pts_map_path = playback_pts_map.value();
     }
     const auto model_id = edit::EntityId::parse(outcome.asset_id);
     if (model_id.has_value()) {
-      playback::AssetPlaybackSources sources{
-          .original = {.path = imported->uri, .video_stream_index = -1},
-          .proxy = playback::AssetStreamLocation{.path = playback_proxy, .video_stream_index = -1}};
+      playback::AssetPlaybackSources sources = playbackSourcesFromRecord(*imported);
+      if (sources.proxy.has_value()) {
+        sources.proxy->path = playback_proxy;
+      }
       (void)playback_registry_->register_asset(*model_id, std::move(sources));
       frame_provider_->invalidate(*model_id);
     }
@@ -5564,11 +5588,12 @@ void EditorController::rebuildPlaybackRegistry() {
     const auto* record = findImported(imported_assets_, asset.id.toString());
     playback::AssetPlaybackSources sources{
         .original = {.path = pathFromUtf8String(asset.source_uri), .video_stream_index = -1},
-        .proxy = record != nullptr && record->proxy.has_value() && record->proxy->complete
-                     ? std::optional<playback::AssetStreamLocation>{
-                           playback::AssetStreamLocation{.path = record->proxy->proxy_uri,
-                                                         .video_stream_index = -1}}
-                     : std::nullopt};
+        .proxy = std::nullopt,
+        .pts_map_path = std::nullopt};
+    if (record != nullptr) {
+      sources = playbackSourcesFromRecord(*record);
+      sources.original.path = pathFromUtf8String(asset.source_uri);
+    }
     if (playback_registry_->register_asset(asset.id, std::move(sources))) {
       registered_playback_assets_.push_back(asset.id);
     }
@@ -6218,12 +6243,7 @@ void EditorController::reregisterAssetMedia(const assets::AssetRecord& record) {
   if (!model_id.has_value()) {
     return;
   }
-  playback::AssetPlaybackSources sources{
-      .original = {.path = record.uri, .video_stream_index = -1},
-      .proxy = record.proxy.has_value() && record.proxy->complete
-                   ? std::optional<playback::AssetStreamLocation>{playback::AssetStreamLocation{
-                         .path = record.proxy->proxy_uri, .video_stream_index = -1}}
-                   : std::nullopt};
+  playback::AssetPlaybackSources sources = playbackSourcesFromRecord(record);
   (void)playback_registry_->register_asset(*model_id, std::move(sources));
   frame_provider_->invalidate(*model_id);
   if (recordHasAudio(record)) {

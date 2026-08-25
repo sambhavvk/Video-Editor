@@ -2,6 +2,7 @@
 #pragma once
 
 #include "video_editor/edit_model/entity_id.h"
+#include "video_editor/proxy_service/proxy_service.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -22,12 +23,14 @@ struct AssetStreamLocation final {
 struct AssetPlaybackSources final {
   AssetStreamLocation original;
   std::optional<AssetStreamLocation> proxy;
+  std::optional<std::filesystem::path> pts_map_path;
 };
 
 struct ResolvedAssetStream final {
   AssetStreamLocation location;
   bool is_proxy{false};
   std::uint64_t registry_generation{0};
+  std::shared_ptr<const proxy::PtsMap> pts_map;
 };
 
 // Thread-safe mapping from edit-model asset IDs to authoritative originals and
@@ -47,8 +50,9 @@ public:
   [[nodiscard]] bool register_asset(edit::EntityId asset_id, AssetPlaybackSources sources);
   [[nodiscard]] bool unregister_asset(const edit::EntityId& asset_id);
 
-  // A proxy is selected only when requested and currently present as a regular
-  // file. A missing proxy transparently falls back to the original.
+  // A proxy is selected only when requested, the proxy file is present, and a
+  // loadable `.vepts` map was validated at registration. Otherwise playback
+  // transparently falls back to the original.
   [[nodiscard]] std::optional<ResolvedAssetStream> resolve(const edit::EntityId& asset_id,
                                                            bool permit_proxy) const;
 

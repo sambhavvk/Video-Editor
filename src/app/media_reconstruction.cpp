@@ -34,6 +34,7 @@ void attach_proxy(assets::AssetRecord& record, media_cache::CacheStore* cache,
                                           options.legacy_proxy_directory);
   if (discovered.has_value() && discovered->manifest.complete) {
     record.proxy = std::move(discovered->manifest);
+    record.proxy->pts_map_path = discovered->pts_map_path;
   }
 }
 

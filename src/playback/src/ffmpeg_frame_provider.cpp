@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "video_editor/playback/ffmpeg_frame_provider.h"
 #include "video_editor/media_codec/format_open.h"
+#include "video_editor/proxy_service/proxy_service.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -98,7 +99,11 @@ template <typename T>
 
 [[nodiscard]] bool same_source(const ResolvedAssetStream& left, const ResolvedAssetStream& right) {
   return left.location == right.location && left.is_proxy == right.is_proxy &&
-         left.registry_generation == right.registry_generation;
+         left.registry_generation == right.registry_generation && left.pts_map == right.pts_map;
+}
+
+[[nodiscard]] AVRational pts_time_base(const proxy::PtsTimeBase& time_base) {
+  return AVRational{time_base.numerator, time_base.denominator};
 }
 
 [[nodiscard]] std::optional<edit::Time> time_from_stream_ticks(const std::int64_t ticks,
@@ -185,6 +190,7 @@ struct DecodeSession final {
   AVStream* stream{nullptr};
   int stream_index{-1};
   std::int64_t origin_pts{0};
+  const proxy::StreamPtsMap* mapped_stream{nullptr};
   bool draining{false};
   std::optional<RawFrame> queued_frame;
   std::optional<StoredFrame> current_frame;
@@ -327,6 +333,27 @@ presentation_for_frame(const DecodeSession& session, const std::int64_t timestam
   const std::int64_t relative_timestamp = timestamp - session.origin_pts;
   const auto start = time_from_stream_ticks(relative_timestamp, session.stream->time_base);
   const auto duration = time_from_stream_ticks(duration_ticks, session.stream->time_base);
+  if (!start.has_value() || !duration.has_value() || duration->isNegative() || duration->isZero()) {
+    return std::nullopt;
+  }
+  try {
+    return edit::TimeRange(*start, *duration);
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
+}
+
+[[nodiscard]] std::optional<edit::TimeRange>
+presentation_for_mapping(const proxy::StreamPtsMap& stream,
+                         const proxy::FramePtsMapping& mapping) {
+  if (mapping.source_duration <= 0 ||
+      subtract_would_overflow(mapping.source_pts, stream.source_origin_pts)) {
+    return std::nullopt;
+  }
+  const std::int64_t relative_timestamp = mapping.source_pts - stream.source_origin_pts;
+  const AVRational source_time_base = pts_time_base(stream.source_time_base);
+  const auto start = time_from_stream_ticks(relative_timestamp, source_time_base);
+  const auto duration = time_from_stream_ticks(mapping.source_duration, source_time_base);
   if (!start.has_value() || !duration.has_value() || duration->isNegative() || duration->isZero()) {
     return std::nullopt;
   }
@@ -542,6 +569,21 @@ open_session(const ResolvedAssetStream& source, const std::atomic<std::uint64_t>
         av_rescale_q(session->format->start_time, AV_TIME_BASE_Q, session->stream->time_base);
   }
 
+  if (source.is_proxy) {
+    if (source.pts_map == nullptr) {
+      return failure<std::unique_ptr<DecodeSession>>(
+          render::RenderErrorCode::AssetUnavailable,
+          "proxy playback requires a validated PTS map");
+    }
+    session->mapped_stream =
+        proxy::stream_pts_map(*source.pts_map, source.location.video_stream_index);
+    if (session->mapped_stream == nullptr || session->mapped_stream->frames.empty()) {
+      return failure<std::unique_ptr<DecodeSession>>(
+          render::RenderErrorCode::AssetUnavailable,
+          "proxy playback PTS map has no mapping for the selected video stream");
+    }
+  }
+
   return render::RenderResult<std::unique_ptr<DecodeSession>>::success(std::move(session));
 }
 
@@ -578,6 +620,38 @@ decode_at(DecodeSession& session, const render::AssetFrameRequest& request,
 
   if (decode_sequentially) {
     ++statistics.sequential_requests;
+  } else if (session.mapped_stream != nullptr) {
+    const AVRational source_time_base = pts_time_base(session.mapped_stream->source_time_base);
+    const auto relative_target = stream_ticks_for_time(request.source_time, source_time_base);
+    if (!relative_target.has_value() ||
+        add_would_overflow(session.mapped_stream->source_origin_pts, *relative_target)) {
+      return failure<DecodedAssetFrame>(
+          render::RenderErrorCode::InvalidTime,
+          "requested source time cannot be represented in the proxy PTS map");
+    }
+    const std::int64_t absolute_source_pts =
+        session.mapped_stream->source_origin_pts + *relative_target;
+    const auto mapping =
+        proxy::lookup_frame_by_source_pts(*session.mapped_stream, absolute_source_pts);
+    if (!mapping.has_value()) {
+      return failure<DecodedAssetFrame>(render::RenderErrorCode::AssetUnavailable,
+                                        "no proxy PTS map frame covers the requested source time");
+    }
+    const std::int64_t seek_target = mapping->proxy_pts;
+    const int seek_result = av_seek_frame(session.format.get(), session.stream_index, seek_target,
+                                          AVSEEK_FLAG_BACKWARD);
+    if (seek_result < 0) {
+      return failure<DecodedAssetFrame>(
+          stale(session) ? render::RenderErrorCode::StaleRequest
+                         : render::RenderErrorCode::ProviderFailure,
+          ffmpeg_message("cannot seek to the mapped proxy keyframe", seek_result));
+    }
+    ++statistics.seeks;
+    avformat_flush(session.format.get());
+    avcodec_flush_buffers(session.decoder.get());
+    session.draining = false;
+    session.queued_frame.reset();
+    session.current_frame.reset();
   } else {
     const auto relative_target =
         stream_ticks_for_time(request.source_time, session.stream->time_base);
@@ -618,6 +692,13 @@ decode_at(DecodeSession& session, const render::AssetFrameRequest& request,
     }
 
     if (candidate.frame.duration_ticks <= 0) {
+      if (session.mapped_stream != nullptr) {
+        if (const auto mapping = proxy::lookup_frame_by_proxy_pts(*session.mapped_stream,
+                                                                  candidate.frame.timestamp)) {
+          candidate.frame.duration_ticks = mapping->proxy_duration;
+        }
+      }
+      if (candidate.frame.duration_ticks <= 0) {
       FrameReadResult following = take_next_frame(session, statistics);
       if (following.status == ReadStatus::Stale) {
         return failure<DecodedAssetFrame>(render::RenderErrorCode::StaleRequest, following.message);
@@ -649,10 +730,21 @@ decode_at(DecodeSession& session, const render::AssetFrameRequest& request,
         }
         candidate.frame.duration_ticks = stream_end - candidate.frame.timestamp;
       }
+      }
     }
 
-    auto presentation =
-        presentation_for_frame(session, candidate.frame.timestamp, candidate.frame.duration_ticks);
+    std::optional<edit::TimeRange> presentation;
+    if (session.mapped_stream != nullptr) {
+      const auto mapping =
+          proxy::lookup_frame_by_proxy_pts(*session.mapped_stream, candidate.frame.timestamp);
+      if (!mapping.has_value()) {
+        continue;
+      }
+      presentation = presentation_for_mapping(*session.mapped_stream, *mapping);
+    } else {
+      presentation =
+          presentation_for_frame(session, candidate.frame.timestamp, candidate.frame.duration_ticks);
+    }
     if (!presentation.has_value()) {
       return failure<DecodedAssetFrame>(
           render::RenderErrorCode::ProviderFailure,
