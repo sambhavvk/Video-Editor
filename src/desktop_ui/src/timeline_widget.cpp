@@ -1098,7 +1098,6 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
     QMenu menu(this);
     auto* addVideo = menu.addAction(tr("Add Video Track"));
     auto* addAudio = menu.addAction(tr("Add Audio Track"));
-    auto* addCaption = menu.addAction(tr("Add Caption Track"));
     menu.addSeparator();
     auto* rename = menu.addAction(tr("Rename Track…"));
     auto* moveUp = menu.addAction(tr("Move Track Up"));
@@ -1113,8 +1112,6 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
       emit trackAddRequested(TrackKind::Video);
     } else if (chosen == addAudio) {
       emit trackAddRequested(TrackKind::Audio);
-    } else if (chosen == addCaption) {
-      emit trackAddRequested(TrackKind::Caption);
     } else if (chosen == rename) {
       bool accepted = false;
       const auto name = QInputDialog::getText(this, tr("Rename Track"), tr("Name:"),
@@ -1148,14 +1145,11 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
   QMenu menu(this);
   auto* addVideo = menu.addAction(tr("Add Video Track"));
   auto* addAudio = menu.addAction(tr("Add Audio Track"));
-  auto* addCaption = menu.addAction(tr("Add Caption Track"));
   const auto* chosen = menu.exec(event->globalPos());
   if (chosen == addVideo) {
     emit trackAddRequested(TrackKind::Video);
   } else if (chosen == addAudio) {
     emit trackAddRequested(TrackKind::Audio);
-  } else if (chosen == addCaption) {
-    emit trackAddRequested(TrackKind::Caption);
   }
   event->accept();
 }
@@ -1210,10 +1204,9 @@ void TimelineWidget::keyPressEvent(QKeyEvent* event) {
     event->accept();
     return;
   }
-  if (event->key() == Qt::Key_Insert) {
-    const auto kind = event->modifiers().testFlag(Qt::ControlModifier) ? TrackKind::Caption
-                      : event->modifiers().testFlag(Qt::ShiftModifier) ? TrackKind::Audio
-                                                                       : TrackKind::Video;
+  if (event->key() == Qt::Key_Insert && !event->modifiers().testFlag(Qt::ControlModifier)) {
+    const auto kind =
+        event->modifiers().testFlag(Qt::ShiftModifier) ? TrackKind::Audio : TrackKind::Video;
     emit trackAddRequested(kind);
     event->accept();
     return;

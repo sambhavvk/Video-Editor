@@ -237,7 +237,6 @@ public:
   void setReviewProposals(const QVector<CaptionProposalView>& proposals);
 
 signals:
-  void transcribeRequested();
   void importCaptionsRequested();
   void exportCaptionsRequested();
   void addCaptionRequested();

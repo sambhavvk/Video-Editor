@@ -140,9 +140,9 @@ Other editing operations:
 ### Tracks, markers, and gaps
 
 Track headers show lock, output visibility, and target state with text/icons in addition to color.
-Click those controls to toggle them. Right-click a track header for Add Video/Audio/Caption Track,
-Rename, Move Up/Down, Lock, Visible, Target, and Remove. **Insert** adds a video track,
-**Shift+Insert** adds an audio track, **Ctrl+Insert** adds a caption track, and **Ctrl+Up/Down**
+Click those controls to toggle them. Right-click a track header for Add Video/Audio Track, Rename,
+Move Up/Down, Lock, Visible, Target, and Remove. **Insert** adds a video track and **Shift+Insert**
+adds an audio track. **Ctrl+Up/Down**
 reorders the active track. With a track header active, **L**, **V**, and **T** toggle lock,
 visibility, and targeting. Locked tracks reject structural edits. Hidden video tracks do not
 contribute to preview or export. Targeted, unlocked compatible tracks receive media insertion.
@@ -160,8 +160,8 @@ Selecting a video or title clip reveals revisioned Inspector controls for Positi
 Scale, Rotation, and Opacity. The expanded controls offer Normal, Add, Multiply, Screen, and Overlay
 blend modes plus exact Scale X/Y, Anchor X/Y, and Crop Left/Top/Right/Bottom. These values are
 undoable, persist in `.veproj`, and are rendered by the deterministic CPU preview/export path. Crop
-values must leave a positive image area. The underlying model/renderer can represent signed scale
-for flips, but the current Inspector exposes positive scale values only.
+values must leave a positive image area. Negative scale values flip the clip horizontally or
+vertically; the renderer uses the magnitude for sizing.
 
 Selecting an audio clip reveals Gain (-96 to +24 dB), Pan, Fade In, and Fade Out. Those edits are
 validated, undoable, persistent, and used by realtime forward playback and reference export.

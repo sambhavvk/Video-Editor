@@ -991,10 +991,9 @@ void EditorWindowTest::timelineCanCreateTracksWithoutAnExistingTrack() {
   QTest::keyClick(&timeline, Qt::Key_Insert, Qt::ShiftModifier);
   QTest::keyClick(&timeline, Qt::Key_Insert, Qt::ControlModifier);
 
-  QCOMPARE(added.count(), 3);
+  QCOMPARE(added.count(), 2);
   QCOMPARE(added.at(0).at(0).value<TrackKind>(), TrackKind::Video);
   QCOMPARE(added.at(1).at(0).value<TrackKind>(), TrackKind::Audio);
-  QCOMPARE(added.at(2).at(0).value<TrackKind>(), TrackKind::Caption);
 }
 
 void EditorWindowTest::deliverPanelShowsCancelableProgress() {

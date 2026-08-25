@@ -704,12 +704,6 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::updateCaptionText);
   connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::findInTranscriptRequested,
           this, &EditorController::searchTranscript);
-  connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::transcribeRequested, this,
-          [this] {
-            window_.captionsPanel()->setTranscriptionState(
-                desktop_ui::TranscriptionState::ModelMissing,
-                tr("Download the optional checksummed Whisper model before transcribing."));
-          });
   connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::downloadModelRequested, this,
           &EditorController::downloadTranscriptionModel);
   connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::transcribeWithOptionsRequested,
@@ -3855,17 +3849,18 @@ void EditorController::addEffect(const QString& effectId) {
     window_.showTransientMessage(tr("Transitions are added by dragging them between clips"));
     return;
   }
+  if (effectId.startsWith(QStringLiteral("audio."))) {
+    window_.showTransientMessage(
+        tr("Audio clip effects belong in the Audio Mixer. Open Audio Mixer to add EQ, compressor, "
+           "denoise, or limiter."));
+    return;
+  }
   const edit::Clip* clip = edit::findClip(*sequence, *active_clip_id_);
   if (clip == nullptr) {
     return;
   }
   edit::Effect effect = effectPreset(effectId);
-  const bool audio_effect = effectId.startsWith(QStringLiteral("audio."));
-  if (audio_effect && clip->kind != edit::ClipKind::Audio) {
-    window_.showTransientMessage(tr("Select an audio clip for this effect"));
-    return;
-  }
-  if (!audio_effect && clip->kind != edit::ClipKind::Video && clip->kind != edit::ClipKind::Title) {
+  if (clip->kind != edit::ClipKind::Video && clip->kind != edit::ClipKind::Title) {
     window_.showTransientMessage(tr("Select a video clip for this effect"));
     return;
   }
@@ -4916,6 +4911,11 @@ void EditorController::addTrack(const int trackKind) {
     return;
   }
   const auto kind = static_cast<desktop_ui::TrackKind>(trackKind);
+  if (kind == desktop_ui::TrackKind::Caption) {
+    window_.showTransientMessage(
+        tr("Caption tracks are no longer created. Captions live in the Captions panel."));
+    return;
+  }
   edit::Track track;
   track.kind = kind == desktop_ui::TrackKind::Audio     ? edit::TrackKind::Audio
                : kind == desktop_ui::TrackKind::Caption ? edit::TrackKind::Caption

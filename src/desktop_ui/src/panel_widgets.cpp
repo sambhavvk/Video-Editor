@@ -392,7 +392,7 @@ InspectorWidget::InspectorWidget(QWidget* parent) : QWidget(parent) {
            0, 1);
   addField(tr("Position Y"), QStringLiteral("positionY"), QStringLiteral(" px"), -100'000, 100'000,
            0, 1);
-  addField(tr("Scale"), QStringLiteral("scale"), QStringLiteral(" %"), 0.01, 2'000, 100, 1);
+  addField(tr("Scale"), QStringLiteral("scale"), QStringLiteral(" %"), -100'000, 2'000, 100, 1);
   addField(tr("Rotation"), QStringLiteral("rotation"), QStringLiteral("°"), -36000, 36000, 0, 0.1);
   addField(tr("Opacity"), QStringLiteral("opacity"), QStringLiteral(" %"), 0, 100, 100, 1);
   editorLayout->addWidget(essential);
@@ -524,9 +524,9 @@ InspectorWidget::InspectorWidget(QWidget* parent) : QWidget(parent) {
                 [this, id] { emit keyframeToggleRequested(id); });
         advancedForm->addRow(label, field);
       };
-  addAdvancedField(tr("Scale X"), QStringLiteral("scaleX"), QStringLiteral(" %"), 0.01, 100'000,
+  addAdvancedField(tr("Scale X"), QStringLiteral("scaleX"), QStringLiteral(" %"), -100'000, 100'000,
                    100, 0.1);
-  addAdvancedField(tr("Scale Y"), QStringLiteral("scaleY"), QStringLiteral(" %"), 0.01, 100'000,
+  addAdvancedField(tr("Scale Y"), QStringLiteral("scaleY"), QStringLiteral(" %"), -100'000, 100'000,
                    100, 0.1);
   addAdvancedField(tr("Anchor X"), QStringLiteral("anchorX"), QStringLiteral(" %"), 0, 100, 50,
                    0.1);
@@ -1030,10 +1030,6 @@ EffectsPanelWidget::EffectsPanelWidget(QWidget* parent) : QWidget(parent) {
       {QStringLiteral("video.color"), tr("Color Adjustments"), tr("Video"), true},
       {QStringLiteral("video.crop"), tr("Crop"), tr("Video"), true},
       {QStringLiteral("video.gaussian_blur"), tr("Gaussian Blur"), tr("Video"), true},
-      {QStringLiteral("audio.eq"), tr("Parametric Equalizer"), tr("Audio"), false},
-      {QStringLiteral("audio.compressor"), tr("Compressor"), tr("Audio"), false},
-      {QStringLiteral("audio.dialogue_denoise"), tr("Dialogue Noise Reduction"), tr("Audio"),
-       false},
   });
 
   connect(search_, &QLineEdit::textChanged, this, &EffectsPanelWidget::applyFilter);
