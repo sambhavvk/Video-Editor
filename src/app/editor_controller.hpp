@@ -58,6 +58,7 @@ class CpuFrame;
 class CpuRenderer;
 class GpuRenderer;
 class GpuTimelineRenderer;
+class RenderCache;
 } // namespace video_editor::render
 
 namespace video_editor::audio_render {
@@ -155,6 +156,8 @@ public:
   [[nodiscard]] std::uint64_t previewPresentationCount() const noexcept {
     return preview_presentation_count_;
   }
+  [[nodiscard]] std::uint64_t playbackSeekCount() const noexcept;
+  [[nodiscard]] std::uint64_t playbackDecodedFrameCount() const noexcept;
   [[nodiscard]] bool gpuPreviewActive() const noexcept {
     return gpu_preview_active_;
   }
@@ -389,6 +392,7 @@ private:
   void closeGap(const QString& gapKey);
   void requestPreview(PreviewRequestPolicy policy = PreviewRequestPolicy::Replace);
   void launchPreviewRequest();
+  void syncPreviewCacheIdentity();
   [[nodiscard]] bool startAudioMasterPlayback();
   void stopAudioPlayback() noexcept;
   [[nodiscard]] static QImage displayImage(const render::CpuFrame& frame);
@@ -406,6 +410,7 @@ private:
   std::shared_ptr<audio_render::OriginalAudioRegistry> audio_registry_;
   std::shared_ptr<playback::FfmpegFrameProvider> frame_provider_;
   std::shared_ptr<render::CpuRenderer> renderer_;
+  std::shared_ptr<render::RenderCache> preview_cache_;
   std::shared_ptr<render::GpuRenderer> gpu_renderer_;
   std::shared_ptr<render::GpuTimelineRenderer> gpu_timeline_renderer_;
   std::unique_ptr<audio::AsyncRealtimeAudioPlayback> audio_playback_;
@@ -451,6 +456,8 @@ private:
   std::uint64_t preview_epoch_{0};
   std::uint64_t preview_request_serial_{0};
   std::uint64_t preview_presentation_count_{0};
+  std::optional<edit::Revision> preview_cache_revision_;
+  std::uint64_t preview_cache_generation_{0};
   bool preview_in_flight_{false};
   bool gpu_preview_active_{false};
   bool gpu_fallback_latched_{false};

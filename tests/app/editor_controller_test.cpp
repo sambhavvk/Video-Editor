@@ -128,6 +128,7 @@ private slots:
   void batchSplitAndFrameNudgePreserveExactSelectionGeometry();
   void rollEditsUseTheGestureEdge();
   void presentsFramesContinuouslyWhilePlaybackIsRunning();
+  void reusesPreviewCacheForTheSamePausedFrame();
   void importsSearchesAndExportsCaptions();
   void beginnerFifteenMinutePathWithoutFullEncode();
   void normalizationOnlyAdjustsAudibleContributingTracks();
@@ -683,6 +684,33 @@ void EditorControllerTest::presentsFramesContinuouslyWhilePlaybackIsRunning() {
                                controller.previewPresentationCount() >= before_playback + 2U,
                            10'000);
   window.playbackRateRequested(0.0);
+}
+
+void EditorControllerTest::reusesPreviewCacheForTheSamePausedFrame() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString video_path = directory.filePath(QStringLiteral("preview-cache.mkv"));
+  QVERIFY(writePlaybackVideo(video_path));
+
+  QSettings settings(directory.filePath(QStringLiteral("preview-cache-ui.ini")), QSettings::IniFormat);
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+  controller.importPaths({video_path});
+  QTRY_COMPARE_WITH_TIMEOUT(
+      controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
+  window.mediaActivated(window.mediaBin()->items().front().id);
+  QTRY_VERIFY_WITH_TIMEOUT(window.programViewer()->hasFrame(), 10'000);
+  QTRY_VERIFY_WITH_TIMEOUT(controller.previewPresentationCount() >= 1U, 10'000);
+
+  const std::uint64_t seeks_after_first = controller.playbackSeekCount();
+  const std::uint64_t decoded_after_first = controller.playbackDecodedFrameCount();
+  const std::uint64_t presented_after_first = controller.previewPresentationCount();
+  QVERIFY(seeks_after_first >= 1U);
+
+  window.seekRequested(window.timeline()->playhead());
+  QTRY_VERIFY_WITH_TIMEOUT(controller.previewPresentationCount() > presented_after_first, 10'000);
+  QCOMPARE(controller.playbackSeekCount(), seeks_after_first);
+  QCOMPARE(controller.playbackDecodedFrameCount(), decoded_after_first);
 }
 
 void EditorControllerTest::importsSearchesAndExportsCaptions() {

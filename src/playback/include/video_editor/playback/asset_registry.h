@@ -57,6 +57,7 @@ public:
                                                            bool permit_proxy) const;
 
   [[nodiscard]] std::size_t size() const noexcept;
+  [[nodiscard]] std::uint64_t generation() const noexcept;
 
 private:
   class Impl;

@@ -4,6 +4,7 @@
 #include "video_editor/edit_model/timeline_editor.h"
 #include "video_editor/render_engine/frame.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -19,6 +20,21 @@ struct PreviewProfile {
   bool bypass_expensive_effects{false};
   bool use_proxies{true};
 };
+
+[[nodiscard]] inline int preview_output_dimension(const std::uint32_t value,
+                                                  const PreviewScale scale) noexcept {
+  const int divisor = scale == PreviewScale::Full ? 1 : scale == PreviewScale::Half ? 2 : 4;
+  return value == 0U ? 1 : std::max(1, static_cast<int>(value) / divisor);
+}
+
+[[nodiscard]] inline std::uint64_t preview_graph_signature(const PreviewProfile& profile,
+                                                           const std::uint64_t registry_generation) noexcept {
+  std::uint64_t seed = static_cast<std::uint64_t>(static_cast<std::uint8_t>(profile.scale)) + 1U;
+  seed = (seed * 0x9e3779b97f4a7c15ULL) + (profile.bypass_expensive_effects ? 1ULL : 0ULL);
+  seed = (seed * 0x9e3779b97f4a7c15ULL) + (profile.use_proxies ? 1ULL : 0ULL);
+  seed = (seed * 0x9e3779b97f4a7c15ULL) + registry_generation;
+  return seed;
+}
 
 enum class RenderErrorCode : std::uint8_t {
   InvalidSnapshot,

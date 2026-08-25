@@ -32,6 +32,7 @@
 #include "video_editor/render_engine/frame.h"
 #include "video_editor/render_engine/gpu_backend.h"
 #include "video_editor/render_engine/gpu_timeline_renderer.h"
+#include "video_editor/render_engine/render_cache.h"
 #include "video_editor/transcription_service/transcription_service.h"
 
 #include <QtConcurrent/QtConcurrentRun>
@@ -170,6 +171,7 @@ bool modelDownloadSizeAllowed(const std::uintmax_t bytes_received,
 namespace {
 
 constexpr qint64 kUiTimescale = 48'000;
+constexpr std::size_t kPreviewCacheBytes = 256U * 1024U * 1024U;
 constexpr qint64 kModelNetworkReadBufferBytes = 1'048'576;
 
 [[nodiscard]] qint64 modelReplyContentLength(const QNetworkReply& reply) {
@@ -645,7 +647,8 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
       playback_registry_(std::make_shared<playback::AssetRegistry>()),
       audio_registry_(std::make_shared<audio_render::OriginalAudioRegistry>()),
       frame_provider_(std::make_shared<playback::FfmpegFrameProvider>(playback_registry_)),
-      renderer_(std::make_shared<render::CpuRenderer>(frame_provider_)) {
+      renderer_(std::make_shared<render::CpuRenderer>(frame_provider_)),
+      preview_cache_(std::make_shared<render::RenderCache>(kPreviewCacheBytes)) {
   try {
     media_cache_ = std::make_unique<media_cache::CacheStore>(mediaCacheDirectory());
     QSettings cache_settings;
@@ -1058,6 +1061,14 @@ std::uint64_t EditorController::audioXrunCount() const {
 bool EditorController::audioControlPending() const {
   return audio_playback_ != nullptr &&
          audio_playback_->diagnostics().latest_status == audio::PlaybackCommandStatus::Pending;
+}
+
+std::uint64_t EditorController::playbackSeekCount() const noexcept {
+  return frame_provider_ != nullptr ? frame_provider_->statistics().seeks : 0;
+}
+
+std::uint64_t EditorController::playbackDecodedFrameCount() const noexcept {
+  return frame_provider_ != nullptr ? frame_provider_->statistics().decoded_frames : 0;
 }
 
 edit::Project EditorController::makeDefaultProject() {
@@ -5135,6 +5146,7 @@ void EditorController::refreshViews() {
   if (!editor_) {
     return;
   }
+  syncPreviewCacheIdentity();
   const auto project = editor_->projectAt(editor_->revision());
   window_.setProjectDisplayName(QString::fromStdString(project->name));
   const edit::Sequence* sequence = currentSequence();
@@ -5720,6 +5732,22 @@ void EditorController::stopAudioPlayback() noexcept {
   playback_audio_renderer_.reset();
 }
 
+void EditorController::syncPreviewCacheIdentity() {
+  if (!preview_cache_ || !editor_) {
+    return;
+  }
+  const edit::Revision revision = editor_->revision();
+  const std::uint64_t generation =
+      playback_registry_ != nullptr ? playback_registry_->generation() : 0U;
+  if (generation != preview_cache_generation_) {
+    preview_cache_->clear();
+  } else if (preview_cache_revision_.has_value() && *preview_cache_revision_ != revision) {
+    preview_cache_->clear_revision(*preview_cache_revision_);
+  }
+  preview_cache_revision_ = revision;
+  preview_cache_generation_ = generation;
+}
+
 void EditorController::requestPreview(const PreviewRequestPolicy policy) {
   if (!editor_ || !renderer_ || !frame_provider_) {
     return;
@@ -5780,6 +5808,18 @@ void EditorController::launchPreviewRequest() {
   const auto renderer = renderer_;
   const auto gpu_renderer = gpu_fallback_latched_ ? nullptr : gpu_renderer_;
   const auto gpu_timeline_renderer = gpu_fallback_latched_ ? nullptr : gpu_timeline_renderer_;
+  const auto preview_cache = preview_cache_;
+  const render::PreviewProfile profile{
+      .scale = render::PreviewScale::Half, .bypass_expensive_effects = true, .use_proxies = true};
+  const render::RenderCacheKey cache_key{
+      .revision = snapshot.revision(),
+      .sequence_id = snapshot.sequence().id,
+      .time = requested_time,
+      .width = render::preview_output_dimension(snapshot.sequence().width, profile.scale),
+      .height = render::preview_output_dimension(snapshot.sequence().height, profile.scale),
+      .graph_signature = render::preview_graph_signature(
+          profile, playback_registry_ != nullptr ? playback_registry_->generation() : 0U),
+  };
   preview_in_flight_ = true;
 
   using PreviewWatcher = QFutureWatcher<PreviewOutcome>;
@@ -5826,11 +5866,34 @@ void EditorController::launchPreviewRequest() {
       launchPreviewRequest();
     }
   });
-  watcher->setFuture(QtConcurrent::run([renderer, gpu_renderer, gpu_timeline_renderer,
-                                        snapshot = std::move(snapshot), requested_time,
-                                        epoch]() mutable {
-    const render::PreviewProfile profile{
-        .scale = render::PreviewScale::Half, .bypass_expensive_effects = true, .use_proxies = true};
+  watcher->setFuture(QtConcurrent::run([renderer, gpu_renderer, gpu_timeline_renderer, preview_cache,
+                                        cache_key, profile, snapshot = std::move(snapshot),
+                                        requested_time, epoch]() mutable {
+    const auto present = [&](std::shared_ptr<const render::CpuFrame> frame, QString backend,
+                             QString diagnostic, const bool gpu_used,
+                             const bool gpu_failed) -> PreviewOutcome {
+      if (preview_cache && frame) {
+        preview_cache->put(cache_key, frame);
+      }
+      return PreviewOutcome{.epoch = epoch,
+                            .image = frame ? EditorController::displayImage(*frame) : QImage{},
+                            .error = {},
+                            .gpu_backend = std::move(backend),
+                            .gpu_diagnostic = std::move(diagnostic),
+                            .gpu_used = gpu_used,
+                            .gpu_failed = gpu_failed};
+    };
+    if (preview_cache) {
+      if (auto cached = preview_cache->get(cache_key)) {
+        return PreviewOutcome{.epoch = epoch,
+                              .image = EditorController::displayImage(*cached),
+                              .error = {},
+                              .gpu_backend = QStringLiteral("CPU"),
+                              .gpu_diagnostic = {},
+                              .gpu_used = false,
+                              .gpu_failed = false};
+      }
+    }
     const auto cpu_fallback = [&](QString backend, QString diagnostic,
                                   const bool gpu_failed) -> PreviewOutcome {
       auto result = renderer->request_frame(snapshot, requested_time, profile, epoch);
@@ -5854,13 +5917,7 @@ void EditorController::launchPreviewRequest() {
                               .gpu_used = false,
                               .gpu_failed = gpu_failed};
       }
-      return PreviewOutcome{.epoch = epoch,
-                            .image = EditorController::displayImage(**cpu),
-                            .error = {},
-                            .gpu_backend = std::move(backend),
-                            .gpu_diagnostic = std::move(diagnostic),
-                            .gpu_used = false,
-                            .gpu_failed = gpu_failed};
+      return present(*cpu, std::move(backend), std::move(diagnostic), false, gpu_failed);
     };
 
     if (gpu_renderer != nullptr && gpu_timeline_renderer != nullptr) {
@@ -5878,13 +5935,7 @@ void EditorController::launchPreviewRequest() {
           const auto* gpu_cpu =
               std::get_if<std::shared_ptr<const render::CpuFrame>>(&downloaded.value->storage);
           if (gpu_cpu != nullptr && *gpu_cpu) {
-            return PreviewOutcome{.epoch = epoch,
-                                  .image = EditorController::displayImage(**gpu_cpu),
-                                  .error = {},
-                                  .gpu_backend = backend,
-                                  .gpu_diagnostic = {},
-                                  .gpu_used = true,
-                                  .gpu_failed = false};
+            return present(*gpu_cpu, backend, {}, true, false);
           }
         }
         const QString failure = downloaded.error.has_value()

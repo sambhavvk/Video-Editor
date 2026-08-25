@@ -765,5 +765,46 @@ TEST(RenderCache, EvictsLeastRecentlyUsedFramesToBoundMemory) {
   EXPECT_TRUE(cache.get(key_b));
 }
 
+TEST(RenderCache, DistinguishesGraphSignaturesAndPreviewProfileHash) {
+  EXPECT_NE(preview_graph_signature({.scale = PreviewScale::Half,
+                                     .bypass_expensive_effects = true,
+                                     .use_proxies = true},
+                                    1),
+            preview_graph_signature({.scale = PreviewScale::Half,
+                                     .bypass_expensive_effects = true,
+                                     .use_proxies = true},
+                                    2));
+  EXPECT_NE(preview_graph_signature({.scale = PreviewScale::Full,
+                                     .bypass_expensive_effects = true,
+                                     .use_proxies = true},
+                                    1),
+            preview_graph_signature({.scale = PreviewScale::Half,
+                                     .bypass_expensive_effects = true,
+                                     .use_proxies = true},
+                                    1));
+  RenderCache cache(8U * 2U * 2U * 4U * sizeof(float));
+  auto first = std::make_shared<CpuFrame>(2, 2);
+  auto second = std::make_shared<CpuFrame>(2, 2);
+  first->clear(1.0F, 0.0F, 0.0F, 1.0F);
+  second->clear(0.0F, 1.0F, 0.0F, 1.0F);
+  const edit::EntityId sequence = edit::EntityId::generate();
+  const RenderCacheKey key_a{.revision = {1},
+                             .sequence_id = sequence,
+                             .time = edit::Time(0, 30),
+                             .width = 2,
+                             .height = 2,
+                             .graph_signature = 1};
+  RenderCacheKey key_b = key_a;
+  key_b.graph_signature = 2;
+  cache.put(key_a, first);
+  cache.put(key_b, second);
+  const auto hit_a = cache.get(key_a);
+  const auto hit_b = cache.get(key_b);
+  ASSERT_TRUE(hit_a);
+  ASSERT_TRUE(hit_b);
+  EXPECT_FLOAT_EQ(hit_a->pixel(0, 0)[0], 1.0F);
+  EXPECT_FLOAT_EQ(hit_b->pixel(0, 0)[1], 1.0F);
+}
+
 } // namespace
 } // namespace video_editor::render

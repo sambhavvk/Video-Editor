@@ -165,6 +165,7 @@ TEST(AssetRegistry, SelectsPresentProxyAndFallsBackWhenItIsMissing) {
   ASSERT_TRUE(fallback.has_value());
   EXPECT_FALSE(fallback->is_proxy);
   EXPECT_GT(fallback->registry_generation, original->registry_generation);
+  EXPECT_GT(registry.generation(), fallback->registry_generation);
   EXPECT_TRUE(registry.unregister_asset(asset_id));
   EXPECT_FALSE(registry.resolve(asset_id, false).has_value());
 }

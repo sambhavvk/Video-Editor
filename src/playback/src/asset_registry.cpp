@@ -134,4 +134,9 @@ std::size_t AssetRegistry::size() const noexcept {
   return impl_->entries.size();
 }
 
+std::uint64_t AssetRegistry::generation() const noexcept {
+  std::shared_lock lock(impl_->mutex);
+  return impl_->next_generation;
+}
+
 } // namespace video_editor::playback
