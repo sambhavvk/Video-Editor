@@ -99,12 +99,11 @@ contract used by the rest of the CPU compositor.
 - `GpuTimelineRenderer` walks an immutable snapshot without first invoking the
   CPU compositor. It decodes only active clips, uploads each clip separately,
   and uses `composite_timeline()` for crop, position, signed/non-uniform scale,
-  normalized anchor, center-pivot arbitrary rotation, opacity, and bottom-to-top
-  source-over composition. Muted video tracks are skipped, source-time mapping
+  normalized anchor, rotation (including a moved pivot), opacity, titles,
+  transitions, and the five premultiplied blend modes. Muted video tracks are skipped, source-time mapping
   remains exact rational time, and request epochs reject stale decode work.
 - Timeline output begins as opaque black, matching the CPU reference even when
-  no clips are active. Unsupported title clips, enabled clip/track effects,
-  non-Normal blend modes, and rotation combined with a moved/non-default pivot
+  no clips are active. Unknown enabled clip effect types
   return `GpuUnsupportedTimeline`; callers must use the CPU path for that frame
   rather than display an approximation.
 - `present()` renders to the swapchain configured at creation. An inaccessible

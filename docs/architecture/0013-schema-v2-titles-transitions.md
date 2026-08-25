@@ -11,7 +11,8 @@
 The beta timeline needs titles and transitions to be authoritative project state rather than UI
 presets. Those entities must survive save, recovery, and migration, and preview/export must share a
 deterministic reference result. Existing schema-v1 snapshots contain `ClipKind::Title` but no title
-payload, contain no transitions, and the GPU compositor deliberately rejects title clips.
+payload and contain no transitions. The GPU compositor later gained title/transition parity with the
+CPU oracle; unknown enabled clip effects still fail closed per frame.
 
 ## Decision
 
@@ -64,13 +65,15 @@ payload, contain no transitions, and the GPU compositor deliberately rejects tit
 - Transition source time is the ordinary clip mapping extrapolated into validated media handles.
   Cross Dissolve blends complete outgoing and incoming track results over the same lower-track
   baseline. Dip to Black reaches opaque black at the shared cut.
-- The built-in title rasterizer is deterministic and dependency-free. Unsupported glyphs use a
-  visible replacement glyph; the stored UTF-8 and font metadata are preserved for later shaped-text
-  renderers.
-- The GPU timeline renderer reports `GpuUnsupportedTimeline` for an active title or transition.
-  The desktop's existing per-frame CPU fallback handles that result without latching the GPU as
-  failed. Preview and reference export therefore stay correct while native GPU title/transition
-  shaders remain follow-up optimization work.
+- The built-in title rasterizer uses pinned HarfBuzz/FreeType shaping with the bundled Noto Sans
+  TTF for `sans-serif`, empty, `Noto Sans`, and `NotoSans` family requests. Unknown families and
+  shaping-init failures fall back to deterministic 5×7 bitmap glyphs with a visible replacement glyph
+  for unsupported codepoints; stored UTF-8 and font metadata are preserved.
+- The GPU timeline renderer matches CPU for titles, Cross Dissolve/Dip to Black transitions, the
+  five premultiplied blend modes, and enabled `video.color`/`video.crop`/`video.gaussian_blur`/`video.lut`/`video.curves` clip
+  effects. Unknown enabled clip effect types still return `GpuUnsupportedTimeline` for a per-frame CPU
+  fallback without latching the GPU as failed. Custom blends and transitions still download GPU
+  textures to apply the CPU oracle formulas before upload.
 
 ## Consequences
 

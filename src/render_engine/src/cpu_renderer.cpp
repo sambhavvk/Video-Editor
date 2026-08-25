@@ -8,9 +8,11 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <numbers>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -36,12 +38,6 @@ struct TitleStyle final {
   bool italic{false};
   int width{0};
   int height{0};
-};
-
-struct ActiveTransition final {
-  const edit::Transition* transition{nullptr};
-  const edit::Clip* outgoing{nullptr};
-  const edit::Clip* incoming{nullptr};
 };
 
 struct RenderedClip final {
@@ -257,34 +253,7 @@ void apply_box_blur(CpuFrame& frame, const double requested_radius) {
 
 void apply_visual_effects(RenderedClip& rendered, const edit::Time local_time,
                           const PreviewProfile& profile) {
-  for (const auto& effect : rendered.clip.effects) {
-    if (!effect.enabled || !effect.known) {
-      continue;
-    }
-    if (effect.type == "video.color") {
-      apply_color(*rendered.frame, effect, local_time);
-    } else if (effect.type == "video.gaussian_blur") {
-      if (!profile.bypass_expensive_effects) {
-        apply_box_blur(*rendered.frame, effect_number(effect, "radius", local_time).value_or(0.0));
-      }
-    } else if (effect.type == "video.crop") {
-      const double left = effect_number(effect, "left", local_time).value_or(0.0);
-      const double top = effect_number(effect, "top", local_time).value_or(0.0);
-      const double right = effect_number(effect, "right", local_time).value_or(0.0);
-      const double bottom = effect_number(effect, "bottom", local_time).value_or(0.0);
-      if (left >= 0.0 && top >= 0.0 && right >= 0.0 && bottom >= 0.0 && left + right < 1.0 &&
-          top + bottom < 1.0) {
-        const auto base_width =
-            1.0 - rendered.clip.transform.crop_left - rendered.clip.transform.crop_right;
-        const auto base_height =
-            1.0 - rendered.clip.transform.crop_top - rendered.clip.transform.crop_bottom;
-        rendered.clip.transform.crop_left += base_width * left;
-        rendered.clip.transform.crop_right += base_width * right;
-        rendered.clip.transform.crop_top += base_height * top;
-        rendered.clip.transform.crop_bottom += base_height * bottom;
-      }
-    }
-  }
+  apply_clip_visual_effects(*rendered.frame, rendered.clip, local_time, profile);
 }
 
 void composite(const CpuFrame& source, CpuFrame& destination, const edit::Clip& clip,
@@ -323,9 +292,6 @@ void composite(const CpuFrame& source, CpuFrame& destination, const edit::Clip& 
   }
 }
 
-[[nodiscard]] std::vector<char32_t> decode_utf8_with_replacement(std::string_view text) {
-  return render::decode_utf8_with_replacement(text);
-}
 
 [[nodiscard]] TitleStyle title_style_for(const edit::Clip& clip, const edit::Sequence& sequence,
                                          const PreviewProfile& profile) {
@@ -336,6 +302,7 @@ void composite(const CpuFrame& source, CpuFrame& destination, const edit::Clip& 
   if (clip.title.has_value()) {
     const auto& title = *clip.title;
     style.text = title.text;
+    style.font_family = title.font_family;
     style.foreground = title.foreground_color;
     style.background = title.background_color;
     style.alignment = title.horizontal_alignment;
@@ -348,67 +315,82 @@ void composite(const CpuFrame& source, CpuFrame& destination, const edit::Clip& 
   return style;
 }
 
-[[nodiscard]] std::shared_ptr<const CpuFrame> rasterize_title_frame(const edit::Clip& clip,
-                                                                    const edit::Sequence& sequence,
-                                                                    const PreviewProfile& profile) {
+[[nodiscard]] std::shared_ptr<const CpuFrame> detail_rasterize_title_frame(
+    const edit::Clip& clip, const edit::Sequence& sequence, const PreviewProfile& profile) {
   const TitleStyle style = title_style_for(clip, sequence, profile);
   auto frame = std::make_shared<CpuFrame>(style.width, style.height);
   fill_color(*frame, style.background);
 
-  const std::vector<char32_t> decoded = decode_utf8_with_replacement(style.text);
-  std::vector<std::vector<char32_t>> lines(1);
-  for (const char32_t codepoint : decoded) {
-    if (codepoint == U'\n') {
-      lines.emplace_back();
-      continue;
-    }
-    lines.back().push_back(render::supported_glyph(codepoint) ? codepoint : U'\uFFFD');
-  }
-  if (lines.empty()) {
-    lines.emplace_back();
+  if (style.text.empty()) {
+    return frame;
   }
 
-  std::size_t max_columns = 0;
-  for (const auto& line : lines) {
-    max_columns = std::max(max_columns, line.size());
-  }
-  const int cell_width = 6;
-  const int cell_height = 8;
-  const int content_width = static_cast<int>(std::max<std::size_t>(1U, max_columns) * cell_width);
-  const int content_height = static_cast<int>(lines.size() * cell_height);
   const double preview_font_size =
       style.font_size / static_cast<double>(preview_scale_divisor(profile.scale));
-  const int requested_scale = std::max(1, static_cast<int>(std::lround(preview_font_size / 8.0)));
-  const int fitted_scale = std::max(1, std::min(frame->width() / std::max(1, content_width),
-                                                frame->height() / std::max(1, content_height)));
-  const int scale = std::min(requested_scale, fitted_scale);
-  const int italic_padding = style.italic ? std::max(1, (2 * scale)) : 0;
-  const int scaled_content_height = content_height * scale;
-  const int top = std::max(0, (frame->height() - scaled_content_height) / 2);
+  double draw_font_size = preview_font_size;
+  TextBlockMetrics metrics =
+      measure_text_block(style.text, style.font_family, draw_font_size, style.bold, style.italic);
+  if (metrics.width > 0 && metrics.height > 0) {
+    const double width_scale = static_cast<double>(frame->width()) / static_cast<double>(metrics.width);
+    const double height_scale =
+        static_cast<double>(frame->height()) / static_cast<double>(metrics.height);
+    const double fit = std::min(1.0, std::min(width_scale, height_scale));
+    if (fit < 1.0) {
+      draw_font_size = preview_font_size * fit;
+      metrics =
+          measure_text_block(style.text, style.font_family, draw_font_size, style.bold, style.italic);
+    }
+  }
+  const int content_height = metrics.height;
+  const int top = std::max(0, (frame->height() - content_height) / 2);
 
+  const auto lines = [&style]() {
+    std::vector<std::string> split(1);
+    for (std::size_t index = 0; index < style.text.size(); ++index) {
+      if (style.text[index] == '\n') {
+        split.emplace_back();
+        continue;
+      }
+      split.back().push_back(style.text[index]);
+    }
+    if (split.empty()) {
+      split.emplace_back();
+    }
+    return split;
+  }();
+
+  TextHorizontalAlignment text_alignment = TextHorizontalAlignment::Center;
+  switch (style.alignment) {
+  case edit::TitleHorizontalAlignment::Left:
+    text_alignment = TextHorizontalAlignment::Left;
+    break;
+  case edit::TitleHorizontalAlignment::Center:
+    text_alignment = TextHorizontalAlignment::Center;
+    break;
+  case edit::TitleHorizontalAlignment::Right:
+    text_alignment = TextHorizontalAlignment::Right;
+    break;
+  }
+
+  int line_y = top;
   for (std::size_t line_index = 0; line_index < lines.size(); ++line_index) {
-    const auto& line = lines[line_index];
-    const int line_width = (static_cast<int>(line.size()) * cell_width * scale) + italic_padding;
+    const int line_width =
+        line_index < metrics.line_widths.size() ? metrics.line_widths[line_index] : 0;
     int left = 0;
-    switch (style.alignment) {
-    case edit::TitleHorizontalAlignment::Left:
+    switch (text_alignment) {
+    case TextHorizontalAlignment::Left:
       left = 0;
       break;
-    case edit::TitleHorizontalAlignment::Center:
+    case TextHorizontalAlignment::Center:
       left = std::max(0, (frame->width() - line_width) / 2);
       break;
-    case edit::TitleHorizontalAlignment::Right:
+    case TextHorizontalAlignment::Right:
       left = std::max(0, frame->width() - line_width);
       break;
     }
-    for (std::size_t glyph_index = 0; glyph_index < line.size(); ++glyph_index) {
-      const auto glyph = line[glyph_index] == U'\uFFFD'
-                             ? render::replacement_glyph()
-                             : render::glyph_for_ascii(line[glyph_index]);
-      render::draw_glyph(*frame, glyph, left + static_cast<int>(glyph_index * cell_width) * scale,
-                         top + static_cast<int>(line_index * cell_height) * scale, scale,
-                         style.foreground, style.bold, style.italic);
-    }
+    draw_text_line(*frame, lines[line_index], style.font_family, left, line_y, draw_font_size,
+                   style.bold, style.italic, style.foreground);
+    line_y += metrics.line_height;
   }
   return frame;
 }
@@ -419,27 +401,6 @@ void composite(const CpuFrame& source, CpuFrame& destination, const edit::Clip& 
       std::find_if(track.clips.begin(), track.clips.end(),
                    [&clip_id](const edit::Clip& clip) { return clip.id == clip_id; });
   return found == track.clips.end() ? nullptr : &*found;
-}
-
-[[nodiscard]] std::optional<ActiveTransition>
-active_transition_for_track(const edit::Sequence& sequence, const edit::Track& track,
-                            const edit::Time time) {
-  for (const edit::Transition& transition : sequence.transitions) {
-    if (!transition.enabled || !transition.range.contains(time)) {
-      continue;
-    }
-    const edit::Clip* outgoing = find_clip_on_track(track, transition.outgoing_clip_id);
-    const edit::Clip* incoming = find_clip_on_track(track, transition.incoming_clip_id);
-    if (outgoing == nullptr || incoming == nullptr) {
-      continue;
-    }
-    return ActiveTransition{
-        .transition = &transition,
-        .outgoing = outgoing,
-        .incoming = incoming,
-    };
-  }
-  return std::nullopt;
 }
 
 [[nodiscard]] std::shared_ptr<CpuFrame> clone_frame(const CpuFrame& source) {
@@ -453,7 +414,7 @@ render_clip_source(const edit::Clip& clip, const edit::Sequence& sequence, const
                    const PreviewProfile& profile, const std::uint64_t request_epoch,
                    FrameProvider& provider, const CpuRenderer& renderer) {
   if (clip.kind == edit::ClipKind::Title) {
-    auto frame = std::make_shared<CpuFrame>(*rasterize_title_frame(clip, sequence, profile));
+    auto frame = std::make_shared<CpuFrame>(*detail_rasterize_title_frame(clip, sequence, profile));
     RenderedClip rendered{.frame = std::move(frame), .clip = clip};
     apply_visual_effects(rendered, time - clip.timeline_range.start, profile);
     return RenderResult<RenderedClip>::success(std::move(rendered));
@@ -497,8 +458,120 @@ render_track_clip_over_baseline(const edit::Clip& clip, const edit::Sequence& se
   return RenderResult<std::shared_ptr<CpuFrame>>::success(std::move(rendered));
 }
 
-[[nodiscard]] std::shared_ptr<CpuFrame> blend_frames(const CpuFrame& left, const CpuFrame& right,
-                                                     const float factor) {
+[[nodiscard]] std::shared_ptr<CpuFrame> black_frame_like(const CpuFrame& source) {
+  auto black = std::make_shared<CpuFrame>(source.width(), source.height());
+  black->clear(0.0F, 0.0F, 0.0F, 1.0F);
+  return black;
+}
+
+} // namespace
+
+float cpu_timeline_saturate(const double value) noexcept {
+  return saturate(value);
+}
+
+double cpu_timeline_time_ratio(const edit::Time numerator, const edit::Time denominator) {
+  return time_ratio(numerator, denominator);
+}
+
+bool clip_has_unsupported_gpu_effects(const std::vector<edit::Effect>& effects) {
+  return std::any_of(effects.begin(), effects.end(), [](const edit::Effect& effect) {
+    if (!effect.enabled) {
+      return false;
+    }
+    return effect.type != "video.color" && effect.type != "video.gaussian_blur" &&
+           effect.type != "video.crop";
+  });
+}
+
+void composite_clip_onto_frame(const CpuFrame& source, CpuFrame& destination, const edit::Clip& clip,
+                               const std::uint32_t sequence_width,
+                               const std::uint32_t sequence_height) {
+  composite(source, destination, clip, sequence_width, sequence_height);
+}
+
+void composite_blend_frame(CpuFrame& destination, const CpuFrame& source,
+                           const edit::BlendMode blend_mode) {
+  for (int y = 0; y < destination.height(); ++y) {
+    for (int x = 0; x < destination.width(); ++x) {
+      const auto sampled = source.pixel(x, y);
+      if (sampled[3] <= 0.0F) {
+        continue;
+      }
+      std::array<float, 4> sampled_array{
+          sampled[0],
+          sampled[1],
+          sampled[2],
+          sampled[3],
+      };
+      blend_premultiplied(sampled_array, 1.0F, blend_mode, destination.pixel(x, y));
+    }
+  }
+}
+
+std::shared_ptr<CpuFrame> rasterize_title_frame(const edit::Clip& clip,
+                                                const edit::Sequence& sequence,
+                                                const PreviewProfile& profile) {
+  return std::make_shared<CpuFrame>(*detail_rasterize_title_frame(clip, sequence, profile));
+}
+
+void apply_clip_visual_effects(CpuFrame& frame, edit::Clip& clip, const edit::Time local_time,
+                               const PreviewProfile& profile) {
+  for (const auto& effect : clip.effects) {
+    if (!effect.enabled || !effect.known) {
+      continue;
+    }
+    if (effect.type == "video.color") {
+      apply_color(frame, effect, local_time);
+    } else if (effect.type == "video.gaussian_blur") {
+      if (!profile.bypass_expensive_effects) {
+        apply_box_blur(frame, effect_number(effect, "radius", local_time).value_or(0.0));
+      }
+    } else if (effect.type == "video.lut") {
+      apply_lut(frame, effect, local_time);
+    } else if (effect.type == "video.curves") {
+      apply_curves(frame, effect, local_time);
+    } else if (effect.type == "video.crop") {
+      const double left = effect_number(effect, "left", local_time).value_or(0.0);
+      const double top = effect_number(effect, "top", local_time).value_or(0.0);
+      const double right = effect_number(effect, "right", local_time).value_or(0.0);
+      const double bottom = effect_number(effect, "bottom", local_time).value_or(0.0);
+      if (left >= 0.0 && top >= 0.0 && right >= 0.0 && bottom >= 0.0 && left + right < 1.0 &&
+          top + bottom < 1.0) {
+        const auto base_width = 1.0 - clip.transform.crop_left - clip.transform.crop_right;
+        const auto base_height = 1.0 - clip.transform.crop_top - clip.transform.crop_bottom;
+        clip.transform.crop_left += base_width * left;
+        clip.transform.crop_right += base_width * right;
+        clip.transform.crop_top += base_height * top;
+        clip.transform.crop_bottom += base_height * bottom;
+      }
+    }
+  }
+}
+
+std::optional<ActiveTransitionInfo> active_transition_for_track(const edit::Sequence& sequence,
+                                                                const edit::Track& track,
+                                                                const edit::Time time) {
+  for (const edit::Transition& transition : sequence.transitions) {
+    if (!transition.enabled || !transition.range.contains(time)) {
+      continue;
+    }
+    const edit::Clip* outgoing = find_clip_on_track(track, transition.outgoing_clip_id);
+    const edit::Clip* incoming = find_clip_on_track(track, transition.incoming_clip_id);
+    if (outgoing == nullptr || incoming == nullptr) {
+      continue;
+    }
+    return ActiveTransitionInfo{
+        .transition = &transition,
+        .outgoing = outgoing,
+        .incoming = incoming,
+    };
+  }
+  return std::nullopt;
+}
+
+std::shared_ptr<CpuFrame> blend_frames(const CpuFrame& left, const CpuFrame& right,
+                                       const float factor) {
   auto output = std::make_shared<CpuFrame>(left.width(), left.height());
   const float clamped = std::clamp(factor, 0.0F, 1.0F);
   for (int y = 0; y < left.height(); ++y) {
@@ -514,13 +587,9 @@ render_track_clip_over_baseline(const edit::Clip& clip, const edit::Sequence& se
   return output;
 }
 
-[[nodiscard]] std::shared_ptr<CpuFrame> black_frame_like(const CpuFrame& source) {
-  auto black = std::make_shared<CpuFrame>(source.width(), source.height());
-  black->clear(0.0F, 0.0F, 0.0F, 1.0F);
-  return black;
+std::shared_ptr<CpuFrame> opaque_black_frame_like(const CpuFrame& source) {
+  return black_frame_like(source);
 }
-
-} // namespace
 
 CpuRenderer::CpuRenderer(std::shared_ptr<FrameProvider> provider) : provider_(std::move(provider)) {
   if (!provider_) {

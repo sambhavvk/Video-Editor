@@ -10,6 +10,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace video_editor::render {
 
@@ -88,6 +89,40 @@ public:
   [[nodiscard]] virtual RenderResult<std::shared_ptr<const CpuFrame>>
   request(const AssetFrameRequest& request) = 0;
 };
+
+struct ActiveTransitionInfo final {
+  const edit::Transition* transition{nullptr};
+  const edit::Clip* outgoing{nullptr};
+  const edit::Clip* incoming{nullptr};
+};
+
+[[nodiscard]] std::shared_ptr<CpuFrame> rasterize_title_frame(const edit::Clip& clip,
+                                                              const edit::Sequence& sequence,
+                                                              const PreviewProfile& profile);
+
+void apply_clip_visual_effects(CpuFrame& frame, edit::Clip& clip, edit::Time local_time,
+                               const PreviewProfile& profile);
+
+[[nodiscard]] std::optional<ActiveTransitionInfo>
+active_transition_for_track(const edit::Sequence& sequence, const edit::Track& track,
+                            edit::Time time);
+
+[[nodiscard]] std::shared_ptr<CpuFrame> blend_frames(const CpuFrame& left, const CpuFrame& right,
+                                                     float factor);
+
+[[nodiscard]] std::shared_ptr<CpuFrame> opaque_black_frame_like(const CpuFrame& source);
+
+[[nodiscard]] float cpu_timeline_saturate(double value) noexcept;
+
+[[nodiscard]] double cpu_timeline_time_ratio(edit::Time numerator, edit::Time denominator);
+
+[[nodiscard]] bool clip_has_unsupported_gpu_effects(const std::vector<edit::Effect>& effects);
+
+void composite_clip_onto_frame(const CpuFrame& source, CpuFrame& destination, const edit::Clip& clip,
+                               std::uint32_t sequence_width, std::uint32_t sequence_height);
+
+void composite_blend_frame(CpuFrame& destination, const CpuFrame& source,
+                           edit::BlendMode blend_mode);
 
 class CpuRenderer final {
 public:

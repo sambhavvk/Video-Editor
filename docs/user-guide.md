@@ -8,13 +8,15 @@ often and keep the original media files available.
 
 ## Important limitations
 
-- The desktop first requests an engine GPU path for active video clips through libplacebo, applying
-  crop, position, scale, a custom anchor or centered-pivot rotation, opacity, and Normal composition,
-  then downloads the offscreen result for the viewer. Rotation around a moved pivot, effects, title
-  clips, active transitions, and non-Normal blends use CPU for that frame without disabling future
-  GPU attempts.
-  Backend/device failures preserve the CPU frame and latch CPU preview for the session. This is not
-  native swapchain presentation, zero-copy decode, or a full effects/color graph.
+- The desktop first requests an engine GPU path for active video and title clips through libplacebo,
+  applying crop, position, scale, anchor, rotation, opacity, the five premultiplied blend modes,
+  supported clip color/crop/blur effects, and Cross Dissolve/Dip to Black transitions. On Linux,
+  when the program monitor has a working Vulkan surface, frames can present natively without host
+  readback; otherwise the offscreen result is downloaded for the viewer. The source monitor always
+  uses the QImage path. Unknown enabled clip effect types use CPU for that frame without disabling
+  future GPU attempts. Backend/device failures preserve the CPU frame and latch CPU preview for the
+  session. This is not zero-copy decode or a full effects/color graph, and product builds do not
+  claim vsync guarantees.
 - Forward 1× transport uses optional miniaudio 48 kHz stereo playback when the selected output opens.
   Its playhead uses a latency-compensated audio-master position, not the end of the submitted device
   buffer; the remaining latency is reported as uncertainty. Otherwise it clearly falls back to
@@ -215,26 +217,26 @@ The program viewer requests frames asynchronously from the current immutable tim
 New seeks use a newer request epoch so stale decode work cannot replace the latest viewer image.
 The CPU path seeks from the preceding keyframe and decodes in presentation order.
 
-The render engine requests only active video clips and composes supported crop, position, scale,
-custom anchor or centered-pivot rotation, opacity, and Normal source-over on a compatible D3D11
-(Windows) or Vulkan (Linux) libplacebo device. The desktop tries this before the deterministic CPU
-renderer and downloads the offscreen GPU image for Qt. Rotation around a moved pivot, enabled
-effects, title clips, active transitions, and non-Normal blend modes fall back to CPU for just that
+The render engine requests active video/title clips and composes supported crop, position, scale,
+anchor, rotation, opacity, the five premultiplied blend modes, supported clip color/crop/blur
+effects, and Cross Dissolve/Dip to Black transitions on a compatible D3D11 (Windows) or Vulkan
+(Linux) libplacebo device. The desktop tries this before the deterministic CPU renderer and downloads
+the offscreen GPU image for Qt. Unknown enabled clip effect types fall back to CPU for just that
 frame; initialization, upload, composite, readback, or device failure preserves the CPU frame,
-reports a local diagnostic, and
-disables later GPU attempts until restart. The Program title and one transient message identify an
-active backend. The path provides neither zero-copy decode, HDR tone mapping, native presentation,
-nor a full GPU effects/color graph.
+reports a local diagnostic, and disables later GPU attempts until restart. The Program title and one
+transient message identify an active backend. The path provides neither zero-copy decode, HDR tone
+mapping, native presentation, nor a full native GPU effects/color graph.
 
 Current transport supports reverse, stop, forward, play/pause, single-frame movement, ruler seeking,
 and J/K/L shuttle stepping. For forward 1× playback, a miniaudio-enabled build renders exact ranges
 from an immutable timeline snapshot on a worker, prefills a bounded ring, and starts the selected
 output. The audio callback records the submitted position, while the playhead uses a conservative
-latency-compensated position and exposes output latency as uncertainty; pause, resume, and seek
-update that same clock. Qt actions enqueue versioned commands on a serialized background-control
-thread, so media prefill does not block the UI. Video holds position while start/seek is pending and
-follows the audio master only after successful completion. A completed edit or project replacement
-enqueues stop for the old revision's playback.
+latency-compensated position and exposes output latency as uncertainty; per-device **Calibrate** in
+the Audio Mixer stores a measured offset in settings (residual uncertainty remains). Pause, resume,
+and seek update that same clock. Qt actions enqueue versioned commands on a serialized
+background-control thread, so media prefill does not block the UI. Video holds position while
+start/seek is pending and follows the audio master only after successful completion. A completed edit
+or project replacement enqueues stop for the old revision's playback.
 
 The viewer keeps one preview render in flight during transport. Timer ticks coalesce to the newest
 playhead instead of repeatedly canceling the active decode, so slower CPU/GPU frames continue to be

@@ -13,8 +13,9 @@ libplacebo device and backend resources.
 `begin_epoch`, `current_epoch`, and `request_frame` follow the same cancellation contract as
 `CpuRenderer`. A successful request returns an owned `GpuImage` that shares the device lifetime.
 
-The native timeline path supports the explicitly documented transform and normal-composition
-subset. An active title or enabled transition returns `RenderErrorCode::GpuUnsupportedTimeline`.
+The native timeline path supports titles, Cross Dissolve/Dip to Black, the five premultiplied blend
+modes, moved-pivot rotation, and known clip color/crop/blur effects. An enabled clip effect outside
+that set returns `RenderErrorCode::GpuUnsupportedTimeline`.
 This is a capability signal, not a device failure: the controller must render that frame through
 `CpuRenderer`, keep the GPU session available, and retry native GPU rendering on a later supported
 frame. Device-loss errors are separate and may latch session fallback.

@@ -36,7 +36,8 @@ struct SnapshotFixture final {
 
 [[nodiscard]] SnapshotFixture make_snapshot(const edit::Transform& transform = {},
                                             const edit::BlendMode blend = edit::BlendMode::Normal,
-                                            const bool muted = false, const bool visible = true) {
+                                            const bool muted = false, const bool visible = true,
+                                            std::vector<edit::Effect> effects = {}) {
   edit::Project project;
   edit::Asset asset;
   asset.id = edit::EntityId::generate();
@@ -64,6 +65,7 @@ struct SnapshotFixture final {
   clip.playback_rate = edit::Rate(2, 1);
   clip.transform = transform;
   clip.blend_mode = blend;
+  clip.effects = std::move(effects);
   track.clips.push_back(clip);
   sequence.tracks.push_back(track);
   const edit::EntityId sequence_id = sequence.id;
@@ -99,7 +101,8 @@ struct SnapshotFixture final {
   return {.snapshot = result.value(), .asset_id = {}};
 }
 
-[[nodiscard]] SnapshotFixture make_transition_snapshot() {
+[[nodiscard]] SnapshotFixture make_transition_snapshot(
+    const edit::TransitionKind kind = edit::TransitionKind::CrossDissolve) {
   edit::Project project;
   edit::Asset outgoing;
   outgoing.id = edit::EntityId::generate();
@@ -137,7 +140,7 @@ struct SnapshotFixture final {
       .outgoing_clip_id = left.id,
       .incoming_clip_id = right.id,
       .range = {edit::Time(8, 1), edit::Time(4, 1)},
-      .kind = edit::TransitionKind::CrossDissolve,
+      .kind = kind,
       .enabled = true,
   });
 
@@ -309,55 +312,199 @@ TEST(GpuTimelineRenderer, InvisibleTimelineReturnsOpaqueBlackWithoutDecode) {
   EXPECT_FLOAT_EQ(pixels->pixel(0, 0)[3], 1.0F);
 }
 
-TEST(GpuTimelineRenderer, UnsupportedBlendReturnsTypedFallbackBeforeDecode) {
-  const auto fixture = make_snapshot({}, edit::BlendMode::Multiply);
+TEST(GpuTimelineRenderer, OverlayBlendMatchesCpuReference) {
+  const auto fixture = make_snapshot({}, edit::BlendMode::Overlay);
   auto provider = std::make_shared<RecordingProvider>();
+  provider->frames[fixture.asset_id] = pattern();
   auto gpu = std::shared_ptr<GpuRenderer>(GpuRenderer::create({.allow_software = true}));
+  ASSERT_NE(gpu, nullptr);
+  if (!gpu->capabilities().available()) {
+    GTEST_SKIP() << gpu->capabilities().diagnostic;
+  }
+  CpuRenderer cpu(provider);
   GpuTimelineRenderer timeline(provider, gpu);
+  cpu.begin_epoch(2);
   timeline.begin_epoch(2);
-  const auto result = timeline.request_frame(fixture.snapshot, edit::Time(5, 2), {}, 2);
-  ASSERT_FALSE(result);
-  EXPECT_EQ(result.error->code, RenderErrorCode::GpuUnsupportedTimeline);
-  EXPECT_TRUE(provider->requests.empty());
+  const auto expected = cpu.request_frame(fixture.snapshot, edit::Time(5, 2), {}, 2);
+  const auto gpu_image = timeline.request_frame(fixture.snapshot, edit::Time(5, 2), {}, 2);
+  ASSERT_TRUE(expected) << expected.error->message;
+  ASSERT_TRUE(gpu_image) << gpu_image.error->message;
+  const auto actual = gpu->download(*gpu_image.value);
+  ASSERT_TRUE(actual) << actual.error->message;
+  expect_cpu_parity(*expected.value, *actual.value, 0.003F);
 }
 
-TEST(GpuTimelineRenderer, RotationWithMovedPivotReturnsTypedFallbackBeforeDecode) {
+TEST(GpuTimelineRenderer, MultiplyBlendMatchesCpuReference) {
+  const auto fixture = make_snapshot({}, edit::BlendMode::Multiply);
+  auto provider = std::make_shared<RecordingProvider>();
+  provider->frames[fixture.asset_id] = pattern();
+  auto gpu = std::shared_ptr<GpuRenderer>(GpuRenderer::create({.allow_software = true}));
+  ASSERT_NE(gpu, nullptr);
+  if (!gpu->capabilities().available()) {
+    GTEST_SKIP() << gpu->capabilities().diagnostic;
+  }
+  CpuRenderer cpu(provider);
+  GpuTimelineRenderer timeline(provider, gpu);
+  cpu.begin_epoch(13);
+  timeline.begin_epoch(13);
+  const auto expected = cpu.request_frame(fixture.snapshot, edit::Time(5, 2), {}, 13);
+  const auto gpu_image = timeline.request_frame(fixture.snapshot, edit::Time(5, 2), {}, 13);
+  ASSERT_TRUE(expected) << expected.error->message;
+  ASSERT_TRUE(gpu_image) << gpu_image.error->message;
+  const auto actual = gpu->download(*gpu_image.value);
+  ASSERT_TRUE(actual) << actual.error->message;
+  expect_cpu_parity(*expected.value, *actual.value, 0.003F);
+}
+
+TEST(GpuTimelineRenderer, RotationWithMovedPivotMatchesCpuReference) {
   edit::Transform transform;
   transform.rotation_degrees = 30.0;
   transform.position.x = 1.0;
+  transform.anchor_x = 0.25;
   const auto fixture = make_snapshot(transform);
   auto provider = std::make_shared<RecordingProvider>();
+  provider->frames[fixture.asset_id] = pattern();
   auto gpu = std::shared_ptr<GpuRenderer>(GpuRenderer::create({.allow_software = true}));
+  ASSERT_NE(gpu, nullptr);
+  if (!gpu->capabilities().available()) {
+    GTEST_SKIP() << gpu->capabilities().diagnostic;
+  }
+  CpuRenderer cpu(provider);
   GpuTimelineRenderer timeline(provider, gpu);
+  cpu.begin_epoch(3);
   timeline.begin_epoch(3);
-  const auto result = timeline.request_frame(fixture.snapshot, edit::Time(5, 2), {}, 3);
-  ASSERT_FALSE(result);
-  EXPECT_EQ(result.error->code, RenderErrorCode::GpuUnsupportedTimeline);
-  EXPECT_TRUE(provider->requests.empty());
+  const auto expected = cpu.request_frame(fixture.snapshot, edit::Time(5, 2), {}, 3);
+  const auto gpu_image = timeline.request_frame(fixture.snapshot, edit::Time(5, 2), {}, 3);
+  ASSERT_TRUE(expected) << expected.error->message;
+  ASSERT_TRUE(gpu_image) << gpu_image.error->message;
+  const auto actual = gpu->download(*gpu_image.value);
+  ASSERT_TRUE(actual) << actual.error->message;
+  expect_cpu_parity(*expected.value, *actual.value, 0.05F);
 }
 
-TEST(GpuTimelineRenderer, ActiveTitleReturnsTypedFallbackBeforeDecode) {
+TEST(GpuTimelineRenderer, ActiveTitleMatchesCpuReference) {
   const auto fixture = make_title_snapshot();
   auto provider = std::make_shared<RecordingProvider>();
   auto gpu = std::shared_ptr<GpuRenderer>(GpuRenderer::create({.allow_software = true}));
+  ASSERT_NE(gpu, nullptr);
+  if (!gpu->capabilities().available()) {
+    GTEST_SKIP() << gpu->capabilities().diagnostic;
+  }
+  CpuRenderer cpu(provider);
   GpuTimelineRenderer timeline(provider, gpu);
+  cpu.begin_epoch(11);
   timeline.begin_epoch(11);
-  const auto result = timeline.request_frame(fixture.snapshot, edit::Time(5, 2), {}, 11);
-  ASSERT_FALSE(result);
-  EXPECT_EQ(result.error->code, RenderErrorCode::GpuUnsupportedTimeline);
+  const auto expected = cpu.request_frame(fixture.snapshot, edit::Time(5, 2), {}, 11);
+  provider->requests.clear();
+  const auto gpu_image = timeline.request_frame(fixture.snapshot, edit::Time(5, 2), {}, 11);
+  ASSERT_TRUE(expected) << expected.error->message;
+  ASSERT_TRUE(gpu_image) << gpu_image.error->message;
   EXPECT_TRUE(provider->requests.empty());
+  const auto actual = gpu->download(*gpu_image.value);
+  ASSERT_TRUE(actual) << actual.error->message;
+  expect_cpu_parity(*expected.value, *actual.value, 0.003F);
 }
 
-TEST(GpuTimelineRenderer, ActiveTransitionReturnsTypedFallbackBeforeDecode) {
+TEST(GpuTimelineRenderer, CrossDissolveTransitionMatchesCpuReference) {
   const auto fixture = make_transition_snapshot();
+  auto provider = std::make_shared<RecordingProvider>();
+  for (const edit::Clip& clip : fixture.snapshot.sequence().tracks.front().clips) {
+    provider->frames[clip.asset_id] = pattern();
+  }
+  auto gpu = std::shared_ptr<GpuRenderer>(GpuRenderer::create({.allow_software = true}));
+  ASSERT_NE(gpu, nullptr);
+  if (!gpu->capabilities().available()) {
+    GTEST_SKIP() << gpu->capabilities().diagnostic;
+  }
+  CpuRenderer cpu(provider);
+  GpuTimelineRenderer timeline(provider, gpu);
+  cpu.begin_epoch(12);
+  timeline.begin_epoch(12);
+  const edit::Time requested_time(10, 1);
+  const auto expected = cpu.request_frame(fixture.snapshot, requested_time, {}, 12);
+  const auto gpu_image = timeline.request_frame(fixture.snapshot, requested_time, {}, 12);
+  ASSERT_TRUE(expected) << expected.error->message;
+  ASSERT_TRUE(gpu_image) << gpu_image.error->message;
+  const auto actual = gpu->download(*gpu_image.value);
+  ASSERT_TRUE(actual) << actual.error->message;
+  expect_cpu_parity(*expected.value, *actual.value, 0.003F);
+}
+
+TEST(GpuTimelineRenderer, DipToBlackBeforeCutMatchesCpuReference) {
+  const auto fixture = make_transition_snapshot(edit::TransitionKind::DipToBlack);
+  auto provider = std::make_shared<RecordingProvider>();
+  for (const edit::Clip& clip : fixture.snapshot.sequence().tracks.front().clips) {
+    provider->frames[clip.asset_id] = pattern();
+  }
+  auto gpu = std::shared_ptr<GpuRenderer>(GpuRenderer::create({.allow_software = true}));
+  ASSERT_NE(gpu, nullptr);
+  if (!gpu->capabilities().available()) {
+    GTEST_SKIP() << gpu->capabilities().diagnostic;
+  }
+  CpuRenderer cpu(provider);
+  GpuTimelineRenderer timeline(provider, gpu);
+  cpu.begin_epoch(14);
+  timeline.begin_epoch(14);
+  const edit::Time requested_time(9, 1);
+  const auto expected = cpu.request_frame(fixture.snapshot, requested_time, {}, 14);
+  const auto gpu_image = timeline.request_frame(fixture.snapshot, requested_time, {}, 14);
+  ASSERT_TRUE(expected) << expected.error->message;
+  ASSERT_TRUE(gpu_image) << gpu_image.error->message;
+  const auto actual = gpu->download(*gpu_image.value);
+  ASSERT_TRUE(actual) << actual.error->message;
+  expect_cpu_parity(*expected.value, *actual.value, 0.003F);
+}
+
+TEST(GpuTimelineRenderer, ColorEffectMatchesCpuReference) {
+  edit::Effect color_effect;
+  color_effect.enabled = true;
+  color_effect.known = true;
+  color_effect.type = "video.color";
+  edit::EffectParameter exposure{.id = "exposure", .value = 0.5, .keyframes = {}};
+  color_effect.parameters.emplace(exposure.id, exposure);
+  const auto fixture = make_snapshot({}, edit::BlendMode::Normal, false, true, {color_effect});
+  auto provider = std::make_shared<RecordingProvider>();
+  provider->frames[fixture.asset_id] = pattern();
+  auto gpu = std::shared_ptr<GpuRenderer>(GpuRenderer::create({.allow_software = true}));
+  ASSERT_NE(gpu, nullptr);
+  if (!gpu->capabilities().available()) {
+    GTEST_SKIP() << gpu->capabilities().diagnostic;
+  }
+  CpuRenderer cpu(provider);
+  GpuTimelineRenderer timeline(provider, gpu);
+  cpu.begin_epoch(15);
+  timeline.begin_epoch(15);
+  const auto expected = cpu.request_frame(fixture.snapshot, edit::Time(5, 2), {}, 15);
+  const auto gpu_image = timeline.request_frame(fixture.snapshot, edit::Time(5, 2), {}, 15);
+  ASSERT_TRUE(expected) << expected.error->message;
+  ASSERT_TRUE(gpu_image) << gpu_image.error->message;
+  const auto actual = gpu->download(*gpu_image.value);
+  ASSERT_TRUE(actual) << actual.error->message;
+  expect_cpu_parity(*expected.value, *actual.value, 0.003F);
+}
+
+TEST(GpuTimelineRenderer, UnknownEnabledEffectReturnsTypedFallbackBeforeDecode) {
+  edit::Effect unknown_effect;
+  unknown_effect.enabled = true;
+  unknown_effect.known = true;
+  unknown_effect.type = "video.custom_filter";
+  const auto fixture = make_snapshot({}, edit::BlendMode::Normal, false, true, {unknown_effect});
   auto provider = std::make_shared<RecordingProvider>();
   auto gpu = std::shared_ptr<GpuRenderer>(GpuRenderer::create({.allow_software = true}));
   GpuTimelineRenderer timeline(provider, gpu);
-  timeline.begin_epoch(12);
-  const auto result = timeline.request_frame(fixture.snapshot, edit::Time(10, 1), {}, 12);
+  timeline.begin_epoch(16);
+  const auto result = timeline.request_frame(fixture.snapshot, edit::Time(5, 2), {}, 16);
   ASSERT_FALSE(result);
   EXPECT_EQ(result.error->code, RenderErrorCode::GpuUnsupportedTimeline);
   EXPECT_TRUE(provider->requests.empty());
+  timeline.begin_epoch(17);
+  const auto plain_fixture = make_snapshot({}, edit::BlendMode::Normal, false, true, {});
+  provider->frames[plain_fixture.asset_id] = pattern();
+  const auto recovered =
+      timeline.request_frame(plain_fixture.snapshot, edit::Time(5, 2), {}, 17);
+  if (gpu->capabilities().available()) {
+    ASSERT_TRUE(recovered) << recovered.error->message;
+  }
 }
 
 TEST(GpuTimelineRenderer, RejectsStaleEpochBeforeDecode) {
@@ -441,6 +588,25 @@ TEST(GpuTimelineRenderer, DeviceLostKeepsCpuFrameAndLeavesRevisionUnchanged) {
   EXPECT_EQ((*cpu_after_storage)->width(), (*cpu_storage)->width());
   EXPECT_EQ((*cpu_after_storage)->height(), (*cpu_storage)->height());
   EXPECT_EQ(editor.revision(), revision);
+}
+
+TEST(GpuTimelineRenderer, EnabledLutReturnsGpuUnsupportedTimeline) {
+  edit::Effect lut_effect;
+  lut_effect.enabled = true;
+  lut_effect.known = true;
+  lut_effect.type = "video.lut";
+  lut_effect.parameters.emplace("path", edit::EffectParameter{.id = "path",
+                                                            .value = std::string{"/tmp/test.cube"},
+                                                            .keyframes = {}});
+  const auto fixture = make_snapshot({}, edit::BlendMode::Normal, false, true, {lut_effect});
+  auto provider = std::make_shared<RecordingProvider>();
+  auto gpu = std::shared_ptr<GpuRenderer>(GpuRenderer::create({.allow_software = true}));
+  GpuTimelineRenderer timeline(provider, gpu);
+  timeline.begin_epoch(18);
+  const auto result = timeline.request_frame(fixture.snapshot, edit::Time(5, 2), {}, 18);
+  ASSERT_FALSE(result);
+  EXPECT_EQ(result.error->code, RenderErrorCode::GpuUnsupportedTimeline);
+  EXPECT_TRUE(provider->requests.empty());
 }
 
 } // namespace

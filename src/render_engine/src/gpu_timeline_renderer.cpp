@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "video_editor/render_engine/gpu_timeline_renderer.h"
 
+#include "video_editor/render_engine/cpu_renderer.h"
+
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <stdexcept>
 #include <vector>
 
@@ -21,35 +24,197 @@ namespace {
   return clip.reversed ? clip.source_range.end() - offset : clip.source_range.start + offset;
 }
 
-[[nodiscard]] bool has_enabled_effects(const std::vector<edit::Effect>& effects) {
-  return std::any_of(effects.begin(), effects.end(),
-                     [](const edit::Effect& effect) { return effect.enabled; });
-}
-
-[[nodiscard]] const edit::Clip* find_clip_on_track(const edit::Track& track,
-                                                   const edit::EntityId clip_id) {
-  const auto found =
-      std::find_if(track.clips.begin(), track.clips.end(),
-                   [&clip_id](const edit::Clip& clip) { return clip.id == clip_id; });
-  return found == track.clips.end() ? nullptr : &*found;
-}
-
-[[nodiscard]] bool has_active_transition_on_track(const edit::Sequence& sequence,
-                                                  const edit::Track& track, const edit::Time time) {
-  return std::any_of(sequence.transitions.begin(), sequence.transitions.end(),
-                     [&track, time](const edit::Transition& transition) {
-                       if (!transition.enabled || !transition.range.contains(time)) {
-                         return false;
-                       }
-                       return find_clip_on_track(track, transition.outgoing_clip_id) != nullptr &&
-                              find_clip_on_track(track, transition.incoming_clip_id) != nullptr;
-                     });
-}
-
 [[nodiscard]] RenderResult<GpuImage> stale() {
   return RenderResult<GpuImage>::failure(
       {.code = RenderErrorCode::StaleRequest,
        .message = "GPU timeline request belongs to a stale epoch"});
+}
+
+[[nodiscard]] RenderResult<GpuImage> unsupported_timeline(std::string message) {
+  return RenderResult<GpuImage>::failure(
+      {.code = RenderErrorCode::GpuUnsupportedTimeline, .message = std::move(message)});
+}
+
+[[nodiscard]] bool valid_clip_transform(const edit::Transform& transform,
+                                        std::string& diagnostic) {
+  if (!std::isfinite(transform.scale.x) || !std::isfinite(transform.scale.y) ||
+      transform.scale.x == 0.0 || transform.scale.y == 0.0) {
+    diagnostic = "GPU timeline preview requires finite, non-zero clip scale";
+    return false;
+  }
+  return true;
+}
+
+[[nodiscard]] VideoFrame make_video_frame(const std::shared_ptr<CpuFrame>& frame,
+                                          const edit::Time timestamp, const edit::Time duration) {
+  return VideoFrame{
+      .timestamp = timestamp,
+      .duration = duration,
+      .width = frame->width(),
+      .height = frame->height(),
+      .layout = PixelLayout::RgbaFloat32,
+      .bit_depth = 32,
+      .color = {},
+      .field_order = "progressive",
+      .sample_aspect_ratio = edit::Time(1, 1),
+      .orientation_degrees = 0,
+      .alpha_mode = AlphaMode::Premultiplied,
+      .storage = frame,
+  };
+}
+
+[[nodiscard]] RenderResult<GpuLayer>
+build_gpu_layer(const edit::Clip& clip, const edit::Sequence& sequence, const edit::Time time,
+                const PreviewProfile& profile, const std::uint64_t request_epoch, const int width,
+                const int height, FrameProvider& provider,
+                const std::function<std::uint64_t()>& current_epoch, GpuRenderer& renderer) {
+  if (clip_has_unsupported_gpu_effects(clip.effects)) {
+    return RenderResult<GpuLayer>::failure(
+        {.code = RenderErrorCode::GpuUnsupportedTimeline,
+         .message = "GPU timeline preview does not yet support enabled clip effects of this type"});
+  }
+  std::string diagnostic;
+  if (!valid_clip_transform(clip.transform, diagnostic)) {
+    return RenderResult<GpuLayer>::failure(
+        {.code = RenderErrorCode::GpuUnsupportedTimeline, .message = std::move(diagnostic)});
+  }
+  if (clip.kind != edit::ClipKind::Video && clip.kind != edit::ClipKind::Title) {
+    return RenderResult<GpuLayer>::failure(
+        {.code = RenderErrorCode::GpuUnsupportedTimeline,
+         .message = "GPU timeline preview does not yet support this clip kind"});
+  }
+
+  edit::Clip mutable_clip = clip;
+  const edit::Time local_time = time - clip.timeline_range.start;
+  std::shared_ptr<CpuFrame> pixels;
+  if (clip.kind == edit::ClipKind::Title) {
+    pixels = rasterize_title_frame(clip, sequence, profile);
+    apply_clip_visual_effects(*pixels, mutable_clip, local_time, profile);
+  } else {
+    AssetFrameRequest request{
+        .asset_id = clip.asset_id,
+        .source_time = source_time_for(clip, time),
+        .preferred_width = width,
+        .preferred_height = height,
+        .permit_proxy = profile.use_proxies,
+        .request_epoch = request_epoch,
+    };
+    auto decoded = provider.request(request);
+    if (!decoded) {
+      return RenderResult<GpuLayer>::failure(*decoded.error);
+    }
+    if (request_epoch != current_epoch()) {
+      return RenderResult<GpuLayer>::failure(
+          {.code = RenderErrorCode::StaleRequest,
+           .message = "GPU timeline request was superseded during decoding"});
+    }
+    pixels = std::make_shared<CpuFrame>(**decoded.value);
+    apply_clip_visual_effects(*pixels, mutable_clip, local_time, profile);
+  }
+
+  const edit::Time frame_duration = sequence.frame_rate.frameTime();
+  auto uploaded = renderer.upload(make_video_frame(pixels, time, frame_duration));
+  if (!uploaded) {
+    return RenderResult<GpuLayer>::failure(*uploaded.error);
+  }
+  return RenderResult<GpuLayer>::success(
+      GpuLayer{.image = std::move(*uploaded.value),
+               .transform = mutable_clip.transform,
+               .blend_mode = clip.blend_mode});
+}
+
+[[nodiscard]] RenderResult<GpuImage>
+composite_layers(GpuRenderer& renderer, const std::span<const GpuLayer> layers, const int width,
+                 const int height, const std::uint32_t sequence_width,
+                 const std::uint32_t sequence_height, const edit::Time timestamp,
+                 const edit::Time duration, const GpuImage* background) {
+  return renderer.composite_timeline(layers, width, height, sequence_width, sequence_height,
+                                     timestamp, duration, background);
+}
+
+[[nodiscard]] RenderResult<GpuImage> upload_cpu_result(GpuRenderer& renderer,
+                                                       const std::shared_ptr<CpuFrame>& frame,
+                                                       const edit::Time timestamp,
+                                                       const edit::Time duration) {
+  auto uploaded = renderer.upload(make_video_frame(frame, timestamp, duration));
+  if (!uploaded) {
+    return RenderResult<GpuImage>::failure(*uploaded.error);
+  }
+  return RenderResult<GpuImage>::success(std::move(*uploaded.value));
+}
+
+[[nodiscard]] RenderResult<GpuImage>
+render_transition_track(GpuRenderer& renderer, FrameProvider& provider,
+                        const edit::Sequence& sequence, const ActiveTransitionInfo& transition,
+                        const edit::Time time, const PreviewProfile& profile,
+                        const std::uint64_t request_epoch, const int width, const int height,
+                        const std::function<std::uint64_t()>& current_epoch,
+                        const GpuImage* baseline) {
+  const edit::Time frame_duration = sequence.frame_rate.frameTime();
+  auto outgoing_layer =
+      build_gpu_layer(*transition.outgoing, sequence, time, profile, request_epoch, width, height,
+                      provider, current_epoch, renderer);
+  if (!outgoing_layer) {
+    return RenderResult<GpuImage>::failure(*outgoing_layer.error);
+  }
+  if (request_epoch != current_epoch()) {
+    return stale();
+  }
+  auto incoming_layer =
+      build_gpu_layer(*transition.incoming, sequence, time, profile, request_epoch, width, height,
+                      provider, current_epoch, renderer);
+  if (!incoming_layer) {
+    return RenderResult<GpuImage>::failure(*incoming_layer.error);
+  }
+  if (request_epoch != current_epoch()) {
+    return stale();
+  }
+
+  auto outgoing_image = composite_layers(renderer, std::span<const GpuLayer>(&*outgoing_layer.value, 1),
+                                       width, height, sequence.width, sequence.height, time,
+                                       frame_duration, baseline);
+  if (!outgoing_image) {
+    return RenderResult<GpuImage>::failure(*outgoing_image.error);
+  }
+  auto incoming_image = composite_layers(renderer, std::span<const GpuLayer>(&*incoming_layer.value, 1),
+                                         width, height, sequence.width, sequence.height, time,
+                                         frame_duration, baseline);
+  if (!incoming_image) {
+    return RenderResult<GpuImage>::failure(*incoming_image.error);
+  }
+
+  auto outgoing_cpu = renderer.download(*outgoing_image.value);
+  if (!outgoing_cpu) {
+    return RenderResult<GpuImage>::failure(*outgoing_cpu.error);
+  }
+  auto incoming_cpu = renderer.download(*incoming_image.value);
+  if (!incoming_cpu) {
+    return RenderResult<GpuImage>::failure(*incoming_cpu.error);
+  }
+  const auto outgoing_pixels =
+      std::get<std::shared_ptr<const CpuFrame>>(outgoing_cpu.value->storage);
+  const auto incoming_pixels =
+      std::get<std::shared_ptr<const CpuFrame>>(incoming_cpu.value->storage);
+  std::shared_ptr<CpuFrame> blended_pixels;
+  const edit::Time cut_time = transition.incoming->timeline_range.start;
+  if (transition.transition->kind == edit::TransitionKind::CrossDissolve) {
+    blended_pixels = blend_frames(
+        *outgoing_pixels, *incoming_pixels,
+        cpu_timeline_saturate(cpu_timeline_time_ratio(time - transition.transition->range.start,
+                                                      transition.transition->range.duration)));
+  } else if (time < cut_time) {
+    blended_pixels = blend_frames(
+        *outgoing_pixels, *opaque_black_frame_like(*outgoing_pixels),
+        cpu_timeline_saturate(cpu_timeline_time_ratio(
+            time - transition.transition->range.start,
+            cut_time - transition.transition->range.start)));
+  } else {
+    blended_pixels = blend_frames(
+        *opaque_black_frame_like(*incoming_pixels), *incoming_pixels,
+        cpu_timeline_saturate(
+            cpu_timeline_time_ratio(time - cut_time, transition.transition->range.end() - cut_time)));
+  }
+  return upload_cpu_result(renderer, blended_pixels, time, frame_duration);
 }
 
 } // namespace
@@ -95,105 +260,73 @@ RenderResult<GpuImage> GpuTimelineRenderer::request_frame(const edit::TimelineSn
 
   const int width = scaled_dimension(sequence->width, profile.scale);
   const int height = scaled_dimension(sequence->height, profile.scale);
-  std::vector<GpuLayer> layers;
+  const edit::Time frame_duration = sequence->frame_rate.frameTime();
+  const auto current_epoch_fn = [this]() { return current_epoch(); };
 
+  std::optional<GpuImage> accumulator;
   for (const edit::Track& track : sequence->tracks) {
     if (track.kind != edit::TrackKind::Video || track.muted || !track.visible) {
       continue;
     }
-    if (has_active_transition_on_track(*sequence, track, time)) {
-      return RenderResult<GpuImage>::failure(
-          {.code = RenderErrorCode::GpuUnsupportedTimeline,
-           .message = "GPU timeline preview does not yet support active transitions"});
+
+    const auto transition = active_transition_for_track(*sequence, track, time);
+    if (transition.has_value()) {
+      auto rendered = render_transition_track(*renderer_, *provider_, *sequence, *transition, time,
+                                            profile, request_epoch, width, height,
+                                            current_epoch_fn,
+                                            accumulator.has_value() ? &*accumulator : nullptr);
+      if (request_epoch != current_epoch()) {
+        return stale();
+      }
+      if (!rendered) {
+        return rendered;
+      }
+      accumulator = std::move(*rendered.value);
+      continue;
     }
-    if (has_enabled_effects(track.effects)) {
-      return RenderResult<GpuImage>::failure(
-          {.code = RenderErrorCode::GpuUnsupportedTimeline,
-           .message = "GPU timeline preview does not yet support enabled track effects"});
-    }
+
+    std::vector<GpuLayer> track_layers;
     for (const edit::Clip& clip : track.clips) {
       if (!clip.timeline_range.contains(time)) {
         continue;
       }
-      if (clip.kind != edit::ClipKind::Video || has_enabled_effects(clip.effects)) {
-        return RenderResult<GpuImage>::failure(
-            {.code = RenderErrorCode::GpuUnsupportedTimeline,
-             .message = clip.kind != edit::ClipKind::Video
-                            ? "GPU timeline preview does not yet support title clips"
-                            : "GPU timeline preview does not yet support enabled clip effects"});
+      if (clip_has_unsupported_gpu_effects(clip.effects)) {
+        return unsupported_timeline(
+            "GPU timeline preview does not yet support enabled clip effects of this type");
       }
-      if (clip.blend_mode != edit::BlendMode::Normal) {
-        return RenderResult<GpuImage>::failure(
-            {.code = RenderErrorCode::GpuUnsupportedTimeline,
-             .message = "GPU timeline preview currently supports only Normal blend mode"});
-      }
-      if (!std::isfinite(clip.transform.scale.x) || !std::isfinite(clip.transform.scale.y) ||
-          clip.transform.scale.x == 0.0 || clip.transform.scale.y == 0.0) {
-        return RenderResult<GpuImage>::failure(
-            {.code = RenderErrorCode::GpuUnsupportedTimeline,
-             .message = "GPU timeline preview requires finite, non-zero clip scale"});
-      }
-      if (std::abs(clip.transform.rotation_degrees) > 1.0e-9 &&
-          (std::abs(clip.transform.position.x) > 1.0e-9 ||
-           std::abs(clip.transform.position.y) > 1.0e-9 ||
-           std::abs(clip.transform.anchor_x - 0.5) > 1.0e-9 ||
-           std::abs(clip.transform.anchor_y - 0.5) > 1.0e-9)) {
-        return RenderResult<GpuImage>::failure(
-            {.code = RenderErrorCode::GpuUnsupportedTimeline,
-             .message = "GPU timeline preview does not yet combine rotation with a moved pivot; "
-                        "use the CPU fallback for this frame"});
-      }
-
-      AssetFrameRequest request{
-          .asset_id = clip.asset_id,
-          .source_time = source_time_for(clip, time),
-          .preferred_width = width,
-          .preferred_height = height,
-          .permit_proxy = profile.use_proxies,
-          .request_epoch = request_epoch,
-      };
-      auto decoded = provider_->request(request);
-      if (!decoded) {
-        return RenderResult<GpuImage>::failure(*decoded.error);
-      }
+      auto layer =
+          build_gpu_layer(clip, *sequence, time, profile, request_epoch, width, height, *provider_,
+                          current_epoch_fn, *renderer_);
       if (request_epoch != current_epoch()) {
         return stale();
       }
-
-      VideoFrame decoded_frame{
-          .timestamp = time,
-          .duration = sequence->frame_rate.frameTime(),
-          .width = (*decoded.value)->width(),
-          .height = (*decoded.value)->height(),
-          .layout = PixelLayout::RgbaFloat32,
-          .bit_depth = 32,
-          .color = {},
-          .field_order = "progressive",
-          .sample_aspect_ratio = edit::Time(1, 1),
-          .orientation_degrees = 0,
-          .alpha_mode = AlphaMode::Premultiplied,
-          .storage = *decoded.value,
-      };
-      auto uploaded = renderer_->upload(decoded_frame);
-      if (!uploaded) {
-        return RenderResult<GpuImage>::failure(*uploaded.error);
+      if (!layer) {
+        return RenderResult<GpuImage>::failure(*layer.error);
       }
-      layers.push_back(GpuLayer{.image = std::move(*uploaded.value),
-                                .transform = clip.transform,
-                                .blend_mode = clip.blend_mode});
+      track_layers.push_back(std::move(*layer.value));
     }
+    if (track_layers.empty()) {
+      continue;
+    }
+
+    auto rendered =
+        composite_layers(*renderer_, track_layers, width, height, sequence->width, sequence->height,
+                         time, frame_duration,
+                         accumulator.has_value() ? &*accumulator : nullptr);
+    if (request_epoch != current_epoch()) {
+      return stale();
+    }
+    if (!rendered) {
+      return rendered;
+    }
+    accumulator = std::move(*rendered.value);
   }
 
-  if (request_epoch != current_epoch()) {
-    return stale();
+  if (!accumulator.has_value()) {
+    return composite_layers(*renderer_, {}, width, height, sequence->width, sequence->height, time,
+                            frame_duration, nullptr);
   }
-  auto composited =
-      renderer_->composite_timeline(layers, width, height, sequence->width, sequence->height, time,
-                                    sequence->frame_rate.frameTime());
-  if (request_epoch != current_epoch()) {
-    return stale();
-  }
-  return composited;
+  return RenderResult<GpuImage>::success(std::move(*accumulator));
 }
 
 } // namespace video_editor::render

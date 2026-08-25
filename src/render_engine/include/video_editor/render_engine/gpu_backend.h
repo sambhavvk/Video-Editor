@@ -124,17 +124,16 @@ public:
                                                  edit::Time duration);
 
   // Timeline compositor used by preview rendering. It applies crop,
-  // position, non-uniform scale, anchor, center-pivot rotation and opacity on
-  // the GPU. The target starts as opaque black to match CpuRenderer. Only
-  // premultiplied source-over is currently supported; other blend modes
-  // return GpuUnsupportedTimeline so callers can fall back without rendering
-  // a visually incorrect frame. Rotation combined with a moved position or
-  // non-default anchor also uses that typed fallback until its sampling parity
-  // is proven. Empty layers produce an opaque-black frame.
+  // position, non-uniform scale, anchor, rotation, opacity, and the five
+  // premultiplied blend modes bottom-to-top. The target starts as opaque black
+  // or an optional background image to match CpuRenderer. Unknown enabled clip
+  // effects are rejected by GpuTimelineRenderer before this call. Empty layers
+  // produce an opaque-black frame unless a background is supplied.
   [[nodiscard]] RenderResult<GpuImage>
   composite_timeline(std::span<const GpuLayer> layers, int width, int height,
                      std::uint32_t sequence_width, std::uint32_t sequence_height,
-                     edit::Time timestamp, edit::Time duration);
+                     edit::Time timestamp, edit::Time duration,
+                     const GpuImage* background = nullptr);
 
   // Blocking reference readback for export, parity testing, and fallback.
   [[nodiscard]] RenderResult<VideoFrame> download(const GpuImage& image);

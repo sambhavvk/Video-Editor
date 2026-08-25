@@ -230,6 +230,7 @@ void mark_device_lost(LibplaceboState& state, std::string message) {
   params.renderable = true;
   params.blit_dst = true;
   params.host_readable = host_readable;
+  params.host_writable = host_readable;
   return pl_tex_create(gpu, &params);
 }
 
@@ -266,12 +267,13 @@ struct OpacityHookState final {
   const double preview_x = static_cast<double>(output_width) / static_cast<double>(sequence_width);
   const double preview_y =
       static_cast<double>(output_height) / static_cast<double>(sequence_height);
-  const double pivot_x =
-      (static_cast<double>(output_width) * 0.5) + (layer.transform.position.x * preview_x);
-  const double pivot_y =
-      (static_cast<double>(output_height) * 0.5) + (layer.transform.position.y * preview_y);
-  const double canvas_x = static_cast<double>(output_width) * 0.5;
-  const double canvas_y = static_cast<double>(output_height) * 0.5;
+  const bool has_rotation = std::abs(rotation_radians) > 1.0e-9;
+  const double canvas_x = has_rotation ? (static_cast<double>(output_width) - 1.0) * 0.5
+                                       : static_cast<double>(output_width) * 0.5;
+  const double canvas_y = has_rotation ? (static_cast<double>(output_height) - 1.0) * 0.5
+                                       : static_cast<double>(output_height) * 0.5;
+  const double pivot_x = canvas_x + (layer.transform.position.x * preview_x);
+  const double pivot_y = canvas_y + (layer.transform.position.y * preview_y);
   const double cosine = std::cos(rotation_radians);
   const double sine = std::sin(rotation_radians);
   const double pivot_delta_x = pivot_x - canvas_x;
@@ -284,8 +286,12 @@ struct OpacityHookState final {
 
   const double source_width = static_cast<double>(layer.image.width());
   const double source_height = static_cast<double>(layer.image.height());
-  const double source_anchor_x = (layer.transform.anchor_x * (source_width - 1.0)) + 0.5;
-  const double source_anchor_y = (layer.transform.anchor_y * (source_height - 1.0)) + 0.5;
+  const double source_anchor_x = has_rotation
+                                     ? layer.transform.anchor_x * (source_width - 1.0)
+                                     : (layer.transform.anchor_x * (source_width - 1.0)) + 0.5;
+  const double source_anchor_y = has_rotation
+                                     ? layer.transform.anchor_y * (source_height - 1.0)
+                                     : (layer.transform.anchor_y * (source_height - 1.0)) + 0.5;
   const double source_x0 = layer.transform.crop_left * source_width;
   const double source_y0 = layer.transform.crop_top * source_height;
   const double source_x1 = (1.0 - layer.transform.crop_right) * source_width;
@@ -322,11 +328,38 @@ struct OpacityHookState final {
     diagnostic = "GPU timeline crop and opacity values are outside their normalized ranges";
     return false;
   }
-  if (layer.blend_mode != edit::BlendMode::Normal) {
-    diagnostic = "GPU timeline compositor currently supports only Normal blend mode";
-    return false;
-  }
   return true;
+}
+
+[[nodiscard]] bool download_texture(pl_gpu gpu, pl_tex texture, const int width, const int height,
+                                    CpuFrame& frame) {
+  (void)height;
+  pl_tex_transfer_params transfer{};
+  transfer.tex = texture;
+  transfer.row_pitch = static_cast<std::size_t>(width) * 4U * sizeof(float);
+  transfer.ptr = frame.pixels().data();
+  return pl_tex_download(gpu, &transfer);
+}
+
+[[nodiscard]] bool upload_texture(pl_gpu gpu, pl_tex texture, const CpuFrame& frame) {
+  pl_tex_transfer_params transfer{};
+  transfer.tex = texture;
+  transfer.row_pitch = static_cast<std::size_t>(frame.width()) * 4U * sizeof(float);
+  transfer.ptr = const_cast<float*>(frame.pixels().data());
+  return pl_tex_upload(gpu, &transfer);
+}
+
+[[nodiscard]] bool copy_texture(pl_renderer renderer, pl_gpu gpu, pl_tex destination,
+                                pl_tex source, const int width, const int height) {
+  (void)gpu;
+  pl_frame copy_source = make_frame(source, width, height);
+  pl_frame copy_destination = make_frame(destination, width, height);
+  pl_render_params params = pl_render_default_params;
+  params.upscaler = &pl_filter_bilinear;
+  params.downscaler = &pl_filter_bilinear;
+  params.background = PL_CLEAR_SKIP;
+  params.border = PL_CLEAR_SKIP;
+  return pl_render_image(renderer, &copy_source, &copy_destination, &params);
 }
 
 } // namespace
@@ -525,6 +558,7 @@ RenderResult<GpuImage> GpuRenderer::upload(const VideoFrame& frame) {
   params.format = source_format(state->gpu);
   params.sampleable = true;
   params.host_writable = true;
+  params.host_readable = true;
   params.initial_data = source->pixels().data();
   pl_tex texture = pl_tex_create(state->gpu, &params);
   if (texture == nullptr) {
@@ -640,7 +674,8 @@ RenderResult<GpuImage> GpuRenderer::composite_timeline(const std::span<const Gpu
                                                        const std::uint32_t sequence_width,
                                                        const std::uint32_t sequence_height,
                                                        const edit::Time timestamp,
-                                                       const edit::Time duration) {
+                                                       const edit::Time duration,
+                                                       const GpuImage* background) {
   const auto state = implementation_ ? implementation_->state : nullptr;
   if (!state) {
     return RenderResult<GpuImage>::failure(
@@ -656,6 +691,14 @@ RenderResult<GpuImage> GpuRenderer::composite_timeline(const std::span<const Gpu
         {.code = RenderErrorCode::GpuInvalidFrame,
          .message = "GPU timeline composite requires positive dimensions and duration"});
   }
+  if (background != nullptr &&
+      (!background->storage_ || background->storage_->texture == nullptr ||
+       background->storage_->device.get() != state.get() || background->width() != width ||
+       background->height() != height)) {
+    return RenderResult<GpuImage>::failure(
+        {.code = RenderErrorCode::GpuInvalidFrame,
+         .message = "GPU timeline background must be a same-size image owned by this renderer"});
+  }
   for (const GpuLayer& layer : layers) {
     std::string diagnostic;
     if (!layer.image.storage_ || layer.image.storage_->texture == nullptr ||
@@ -664,21 +707,65 @@ RenderResult<GpuImage> GpuRenderer::composite_timeline(const std::span<const Gpu
           {.code = RenderErrorCode::GpuInvalidFrame,
            .message = "GPU timeline layers must be valid and owned by this renderer device"});
     }
-    if (std::abs(layer.transform.rotation_degrees) > 1.0e-9 &&
-        (std::abs(layer.transform.position.x) > 1.0e-9 ||
-         std::abs(layer.transform.position.y) > 1.0e-9 ||
-         std::abs(layer.transform.anchor_x - 0.5) > 1.0e-9 ||
-         std::abs(layer.transform.anchor_y - 0.5) > 1.0e-9)) {
-      return RenderResult<GpuImage>::failure(
-          {.code = RenderErrorCode::GpuUnsupportedTimeline,
-           .message = "GPU timeline compositor does not yet combine rotation with a moved pivot"});
-    }
     if (!valid_timeline_transform(layer, diagnostic)) {
-      const RenderErrorCode code = layer.blend_mode == edit::BlendMode::Normal
-                                       ? RenderErrorCode::GpuInvalidFrame
-                                       : RenderErrorCode::GpuUnsupportedTimeline;
-      return RenderResult<GpuImage>::failure({.code = code, .message = std::move(diagnostic)});
+      return RenderResult<GpuImage>::failure(
+          {.code = RenderErrorCode::GpuInvalidFrame, .message = std::move(diagnostic)});
     }
+  }
+
+  if (layers.empty()) {
+    if (background == nullptr) {
+      pl_tex output_texture = create_render_target(state->gpu, width, height, true);
+      if (output_texture == nullptr) {
+        if (detect_device_loss(*state, "allocating an empty timeline target")) {
+          return RenderResult<GpuImage>::failure(unavailable_error(state->capabilities));
+        }
+        return RenderResult<GpuImage>::failure(
+            {.code = RenderErrorCode::GpuRenderFailed,
+             .message = "GPU could not allocate the timeline target"});
+      }
+      constexpr std::array<float, 4> opaque_black{0.0F, 0.0F, 0.0F, 1.0F};
+      pl_tex_clear(state->gpu, output_texture, opaque_black.data());
+      auto storage = std::make_shared<GpuImage::Storage>();
+      storage->device = state;
+      storage->texture = output_texture;
+      storage->width = width;
+      storage->height = height;
+      storage->timestamp = timestamp;
+      storage->duration = duration;
+      storage->color = {};
+      storage->alpha_mode = AlphaMode::Premultiplied;
+      return RenderResult<GpuImage>::success(GpuImage(std::move(storage)));
+    }
+    pl_tex output_texture = create_render_target(state->gpu, width, height, true);
+    if (output_texture == nullptr) {
+      if (detect_device_loss(*state, "allocating a background timeline target")) {
+        return RenderResult<GpuImage>::failure(unavailable_error(state->capabilities));
+      }
+      return RenderResult<GpuImage>::failure(
+          {.code = RenderErrorCode::GpuRenderFailed,
+           .message = "GPU could not allocate the timeline target"});
+    }
+    if (!copy_texture(state->renderer, state->gpu, output_texture, background->storage_->texture,
+                      width, height)) {
+      pl_tex_destroy(state->gpu, &output_texture);
+      if (detect_device_loss(*state, "copying a timeline background")) {
+        return RenderResult<GpuImage>::failure(unavailable_error(state->capabilities));
+      }
+      return RenderResult<GpuImage>::failure(
+          {.code = RenderErrorCode::GpuRenderFailed,
+           .message = "GPU could not copy the timeline background"});
+    }
+    auto storage = std::make_shared<GpuImage::Storage>();
+    storage->device = state;
+    storage->texture = output_texture;
+    storage->width = width;
+    storage->height = height;
+    storage->timestamp = timestamp;
+    storage->duration = duration;
+    storage->color = {};
+    storage->alpha_mode = AlphaMode::Premultiplied;
+    return RenderResult<GpuImage>::success(GpuImage(std::move(storage)));
   }
 
   pl_tex output_texture = create_render_target(state->gpu, width, height, true);
@@ -692,7 +779,20 @@ RenderResult<GpuImage> GpuRenderer::composite_timeline(const std::span<const Gpu
   }
   const pl_frame output = make_frame(output_texture, width, height);
   constexpr std::array<float, 4> opaque_black{0.0F, 0.0F, 0.0F, 1.0F};
-  pl_tex_clear(state->gpu, output_texture, opaque_black.data());
+  if (background != nullptr) {
+    if (!copy_texture(state->renderer, state->gpu, output_texture, background->storage_->texture,
+                      width, height)) {
+      pl_tex_destroy(state->gpu, &output_texture);
+      if (detect_device_loss(*state, "seeding a timeline background")) {
+        return RenderResult<GpuImage>::failure(unavailable_error(state->capabilities));
+      }
+      return RenderResult<GpuImage>::failure(
+          {.code = RenderErrorCode::GpuRenderFailed,
+           .message = "GPU could not seed the timeline background"});
+    }
+  } else {
+    pl_tex_clear(state->gpu, output_texture, opaque_black.data());
+  }
 
   const pl_blend_params source_over{
       .src_rgb = PL_BLEND_ONE,
@@ -707,6 +807,14 @@ RenderResult<GpuImage> GpuRenderer::composite_timeline(const std::span<const Gpu
   final_params.background = PL_CLEAR_SKIP;
   final_params.border = PL_CLEAR_SKIP;
 
+  const auto uses_moved_pivot_rotation = [](const GpuLayer& layer) {
+    return std::abs(layer.transform.rotation_degrees) > 1.0e-9 &&
+           (std::abs(layer.transform.position.x) > 1.0e-9 ||
+            std::abs(layer.transform.position.y) > 1.0e-9 ||
+            std::abs(layer.transform.anchor_x - 0.5) > 1.0e-9 ||
+            std::abs(layer.transform.anchor_y - 0.5) > 1.0e-9);
+  };
+
   for (const GpuLayer& layer : layers) {
     if (layer.transform.opacity <= 0.0 ||
         layer.transform.crop_left + layer.transform.crop_right >= 1.0 ||
@@ -714,7 +822,37 @@ RenderResult<GpuImage> GpuRenderer::composite_timeline(const std::span<const Gpu
       continue;
     }
 
-    pl_tex unrotated_texture = create_render_target(state->gpu, width, height, false);
+    if (uses_moved_pivot_rotation(layer)) {
+      auto destination = std::make_shared<CpuFrame>(width, height);
+      auto source_pixels = std::make_shared<CpuFrame>(layer.image.width(), layer.image.height());
+      if (!download_texture(state->gpu, output_texture, width, height, *destination) ||
+          !download_texture(state->gpu, layer.image.storage_->texture, layer.image.width(),
+                            layer.image.height(), *source_pixels)) {
+        pl_tex_destroy(state->gpu, &output_texture);
+        if (detect_device_loss(*state, "reading back a moved-pivot rotation layer")) {
+          return RenderResult<GpuImage>::failure(unavailable_error(state->capabilities));
+        }
+        return RenderResult<GpuImage>::failure(
+            {.code = RenderErrorCode::GpuDownloadFailed,
+             .message = "GPU could not read back textures for moved-pivot rotation compositing"});
+      }
+      edit::Clip clip;
+      clip.transform = layer.transform;
+      clip.blend_mode = layer.blend_mode;
+      composite_clip_onto_frame(*source_pixels, *destination, clip, sequence_width, sequence_height);
+      if (!upload_texture(state->gpu, output_texture, *destination)) {
+        pl_tex_destroy(state->gpu, &output_texture);
+        if (detect_device_loss(*state, "uploading a moved-pivot rotation layer")) {
+          return RenderResult<GpuImage>::failure(unavailable_error(state->capabilities));
+        }
+        return RenderResult<GpuImage>::failure(
+            {.code = RenderErrorCode::GpuUploadFailed,
+             .message = "GPU could not upload the moved-pivot rotation result"});
+      }
+      continue;
+    }
+
+    pl_tex unrotated_texture = create_render_target(state->gpu, width, height, true);
     if (unrotated_texture == nullptr) {
       pl_tex_destroy(state->gpu, &output_texture);
       if (detect_device_loss(*state, "allocating a transformed clip target")) {
@@ -776,7 +914,7 @@ RenderResult<GpuImage> GpuRenderer::composite_timeline(const std::span<const Gpu
 
     pl_tex layer_texture = unrotated_texture;
     if (std::abs(layer.transform.rotation_degrees) > 1.0e-9) {
-      pl_tex rotated_texture = create_render_target(state->gpu, width, height, false);
+      pl_tex rotated_texture = create_render_target(state->gpu, width, height, true);
       if (rotated_texture == nullptr) {
         pl_tex_destroy(state->gpu, &unrotated_texture);
         pl_tex_destroy(state->gpu, &output_texture);
@@ -824,15 +962,42 @@ RenderResult<GpuImage> GpuRenderer::composite_timeline(const std::span<const Gpu
     }
 
     const pl_frame final_source = make_frame(layer_texture, width, height);
-    if (!pl_render_image(state->renderer, &final_source, &output, &final_params)) {
-      pl_tex_destroy(state->gpu, &layer_texture);
-      pl_tex_destroy(state->gpu, &output_texture);
-      if (detect_device_loss(*state, "compositing a transformed timeline clip")) {
-        return RenderResult<GpuImage>::failure(unavailable_error(state->capabilities));
+    if (layer.blend_mode == edit::BlendMode::Normal) {
+      if (!pl_render_image(state->renderer, &final_source, &output, &final_params)) {
+        pl_tex_destroy(state->gpu, &layer_texture);
+        pl_tex_destroy(state->gpu, &output_texture);
+        if (detect_device_loss(*state, "compositing a transformed timeline clip")) {
+          return RenderResult<GpuImage>::failure(unavailable_error(state->capabilities));
+        }
+        return RenderResult<GpuImage>::failure(
+            {.code = RenderErrorCode::GpuRenderFailed,
+             .message = "libplacebo failed to composite a transformed timeline clip"});
       }
-      return RenderResult<GpuImage>::failure(
-          {.code = RenderErrorCode::GpuRenderFailed,
-           .message = "libplacebo failed to composite a transformed timeline clip"});
+    } else {
+      auto destination = std::make_shared<CpuFrame>(width, height);
+      auto source_pixels = std::make_shared<CpuFrame>(width, height);
+      if (!download_texture(state->gpu, output_texture, width, height, *destination) ||
+          !download_texture(state->gpu, layer_texture, width, height, *source_pixels)) {
+        pl_tex_destroy(state->gpu, &layer_texture);
+        pl_tex_destroy(state->gpu, &output_texture);
+        if (detect_device_loss(*state, "reading back a custom blend")) {
+          return RenderResult<GpuImage>::failure(unavailable_error(state->capabilities));
+        }
+        return RenderResult<GpuImage>::failure(
+            {.code = RenderErrorCode::GpuDownloadFailed,
+             .message = "GPU could not read back textures for custom blend compositing"});
+      }
+      composite_blend_frame(*destination, *source_pixels, layer.blend_mode);
+      if (!upload_texture(state->gpu, output_texture, *destination)) {
+        pl_tex_destroy(state->gpu, &layer_texture);
+        pl_tex_destroy(state->gpu, &output_texture);
+        if (detect_device_loss(*state, "uploading a custom blend")) {
+          return RenderResult<GpuImage>::failure(unavailable_error(state->capabilities));
+        }
+        return RenderResult<GpuImage>::failure(
+            {.code = RenderErrorCode::GpuUploadFailed,
+             .message = "GPU could not upload the custom blend result"});
+      }
     }
     pl_tex_destroy(state->gpu, &layer_texture);
   }
@@ -1037,7 +1202,7 @@ RenderResult<GpuImage> GpuRenderer::composite(std::span<const GpuImage>, int, in
 }
 RenderResult<GpuImage> GpuRenderer::composite_timeline(std::span<const GpuLayer>, int, int,
                                                        std::uint32_t, std::uint32_t, edit::Time,
-                                                       edit::Time) {
+                                                       edit::Time, const GpuImage*) {
   return RenderResult<GpuImage>::failure(unavailable_error(capabilities()));
 }
 RenderResult<VideoFrame> GpuRenderer::download(const GpuImage&) {

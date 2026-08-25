@@ -34,11 +34,14 @@ not depend on the GPU.
   textures.
 - Upload accepts the existing CPU `VideoFrame` contract: linear full-range Rec.709 premultiplied
   RGBA float32. GPU images retain lifetime-owned device resources. The GPU timeline path decodes
-  only active video clips and composes crop, position, non-uniform scale, a custom anchor or
-  centered-pivot rotation, opacity, and Normal premultiplied source-over bottom-to-top. It does not
-  yet combine rotation with a moved pivot. Enabled effects, title clips, and other blend modes return
-  an explicit unsupported-timeline error so the caller can fall back without changing semantics.
-  Blocking download exists for parity testing, export/reference work, and controlled fallback.
+  active video clips or rasterizes titles, applies supported clip effects on the CPU before upload,
+  and composes crop, position, non-uniform scale, anchor, rotation, opacity, and the five
+  premultiplied blend modes bottom-to-top. Enabled clip effects outside `video.color`, `video.crop`,
+  `video.gaussian_blur`, `video.lut`, and `video.curves` return an explicit unsupported-timeline error
+  so the caller can fall back
+  without changing semantics. Cross Dissolve and Dip to Black transitions mix outgoing/incoming
+  composites with the same CPU blend factors after GPU layer rendering. Blocking download exists for
+  parity testing, export/reference work, custom blends, transitions, and controlled fallback.
 - Presentation is explicit. A temporarily inaccessible surface returns a recoverable error; a
   failed device changes capabilities to `DeviceLost`. Platform code may forward an independently
   observed loss through `notify_device_lost`. Later operations then fail deterministically.
