@@ -37,6 +37,9 @@ file(WRITE "${VIDEO_EDITOR_SBOM_OUTPUT}" [=[
     {"SPDXID":"SPDXRef-GTest","name":"GoogleTest","versionInfo":"1.17.0","licenseConcluded":"BSD-3-Clause"}
     ,{"SPDXID":"SPDXRef-whisper.cpp","name":"whisper.cpp","versionInfo":"]=] "${VIDEO_EDITOR_WHISPER_CPP_VERSION}" [=[","licenseConcluded":"MIT"}
     ,{"SPDXID":"SPDXRef-ggml-base","name":"ggml-base.bin","versionInfo":"]=] "${VIDEO_EDITOR_WHISPER_MODEL_ID}" [=[","downloadLocation":"]=] "${VIDEO_EDITOR_WHISPER_MODEL_URL}" [=[","licenseConcluded":"NOASSERTION","copyrightText":"SHA-1 digest=]=] "${VIDEO_EDITOR_WHISPER_MODEL_DIGEST}" [=[; expectedBytes=]=] "${VIDEO_EDITOR_WHISPER_MODEL_BYTES}" [=["}
+    ,{"SPDXID":"SPDXRef-HarfBuzz","name":"HarfBuzz","versionInfo":"]=] "${VIDEO_EDITOR_HARFBUZZ_VERSION}" [=[","licenseConcluded":"MIT"}
+    ,{"SPDXID":"SPDXRef-FreeType","name":"FreeType","versionInfo":"]=] "${VIDEO_EDITOR_FREETYPE_VERSION}" [=[","licenseConcluded":"FTL"}
+    ,{"SPDXID":"SPDXRef-NotoSans","name":"Noto Sans Regular","versionInfo":"bundled","licenseConcluded":"OFL-1.1","copyrightText":"SHA-256 digest=]=] "${VIDEO_EDITOR_NOTO_SANS_SHA256}" [=[; expectedBytes=]=] "${VIDEO_EDITOR_NOTO_SANS_BYTES}" [=["}
   ]
 }
 ]=])

@@ -191,10 +191,11 @@ public:
 };
 
 void assign_title_payload(edit::Clip& clip, const std::string& text, const double font_size,
-                          const bool bold = false, const bool italic = false) {
+                          const bool bold = false, const bool italic = false,
+                          const std::string& font_family = "sans-serif") {
   clip.title = edit::Title{
       .text = text,
-      .font_family = "Inter",
+      .font_family = font_family,
       .font_size = font_size,
       .foreground_color = {1.0, 1.0, 1.0, 1.0},
       .background_color = {0.0, 0.0, 0.0, 0.0},
@@ -208,7 +209,8 @@ edit::TimelineSnapshot make_title_snapshot(const std::string& text, const double
                                            const bool bold = false, const bool italic = false,
                                            const std::uint32_t width = 24,
                                            const std::uint32_t height = 8,
-                                           const std::string& clip_name = {}) {
+                                           const std::string& clip_name = {},
+                                           const std::string& font_family = "sans-serif") {
   edit::Project project;
   edit::Sequence sequence;
   sequence.width = width;
@@ -221,7 +223,7 @@ edit::TimelineSnapshot make_title_snapshot(const std::string& text, const double
   title.name = clip_name.empty() ? text : clip_name;
   title.timeline_range = {edit::Time(0, 30), edit::Time(30, 30)};
   title.source_range = title.timeline_range;
-  assign_title_payload(title, text, font_size, bold, italic);
+  assign_title_payload(title, text, font_size, bold, italic, font_family);
   track.clips.push_back(title);
   sequence.tracks.push_back(track);
   const auto sequence_id = sequence.id;
@@ -671,6 +673,34 @@ TEST(CpuRenderer, TitleFontSizeScalesWithPreviewResolution) {
   EXPECT_GT(title_bbox_width(full_frame), title_bbox_width(half_frame));
   EXPECT_GT(title_bbox_width(half_frame), title_bbox_width(quarter_frame));
   EXPECT_GT(count_foreground_pixels(quarter_frame), 0);
+  EXPECT_TRUE(provider->requests.empty());
+}
+
+TEST(CpuRenderer, ShapedSansSerifTitleDiffersFromUnknownFamilyBitmap) {
+  auto provider = std::make_shared<RecordingProvider>();
+  CpuRenderer renderer(provider);
+
+  renderer.begin_epoch(127);
+  const auto shaped =
+      renderer.request_frame(make_title_snapshot("HELLO", 96.0, false, false, 96, 96, "HELLO",
+                                                   "sans-serif"),
+                             edit::Time{}, {}, 127);
+  ASSERT_TRUE(shaped) << shaped.error->message;
+
+  renderer.begin_epoch(128);
+  const auto bitmap =
+      renderer.request_frame(make_title_snapshot("HELLO", 96.0, false, false, 96, 96, "HELLO",
+                                                 "Comic Platform"),
+                             edit::Time{}, {}, 128);
+  ASSERT_TRUE(bitmap) << bitmap.error->message;
+
+  const auto shaped_frame = std::get<std::shared_ptr<const CpuFrame>>(shaped.value->storage);
+  const auto bitmap_frame = std::get<std::shared_ptr<const CpuFrame>>(bitmap.value->storage);
+  EXPECT_GT(count_foreground_pixels(shaped_frame), 0);
+  EXPECT_GT(count_foreground_pixels(bitmap_frame), 0);
+  EXPECT_NE(title_bbox_width(shaped_frame), title_bbox_width(bitmap_frame));
+  EXPECT_FALSE(std::equal(shaped_frame->pixels().begin(), shaped_frame->pixels().end(),
+                           bitmap_frame->pixels().begin(), bitmap_frame->pixels().end()));
   EXPECT_TRUE(provider->requests.empty());
 }
 

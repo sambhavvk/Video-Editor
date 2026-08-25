@@ -19,6 +19,10 @@ set(VIDEO_EDITOR_ABSEIL_VERSION "20250512.1")
 set(VIDEO_EDITOR_PROTOBUF_VERSION "35.1")
 set(VIDEO_EDITOR_OPENSSL_MIN_VERSION "3.0")
 set(VIDEO_EDITOR_EBUR128_VERSION "1.2.6")
+set(VIDEO_EDITOR_HARFBUZZ_VERSION "14.3.1")
+set(VIDEO_EDITOR_FREETYPE_VERSION "26.6.20")
+set(VIDEO_EDITOR_NOTO_SANS_SHA256 "478c558ea716033cd60c03438f628dfa75694dcf6b5f6d505a2f05fd2b4f3823")
+set(VIDEO_EDITOR_NOTO_SANS_BYTES "621572")
 
 # Optional transcription backend and its on-demand model contract. The worker
 # remains buildable without whisper.cpp; enabling the backend requires a local

@@ -18,6 +18,9 @@ offers.
 | GoogleTest | 1.17 | Tests only | BSD-3-Clause |
 | whisper.cpp | 1.9.2 (`306c88f4d1286aec1bf96e544632897886af5501`) | Optional local transcription backend; disabled unless explicitly enabled | MIT |
 | ggml-base.bin | `base`, 147,951,465 bytes, SHA-1 `465707469ff3a37a2b9b8d8f89f2f99de7299dac` | Downloaded on demand through an injected fetch boundary; verified before atomic install | NOASSERTION (review model terms before distribution) |
+| HarfBuzz | 14.3.1 | Shared runtime for bundled caption/title shaping | MIT (Old MIT) |
+| FreeType | 26.6.20 | Shared runtime for bundled caption/title rasterization | FTL |
+| Noto Sans Regular | SHA-256 `478c558ea716033cd60c03438f628dfa75694dcf6b5f6d505a2f05fd2b4f3823`, 621,572 bytes | Bundled TTF for deterministic shaped captions/titles | OFL-1.1 |
 
 The locally installed FFmpeg may be GPL-enabled and is allowed only for development and tests.
 Run `video_editor_dependency_audit --official` against the packaged runtime; a non-zero result blocks

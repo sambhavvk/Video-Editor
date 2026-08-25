@@ -23,6 +23,45 @@ endif()
 if(NOT DEFINED VIDEO_EDITOR_LIBPLACEBO_VERSION)
   set(VIDEO_EDITOR_LIBPLACEBO_VERSION "7.360.1")
 endif()
+if(NOT DEFINED VIDEO_EDITOR_HARFBUZZ_VERSION)
+  set(VIDEO_EDITOR_HARFBUZZ_VERSION "14.3.1")
+endif()
+if(NOT DEFINED VIDEO_EDITOR_FREETYPE_VERSION)
+  set(VIDEO_EDITOR_FREETYPE_VERSION "26.6.20")
+endif()
+if(NOT DEFINED VIDEO_EDITOR_NOTO_SANS_SHA256)
+  set(VIDEO_EDITOR_NOTO_SANS_SHA256 "478c558ea716033cd60c03438f628dfa75694dcf6b5f6d505a2f05fd2b4f3823")
+endif()
+if(NOT DEFINED VIDEO_EDITOR_NOTO_SANS_BYTES)
+  set(VIDEO_EDITOR_NOTO_SANS_BYTES "621572")
+endif()
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(HARFBUZZ REQUIRED IMPORTED_TARGET harfbuzz=${VIDEO_EDITOR_HARFBUZZ_VERSION})
+pkg_check_modules(FREETYPE REQUIRED IMPORTED_TARGET freetype2=${VIDEO_EDITOR_FREETYPE_VERSION})
+
+if(NOT DEFINED VIDEO_EDITOR_NOTO_SANS_TTF)
+  if(EXISTS "${CMAKE_SOURCE_DIR}/third_party/fonts/NotoSans-Regular.ttf")
+    set(VIDEO_EDITOR_NOTO_SANS_TTF "${CMAKE_SOURCE_DIR}/third_party/fonts/NotoSans-Regular.ttf")
+  elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/fonts/NotoSans-Regular.ttf")
+    set(VIDEO_EDITOR_NOTO_SANS_TTF
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/fonts/NotoSans-Regular.ttf")
+  else()
+    message(FATAL_ERROR "Bundled Noto Sans TTF is missing; set VIDEO_EDITOR_NOTO_SANS_TTF")
+  endif()
+endif()
+file(SHA256 "${VIDEO_EDITOR_NOTO_SANS_TTF}" _video_editor_noto_sans_sha256)
+if(NOT _video_editor_noto_sans_sha256 STREQUAL VIDEO_EDITOR_NOTO_SANS_SHA256)
+  message(FATAL_ERROR
+    "Noto Sans TTF digest mismatch at ${VIDEO_EDITOR_NOTO_SANS_TTF}: "
+    "expected ${VIDEO_EDITOR_NOTO_SANS_SHA256}, got ${_video_editor_noto_sans_sha256}")
+endif()
+file(SIZE "${VIDEO_EDITOR_NOTO_SANS_TTF}" _video_editor_noto_sans_bytes)
+if(NOT _video_editor_noto_sans_bytes EQUAL VIDEO_EDITOR_NOTO_SANS_BYTES)
+  message(FATAL_ERROR
+    "Noto Sans TTF byte length mismatch at ${VIDEO_EDITOR_NOTO_SANS_TTF}: "
+    "expected ${VIDEO_EDITOR_NOTO_SANS_BYTES}, got ${_video_editor_noto_sans_bytes}")
+endif()
 
 option(VIDEO_EDITOR_ENABLE_GPU_RENDERING
        "Enable capability-gated libplacebo D3D11/Vulkan rendering"
@@ -78,7 +117,14 @@ target_include_directories(
 target_link_libraries(
   video_editor_render_engine
   PUBLIC video_editor::project_options video_editor_edit_model
-  PRIVATE video_editor::project_warnings)
+  PRIVATE
+    video_editor::project_warnings
+    PkgConfig::HARFBUZZ
+    PkgConfig::FREETYPE)
+
+target_compile_definitions(
+  video_editor_render_engine
+  PRIVATE "VIDEO_EDITOR_NOTO_SANS_TTF=\"${VIDEO_EDITOR_NOTO_SANS_TTF}\"")
 
 if(_render_engine_libplacebo_target)
   target_link_libraries(video_editor_render_engine PRIVATE ${_render_engine_libplacebo_target})

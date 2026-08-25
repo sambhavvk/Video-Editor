@@ -69,17 +69,20 @@ level 11.0 or newer. If discovery or runtime initialization fails, the same API 
 unavailable diagnostic and the CPU renderer remains mandatory. Use
 `-DVIDEO_EDITOR_ENABLE_GPU_RENDERING=OFF` for an intentional CPU-only build.
 
-The engine has an offscreen GPU timeline path which decodes active video clips, uploads individual
-RGBA float frames, and applies crop, position, scale, custom anchor or centered-pivot rotation,
-opacity, and Normal source-over composition through libplacebo. Rotation around a moved pivot,
-effects, title clips, active transitions, or non-Normal blend modes fall back to CPU for the affected
-frame. The desktop
-requests that path before CPU and downloads the result for Qt; backend/device/upload/render/readback
-failures preserve a CPU result and latch CPU preview for the session. A native Windows `HWND` or caller-owned Linux `VkInstance`/
-`VkSurfaceKHR` is supported by the engine contract but is not yet supplied by the desktop. There is
-no zero-copy decoder import. Official Linux-first beta packages must contain and validate both the pinned
-miniaudio adapter and the Linux Vulkan backend; the fallbacks keep project open/edit/recovery and CPU
-export usable, not release-ready. Windows GPU packaging is deferred with the Windows beta.
+The engine has an offscreen GPU timeline path which decodes active video clips or rasterizes
+titles, applies supported clip effects before upload, and composes crop, position, scale, anchor,
+rotation (including a moved pivot), opacity, the five premultiplied blend modes, and Cross
+Dissolve/Dip to Black through libplacebo plus CPU-oracle mix for custom blends/transitions.
+Unknown enabled clip effect types fall back to CPU for the affected frame without latching the GPU.
+The desktop
+requests that path before CPU. On Linux, when the program viewer window realizes, it may supply
+the `VkInstance` and `VkSurfaceKHR` from Qt so libplacebo can create a presentable device and
+swapchain; otherwise it downloads the offscreen result for Qt. Backend/device/upload/render/readback
+failures preserve a CPU result and latch CPU preview for the session. Recoverable presentation
+failures fall back to download for that frame. There is no zero-copy decoder import. Official
+Linux-first beta packages must contain and validate both the pinned miniaudio adapter and the Linux
+Vulkan backend; the fallbacks keep project open/edit/recovery and CPU export usable, not
+release-ready. Windows GPU packaging is deferred with the Windows beta.
 
 ### Optional local transcription backend
 

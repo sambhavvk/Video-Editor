@@ -282,8 +282,9 @@ Open **Audio & Captions** to:
 Import validates timing, order, overlap, cue text, and UTF-8. All cues from one import form a single
 undoable edit batch. Export writes atomically and rounds timing to the nearest millisecond because
 SRT and WebVTT timestamps are millisecond-based. The Deliver panel can burn the canonical caption
-style into video or create an SRT/WebVTT sidecar. The bitmap reference renderer is deterministic but
-does not perform production font-family shaping, and embedded subtitle streams are not implemented.
+style into video or create an SRT/WebVTT sidecar. Caption burn-in uses the same shaping policy as
+titles: mapped Noto requests are shaped with the bundled TTF; unknown families use the 5×7 bitmap
+fallback. Embedded subtitle streams are not implemented.
 
 Model download is always explicit. The editor rejects a declared size mismatch and stops an
 unknown-length stream before it can exceed the pin. Bytes are staged, checked against the pinned

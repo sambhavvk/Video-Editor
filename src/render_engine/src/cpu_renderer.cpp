@@ -4,6 +4,7 @@
 #include "video_editor/render_engine/bitmap_glyphs.h"
 #include "video_editor/render_engine/color_curves.h"
 #include "video_editor/render_engine/lut3d.h"
+#include "video_editor/render_engine/text_shaper.h"
 
 #include <algorithm>
 #include <array>
@@ -32,6 +33,7 @@ int preview_scale_divisor(const PreviewScale scale) {
 
 struct TitleStyle final {
   std::string text;
+  std::string font_family{"sans-serif"};
   edit::ColorRgba foreground{1.0, 1.0, 1.0, 1.0};
   edit::ColorRgba background{0.0, 0.0, 0.0, 0.0};
   edit::TitleHorizontalAlignment alignment{edit::TitleHorizontalAlignment::Center};

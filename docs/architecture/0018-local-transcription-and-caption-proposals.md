@@ -55,8 +55,9 @@ creating a second timeline or caption model.
 - Caption styling uses the same canonical state for the panel, project snapshot, preview, and export
   burn-in. Supported fields are font family request, size, text/background colors, emphasis,
   horizontal alignment, normalized vertical position and safe margin, plus outline width/color.
-  The deterministic bitmap reference renderer may substitute its built-in glyphs for an unavailable
-  font; the UI and documentation must state that limitation.
+  `sans-serif`, empty, `Noto Sans`, and `NotoSans` map to pinned HarfBuzz/FreeType shaping with the
+  bundled Noto Sans TTF. Unknown families and shaping-init failures use the deterministic 5×7 bitmap
+  fallback.
 - Schema-v1 and schema-v2 snapshots remain readable with the pre-v3 caption defaults. A payload that
   declares an older schema while carrying v3 fields is rejected instead of being silently
   reinterpreted.
@@ -91,8 +92,8 @@ more startup overhead than a persistent worker, but gives deterministic cancella
 death recovery for the beta.
 
 This decision does not provide cloud transcription, speaker diarization, arbitrary subtitle stream
-encoding, a production font-shaping engine, native worker multiplexing, or generative transcript
-rewriting. These remain separate future decisions.
+encoding, native worker multiplexing, or generative transcript rewriting. These remain separate
+future decisions.
 
 ## Verification
 

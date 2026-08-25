@@ -2,7 +2,7 @@
 #include "video_editor/export_service/caption_burn_in.h"
 
 #include "video_editor/caption_service/caption_service.h"
-#include "video_editor/render_engine/bitmap_glyphs.h"
+#include "video_editor/render_engine/text_shaper.h"
 
 #include <algorithm>
 #include <cmath>
@@ -73,27 +73,6 @@ void fill_background_rect(render::CpuFrame& frame, int left, int top, int right,
          std::abs(style.safe_margin - 0.05) <= 1.0e-12;
 }
 
-void draw_glyph_with_outline(render::CpuFrame& frame, const render::Glyph& glyph,
-                             const int origin_x, const int origin_y, const int scale,
-                             const edit::CaptionStyle& style, const int outline_pixels) noexcept {
-  if (outline_pixels > 0 && style.outline_color.alpha > 0.0) {
-    for (int offset_y = -outline_pixels; offset_y <= outline_pixels; ++offset_y) {
-      for (int offset_x = -outline_pixels; offset_x <= outline_pixels; ++offset_x) {
-        const auto squared_distance = static_cast<long long>(offset_x) * offset_x +
-                                      static_cast<long long>(offset_y) * offset_y;
-        const auto squared_radius = static_cast<long long>(outline_pixels) * outline_pixels;
-        if (squared_distance > squared_radius) {
-          continue;
-        }
-        render::draw_glyph(frame, glyph, origin_x + offset_x, origin_y + offset_y, scale,
-                           style.outline_color, style.bold, style.italic);
-      }
-    }
-  }
-  render::draw_glyph(frame, glyph, origin_x, origin_y, scale, style.text_color, style.bold,
-                     style.italic);
-}
-
 } // namespace
 
 std::optional<CaptionBurnInError> draw_caption_text(render::CpuFrame& frame,
@@ -107,44 +86,25 @@ std::optional<CaptionBurnInError> draw_caption_text(render::CpuFrame& frame,
     return CaptionBurnInError::InvalidFontSize;
   }
 
-  const int scale = std::max(1, static_cast<int>(std::lround(style.font_size / 8.0)));
-  const int cell_width = 6 * scale;
-  const int cell_height = 8 * scale;
-  if (frame.width() < cell_width || frame.height() < cell_height) {
+  const render::TextBlockMetrics metrics =
+      render::measure_text_block(text, style.font_family, style.font_size, style.bold, style.italic);
+  if (metrics.line_height <= 0 || metrics.width <= 0 || metrics.height <= 0) {
+    return CaptionBurnInError::FrameTooSmall;
+  }
+  if (frame.width() < metrics.width || frame.height() < metrics.line_height) {
+    return CaptionBurnInError::FrameTooSmall;
+  }
+  if (metrics.line_widths.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
     return CaptionBurnInError::FrameTooSmall;
   }
 
-  const auto codepoints = render::decode_utf8_with_replacement(text);
-  std::vector<std::vector<char32_t>> lines(1);
-  for (const char32_t codepoint : codepoints) {
-    if (codepoint == U'\n') {
-      lines.emplace_back();
-    } else {
-      lines.back().push_back(codepoint);
-    }
-  }
-
-  int total_width = 0;
-  for (const auto& line : lines) {
-    if (line.size() > static_cast<std::size_t>(std::numeric_limits<int>::max() / cell_width)) {
-      return CaptionBurnInError::FrameTooSmall;
-    }
-    total_width = std::max(total_width, static_cast<int>(line.size()) * cell_width);
-  }
-  if (lines.size() > static_cast<std::size_t>(std::numeric_limits<int>::max() / cell_height)) {
-    return CaptionBurnInError::FrameTooSmall;
-  }
-  const int total_height = static_cast<int>(lines.size()) * cell_height;
   const int safe_left = safe_margin_pixels(style.safe_margin, frame.width());
   const int safe_top = safe_margin_pixels(style.safe_margin, frame.height());
   const int safe_right = frame.width() - safe_left;
   const int safe_bottom = frame.height() - safe_top;
-  const int content_left = aligned_left(style.alignment, safe_left, safe_right, total_width);
+  const int content_left =
+      aligned_left(style.alignment, safe_left, safe_right, metrics.width);
 
-  // `bottom_margin_pixels` remains part of this low-level API for callers from
-  // before normalized caption positioning existed. Edited canonical positions
-  // take precedence; the legacy value is retained for invalid positions and
-  // the canonical defaults so old snapshots render identically.
   const double normalized_position = std::isfinite(style.vertical_position)
                                          ? std::clamp(style.vertical_position, 0.0, 1.0)
                                          : std::numeric_limits<double>::quiet_NaN();
@@ -158,25 +118,37 @@ std::optional<CaptionBurnInError> draw_caption_text(render::CpuFrame& frame,
                        static_cast<double>(std::max(frame.width(), frame.height())))
           : 0.0;
   const int outline_pixels = static_cast<int>(std::ceil(bounded_outline_width));
-  const int y_start = y_bottom - total_height;
+  const int y_start = y_bottom - metrics.height;
 
   const int padding = 4 + outline_pixels;
   fill_background_rect(frame, content_left - padding, y_start - padding,
-                       content_left + total_width + padding, y_bottom + padding,
+                       content_left + metrics.width + padding, y_bottom + padding,
                        style.background_color);
 
-  int line_y = y_start;
-  for (const auto& line : lines) {
-    const int line_width = static_cast<int>(line.size()) * cell_width;
-    int line_x = aligned_left(style.alignment, safe_left, safe_right, line_width);
-    for (const char32_t codepoint : line) {
-      const render::Glyph glyph = render::supported_glyph(codepoint)
-                                      ? render::glyph_for_ascii(codepoint)
-                                      : render::replacement_glyph();
-      draw_glyph_with_outline(frame, glyph, line_x, line_y, scale, style, outline_pixels);
-      line_x += cell_width;
+  const auto lines = [&text]() {
+    std::vector<std::string> split(1);
+    for (std::size_t index = 0; index < text.size(); ++index) {
+      if (text[index] == '\n') {
+        split.emplace_back();
+        continue;
+      }
+      split.back().push_back(text[index]);
     }
-    line_y += cell_height;
+    if (split.empty()) {
+      split.emplace_back();
+    }
+    return split;
+  }();
+
+  int line_y = y_start;
+  for (std::size_t line_index = 0; line_index < lines.size(); ++line_index) {
+    const int line_width =
+        line_index < metrics.line_widths.size() ? metrics.line_widths[line_index] : 0;
+    const int line_x = aligned_left(style.alignment, safe_left, safe_right, line_width);
+    render::draw_text_line(frame, lines[line_index], style.font_family, line_x, line_y,
+                           style.font_size, style.bold, style.italic, style.text_color,
+                           style.outline_color, style.outline_width);
+    line_y += metrics.line_height;
   }
   return std::nullopt;
 }

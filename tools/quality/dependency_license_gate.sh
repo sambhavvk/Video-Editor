@@ -78,6 +78,8 @@ else
     VIDEO_EDITOR_ABSEIL_VERSION
     VIDEO_EDITOR_PROTOBUF_VERSION
     VIDEO_EDITOR_EBUR128_VERSION
+    VIDEO_EDITOR_HARFBUZZ_VERSION
+    VIDEO_EDITOR_FREETYPE_VERSION
   )
   for variable in "${required_version_variables[@]}"; do
     declaration=$(grep -E "^set\(${variable} \"[0-9]+(\.[0-9]+)+\"\)$" "${dependency_file}" || true)
@@ -88,7 +90,8 @@ else
   for variable in VIDEO_EDITOR_WHISPER_CPP_COMMIT VIDEO_EDITOR_WHISPER_MODEL_ID \
                   VIDEO_EDITOR_WHISPER_MODEL_FILENAME VIDEO_EDITOR_WHISPER_MODEL_BYTES \
                   VIDEO_EDITOR_WHISPER_MODEL_DIGEST_ALGORITHM VIDEO_EDITOR_WHISPER_MODEL_DIGEST \
-                  VIDEO_EDITOR_WHISPER_MODEL_URL; do
+                  VIDEO_EDITOR_WHISPER_MODEL_URL VIDEO_EDITOR_NOTO_SANS_SHA256 \
+                  VIDEO_EDITOR_NOTO_SANS_BYTES; do
     if ! grep -Eq "^set\\(${variable} \"[^\"]+\"\\)$" "${dependency_file}"; then
       fail "${variable} must be explicitly pinned in ${dependency_file}"
     fi
@@ -98,6 +101,12 @@ else
   fi
   if ! grep -Eq '^set\(VIDEO_EDITOR_WHISPER_MODEL_DIGEST "[0-9a-f]{40}"\)$' "${dependency_file}"; then
     fail "VIDEO_EDITOR_WHISPER_MODEL_DIGEST must be an explicit SHA-1 digest"
+  fi
+  if ! grep -Eq '^set\(VIDEO_EDITOR_NOTO_SANS_SHA256 "[0-9a-f]{64}"\)$' "${dependency_file}"; then
+    fail "VIDEO_EDITOR_NOTO_SANS_SHA256 must be an explicit SHA-256 digest"
+  fi
+  if ! grep -Eq '^set\(VIDEO_EDITOR_NOTO_SANS_BYTES "[0-9]+"\)$' "${dependency_file}"; then
+    fail "VIDEO_EDITOR_NOTO_SANS_BYTES must be an explicit byte length"
   fi
   if ! grep -Eq '^set\(VIDEO_EDITOR_WHISPER_CPP_COMMIT "[0-9a-f]{40}"\)$' "${dependency_file}"; then
     fail "VIDEO_EDITOR_WHISPER_CPP_COMMIT must be an explicit 40-character commit"
