@@ -287,5 +287,45 @@ TEST(FfmpegFrameProvider, DiscardsFailedRecoveryBeforeTheNextRequest) {
   EXPECT_EQ(provider.statistics().sessions_opened, 3U);
 }
 
+TEST(FfmpegFrameProvider, HoldsTheLastStillFramePastNativeDuration) {
+  const auto directory = std::filesystem::temp_directory_path() /
+                         ("video_editor_still_" + edit::EntityId::generate().toString());
+  std::filesystem::create_directories(directory);
+  const auto path = directory / "still.ppm";
+  write_ppm(path, {0U, 255U, 0U});
+  auto registry = std::make_shared<AssetRegistry>();
+  const edit::EntityId asset_id = edit::EntityId::generate();
+  ASSERT_TRUE(registry->register_asset(asset_id, {{path, 0}, std::nullopt, std::nullopt}));
+  FfmpegFrameProvider provider(registry);
+  provider.begin_epoch(9);
+  const auto held = provider.request_with_timing(make_request(asset_id, edit::Time(2, 1), 9));
+  std::error_code error;
+  std::filesystem::remove_all(directory, error);
+  ASSERT_TRUE(held) << (held.error ? held.error->message : "");
+  EXPECT_TRUE(held.value->presentation.contains(edit::Time(2, 1)));
+  expect_dominant_color(*held.value->pixels, 1U);
+}
+
+TEST(FfmpegFrameProvider, DecodesNumberedImageSequenceAsOneAsset) {
+  const auto directory = std::filesystem::temp_directory_path() /
+                         ("video_editor_seq_" + edit::EntityId::generate().toString());
+  std::filesystem::create_directories(directory);
+  write_ppm(directory / "clip0001.ppm", {255U, 0U, 0U});
+  write_ppm(directory / "clip0002.ppm", {0U, 255U, 0U});
+  write_ppm(directory / "clip0003.ppm", {0U, 0U, 255U});
+  auto registry = std::make_shared<AssetRegistry>();
+  const edit::EntityId asset_id = edit::EntityId::generate();
+  const auto pattern = directory / "clip%04d.ppm";
+  ASSERT_TRUE(registry->register_asset(asset_id, {{pattern, 0}, std::nullopt, std::nullopt}));
+  FfmpegFrameProvider provider(registry);
+  provider.begin_epoch(11);
+  const auto first = provider.request_with_timing(make_request(asset_id, edit::Time(0, 1), 11));
+  const auto last = provider.request_with_timing(make_request(asset_id, edit::Time(2, 25), 11));
+  std::error_code error;
+  std::filesystem::remove_all(directory, error);
+  ASSERT_TRUE(first) << (first.error ? first.error->message : "");
+  ASSERT_TRUE(last) << (last.error ? last.error->message : "");
+}
+
 } // namespace
 } // namespace video_editor::playback

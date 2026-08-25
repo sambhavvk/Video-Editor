@@ -4,14 +4,18 @@
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
+#include <libavutil/dict.h>
 #include <libavutil/log.h>
 }
 
 #include <array>
 #include <cstdarg>
 #include <cstdio>
+#include <filesystem>
 #include <mutex>
+#include <string>
 #include <string_view>
+#include <system_error>
 #include <vector>
 
 namespace video_editor::media {
@@ -21,6 +25,10 @@ struct AttachmentTypeRestore {
   AVCodecParameters* parameters{nullptr};
   AVMediaType type{AVMEDIA_TYPE_UNKNOWN};
 };
+
+[[nodiscard]] bool path_looks_like_image_sequence_pattern(const std::filesystem::path& uri) {
+  return uri.filename().string().find('%') != std::string::npos;
+}
 
 } // namespace
 
@@ -71,6 +79,54 @@ void discard_undecodable_input_streams(AVFormatContext& context) {
       stream->discard = AVDISCARD_ALL;
     }
   }
+}
+
+bool media_uri_exists(const std::filesystem::path& uri) {
+  std::error_code error;
+  if (std::filesystem::is_regular_file(uri, error)) {
+    return true;
+  }
+  if (!path_looks_like_image_sequence_pattern(uri)) {
+    return false;
+  }
+  const std::string pattern = uri.filename().string();
+  const auto parent = uri.parent_path();
+  for (int index = 0; index < 10'000; ++index) {
+    std::array<char, 512> name{};
+    if (std::snprintf(name.data(), name.size(), pattern.c_str(), index) <= 0) {
+      return false;
+    }
+    if (std::filesystem::is_regular_file(parent / name.data(), error)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+int open_media_input(AVFormatContext** context, const std::filesystem::path& uri) {
+  const std::string path = uri.string();
+  const AVInputFormat* format = nullptr;
+  AVDictionary* options = nullptr;
+  if (path_looks_like_image_sequence_pattern(uri)) {
+    format = av_find_input_format("image2");
+    av_dict_set(&options, "framerate", "30", 0);
+    const std::string pattern = uri.filename().string();
+    const auto parent = uri.parent_path();
+    std::error_code error;
+    for (int index = 0; index < 10'000; ++index) {
+      std::array<char, 512> name{};
+      if (std::snprintf(name.data(), name.size(), pattern.c_str(), index) <= 0) {
+        break;
+      }
+      if (std::filesystem::is_regular_file(parent / name.data(), error)) {
+        av_dict_set_int(&options, "start_number", index, 0);
+        break;
+      }
+    }
+  }
+  const int result = avformat_open_input(context, path.c_str(), format, &options);
+  av_dict_free(&options);
+  return result;
 }
 
 int inspect_input_streams(AVFormatContext& context) {

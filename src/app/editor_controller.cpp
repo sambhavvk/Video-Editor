@@ -1497,7 +1497,8 @@ void EditorController::chooseMedia() {
   const QStringList paths =
       QFileDialog::getOpenFileNames(&window_, tr("Import media"), {},
                                     tr("Media files (*.mp4 *.mov *.mkv *.webm *.avi *.mxf *.wav "
-                                       "*.flac *.mp3 *.ogg);;All files (*)"));
+                                       "*.flac *.mp3 *.ogg *.png *.jpg *.jpeg *.bmp *.webp *.tif "
+                                       "*.tiff *.ppm);;All files (*)"));
   importPaths(paths);
 }
 
@@ -1902,6 +1903,15 @@ void EditorController::addImportedAsset(assets::AssetRecord asset) {
     model_asset.duration = edit::Time(5, 1);
   }
   model_asset.metadata["container"] = asset.descriptor.format_name;
+  if (asset.descriptor.format_name == "image2-sequence") {
+    model_asset.metadata["media_kind"] = "image_sequence";
+  } else if (model_asset.duration == edit::Time(5, 1) &&
+             (asset.descriptor.format_name.find("image") != std::string::npos ||
+              asset.descriptor.format_name.find("png") != std::string::npos ||
+              asset.descriptor.format_name.find("jpeg") != std::string::npos ||
+              asset.descriptor.format_name.find("pipe") != std::string::npos)) {
+    model_asset.metadata["media_kind"] = "still";
+  }
   for (const auto& stream : asset.descriptor.streams) {
     if (stream.video.has_value() && !model_asset.has_video) {
       model_asset.has_video = true;

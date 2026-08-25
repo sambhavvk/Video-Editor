@@ -473,8 +473,7 @@ convert_frame(DecodeSession& session, const AVFrame& source, const int preferred
 [[nodiscard]] render::RenderResult<std::unique_ptr<DecodeSession>>
 open_session(const ResolvedAssetStream& source, const std::atomic<std::uint64_t>& current_epoch,
              const std::uint64_t request_epoch) {
-  std::error_code filesystem_error;
-  if (!std::filesystem::is_regular_file(source.location.path, filesystem_error)) {
+  if (!media::media_uri_exists(source.location.path)) {
     return failure<std::unique_ptr<DecodeSession>>(render::RenderErrorCode::AssetUnavailable,
                                                    "playback media file is unavailable: " +
                                                        source.location.path.string());
@@ -495,8 +494,7 @@ open_session(const ResolvedAssetStream& source, const std::atomic<std::uint64_t>
   media::apply_input_probe_options(*session->format);
 
   AVFormatContext* raw_format = session->format.release();
-  const std::string path = source.location.path.string();
-  const int open_result = avformat_open_input(&raw_format, path.c_str(), nullptr, nullptr);
+  const int open_result = media::open_media_input(&raw_format, source.location.path);
   session->format.reset(raw_format);
   if (open_result < 0) {
     return failure<std::unique_ptr<DecodeSession>>(
@@ -687,6 +685,27 @@ decode_at(DecodeSession& session, const render::AssetFrameRequest& request,
                                         ffmpeg_message(candidate.message, candidate.native_code));
     }
     if (candidate.status == ReadStatus::EndOfStream) {
+      if (session.current_frame.has_value()) {
+        StoredFrame& held = *session.current_frame;
+        if (request.source_time >= held.presentation.start) {
+          const edit::Time needed =
+              request.source_time - held.presentation.start +
+              edit::Time(1, std::max<std::uint32_t>(1U, request.source_time.timescale()));
+          if (needed > held.presentation.duration) {
+            held.presentation.duration = needed;
+          }
+          auto converted =
+              convert_frame(session, *held.frame, request.preferred_width, request.preferred_height);
+          if (!converted) {
+            return failure<DecodedAssetFrame>(converted.error->code, converted.error->message);
+          }
+          return render::RenderResult<DecodedAssetFrame>::success(
+              {.pixels = *converted.value,
+               .presentation = held.presentation,
+               .used_proxy = session.source.is_proxy,
+               .video_stream_index = session.stream_index});
+        }
+      }
       return failure<DecodedAssetFrame>(render::RenderErrorCode::AssetUnavailable,
                                         "no decoded video frame covers the requested source time");
     }
@@ -756,6 +775,8 @@ decode_at(DecodeSession& session, const render::AssetFrameRequest& request,
           "requested source time precedes the first available video frame");
     }
     if (!presentation->contains(request.source_time)) {
+      session.current_frame =
+          StoredFrame{.frame = std::move(candidate.frame.frame), .presentation = *presentation};
       continue;
     }
 

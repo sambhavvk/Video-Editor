@@ -197,8 +197,7 @@ Result<AssetDescriptor> probe(const std::filesystem::path& uri, const ProbeOptio
         make_error(MediaErrorCode::InvalidArgument, 0, "media path is empty"));
   }
 
-  std::error_code filesystem_error;
-  if (!std::filesystem::is_regular_file(uri, filesystem_error)) {
+  if (!media_uri_exists(uri)) {
     return Result<AssetDescriptor>::failure(
         make_error(MediaErrorCode::FileNotFound, 0, "media file does not exist"));
   }
@@ -214,8 +213,7 @@ Result<AssetDescriptor> probe(const std::filesystem::path& uri, const ProbeOptio
   apply_input_probe_options(*context, options);
 
   AVFormatContext* opened_context = context.release();
-  const std::string path = uri.string();
-  const int open_result = avformat_open_input(&opened_context, path.c_str(), nullptr, nullptr);
+  const int open_result = open_media_input(&opened_context, uri);
   context.reset(opened_context);
   if (open_result < 0) {
     const bool cancelled = options.cancel != nullptr && options.cancel->load();

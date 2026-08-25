@@ -13,8 +13,8 @@ audio layout. A full SHA-256 can be requested by the lower-level API but is not 
 import path.
 
 The project asset stores the source URI, quick fingerprint, high-level media attributes, and select
-metadata. Import accepts the best video and audio stream for current editing. Broader stream
-selection, image sequences, attachments, and alternate angles/languages are not complete.
+metadata. Import accepts the best video and audio stream for current editing, still images, and
+numbered image sequences. Attachments and alternate angles/languages are not complete.
 
 The lower-level relink contract compares fingerprints and refuses changed content unless the caller
 explicitly permits it. The desktop Relink menu is connected: it opens a file picker, confirms when

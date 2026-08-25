@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 
@@ -55,6 +56,30 @@ TEST(ProxyPolicy, RecommendsProxyOnlyForDifficultFourKVideo) {
   asset.descriptor.streams.front().video->width = 1920;
   asset.descriptor.streams.front().video->height = 1080;
   EXPECT_FALSE(AssetService::should_recommend_proxy(asset));
+}
+
+TEST(AssetService, ImportsNumberedStillSequenceAsOnePatternUri) {
+  const auto directory = std::filesystem::temp_directory_path() /
+                         ("video-editor-sequence-" + std::to_string(std::rand()));
+  std::filesystem::create_directories(directory);
+  const auto write_ppm = [&](const std::string& name) {
+    std::ofstream output(directory / name, std::ios::binary | std::ios::trunc);
+    output << "P6\n2 2\n255\n";
+    const char pixel[] = {static_cast<char>(255), 0, 0};
+    for (int i = 0; i < 4; ++i) {
+      output.write(pixel, 3);
+    }
+  };
+  write_ppm("shot0001.ppm");
+  write_ppm("shot0002.ppm");
+  write_ppm("shot0003.ppm");
+  AssetService service;
+  const auto imported = service.import(directory / "shot0001.ppm");
+  std::error_code error;
+  std::filesystem::remove_all(directory, error);
+  ASSERT_TRUE(imported) << imported.error().message;
+  EXPECT_NE(imported.value().uri.string().find("%04d"), std::string::npos);
+  EXPECT_EQ(imported.value().descriptor.format_name, "image2-sequence");
 }
 
 } // namespace

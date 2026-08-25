@@ -304,6 +304,28 @@ TEST(MediaProbe, RejectsMissingFileWithoutThrowing) {
   EXPECT_EQ(result.error().code, MediaErrorCode::FileNotFound);
 }
 
+TEST(MediaProbe, OpensNumberedImageSequencePatternUri) {
+  const auto directory = std::filesystem::temp_directory_path() /
+                         ("video_editor_probe_seq_" + std::to_string(std::rand()));
+  std::filesystem::create_directories(directory);
+  const auto write_ppm = [&](const std::string& name) {
+    std::ofstream output(directory / name, std::ios::binary | std::ios::trunc);
+    output << "P6\n2 2\n255\n";
+    const char pixel[] = {static_cast<char>(255), 0, 0};
+    for (int i = 0; i < 4; ++i) {
+      output.write(pixel, 3);
+    }
+  };
+  write_ppm("clip0001.ppm");
+  write_ppm("clip0002.ppm");
+  const auto result = probe(directory / "clip%04d.ppm");
+  std::error_code error;
+  std::filesystem::remove_all(directory, error);
+  ASSERT_TRUE(result) << result.error().message;
+  EXPECT_GE(result.value().streams.size(), 1U);
+  EXPECT_EQ(result.value().streams.front().kind, StreamKind::Video);
+}
+
 TEST(MediaProbe, DescribesEveryWaveStream) {
   const auto path = write_test_wave();
   const auto result = probe(path);
