@@ -154,7 +154,7 @@ TEST(TranscriptProposal, RippleMapsCaptionAndWordTimingThroughCut) {
   EXPECT_EQ(mapped.words[2].range.duration, edit::Time(2, 1));
 }
 
-TEST(TranscriptProposal, RejectsCutBeforeTransitionBecauseTransitionWouldShift) {
+TEST(TranscriptProposal, ShiftsTransitionWhenCutIsBeforeTransitionRange) {
   auto project = project_with_tracks();
   auto& sequence = project.sequences.front();
   auto& track = sequence.tracks.front();
@@ -173,8 +173,23 @@ TEST(TranscriptProposal, RejectsCutBeforeTransitionBecauseTransitionWouldShift) 
   ASSERT_TRUE(snapshot);
   const edit::TimeRange cut(edit::Time(0, 1), edit::Time(1, 1));
   const auto proposal = captions::buildTimelineCutProposal(snapshot.value(), {&cut, 1});
-  ASSERT_FALSE(proposal);
-  EXPECT_EQ(proposal.error().code, captions::ProposalErrorCode::UnsupportedTransition);
+  ASSERT_TRUE(proposal);
+  ASSERT_TRUE(proposal.value().timeline_cuts.has_value());
+  ASSERT_TRUE(proposal.value().timeline_cuts->transitions.has_value());
+  ASSERT_EQ(proposal.value().timeline_cuts->transitions->size(), 1U);
+  const auto& remapped = proposal.value().timeline_cuts->transitions->front();
+  EXPECT_EQ(remapped.id, transition.id);
+  EXPECT_EQ(remapped.range, edit::TimeRange(edit::Time(8, 1), edit::Time(2, 1)));
+
+  const auto result = editor.apply(edit::EditCommand{*proposal.value().timeline_cuts, {}},
+                                   proposal.value().base_revision);
+  ASSERT_TRUE(result);
+  const auto after =
+      editor.snapshot(sequence.id, result.value());
+  ASSERT_TRUE(after);
+  ASSERT_EQ(after.value().sequence().transitions.size(), 1U);
+  EXPECT_EQ(after.value().sequence().transitions.front().range,
+            edit::TimeRange(edit::Time(8, 1), edit::Time(2, 1)));
 }
 
 TEST(TranscriptProposal, RippleKeepsLinkedAvSegmentsAndSynchronizesTrailingMaterial) {
@@ -230,7 +245,7 @@ TEST(TranscriptProposal, RejectsLockedAffectedTrackAndSupportsFullRemoval) {
   ASSERT_TRUE(proposal.value().timeline_cuts->tracks.front().clips.empty());
 }
 
-TEST(TranscriptProposal, ReportsTransitionLimitationBeforeBuildingReplacement) {
+TEST(TranscriptProposal, DropsTransitionWhenCutOverlapsTransitionRange) {
   auto project = project_with_tracks();
   auto& sequence = project.sequences.front();
   auto clip = sequence.tracks.front().clips.front();
@@ -255,8 +270,17 @@ TEST(TranscriptProposal, ReportsTransitionLimitationBeforeBuildingReplacement) {
   ASSERT_TRUE(snapshot);
   const auto selected = edit::TimeRange(edit::Time(9, 1), edit::Time(1, 1));
   const auto proposal = captions::buildTimelineCutProposal(snapshot.value(), {&selected, 1});
-  ASSERT_FALSE(proposal);
-  EXPECT_EQ(proposal.error().code, captions::ProposalErrorCode::UnsupportedTransition);
+  ASSERT_TRUE(proposal);
+  ASSERT_TRUE(proposal.value().timeline_cuts.has_value());
+  ASSERT_TRUE(proposal.value().timeline_cuts->transitions.has_value());
+  EXPECT_TRUE(proposal.value().timeline_cuts->transitions->empty());
+
+  const auto result = editor.apply(edit::EditCommand{*proposal.value().timeline_cuts, {}},
+                                   proposal.value().base_revision);
+  ASSERT_TRUE(result);
+  const auto after = editor.snapshot(sequence.id, result.value());
+  ASSERT_TRUE(after);
+  EXPECT_TRUE(after.value().sequence().transitions.empty());
 }
 
 } // namespace

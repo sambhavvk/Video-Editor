@@ -72,7 +72,7 @@ operations can be submitted through `TimelineEditor::applyBatch` for one atomic 
 | `RemoveCaptionCommand` | `sequence_id`, `caption_id` | Removes one caption. |
 | `ApplyCaptionChangeSetCommand` | `sequence_id`, complete added/updated/removed values | Applies a nonempty deterministic caption change set atomically; duplicates, missing IDs, invalid cues, and no-ops reject the command. |
 | `TrackClipReplacement` | track identity/kind plus complete clip list | Supplies one authoritative replacement list inside a timeline-cut proposal. |
-| `ApplyTimelineCutChangeSetCommand` | `sequence_id`, complete affected-track replacements | Applies a nonempty review-approved cut set atomically; caption tracks, locked/missing/kind-mismatched tracks, invalid clips, and no-ops reject it. |
+| `ApplyTimelineCutChangeSetCommand` | `sequence_id`, complete affected-track replacements, optional complete post-cut transition list | Applies a nonempty review-approved cut set atomically; caption tracks, locked/missing/kind-mismatched tracks, invalid clips, and no-ops reject it. When `transitions` is set, clip replacements are applied first and the sequence transition list is replaced in the same command so revisions never retain dangling clip IDs. When `transitions` is nullopt, existing transitions are left unchanged. |
 | `AddClipEffectCommand` | `sequence_id`, `clip_id`, `effect` | Appends a typed or opaque effect to an unlocked clip. |
 | `RemoveClipEffectCommand` | `sequence_id`, `clip_id`, `effect_id` | Removes one clip effect. |
 | `SetClipEffectParameterCommand` | `sequence_id`, `clip_id`, `effect_id`, `parameter` | Replaces one typed, versioned effect parameter. |

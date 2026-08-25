@@ -1812,6 +1812,14 @@ struct PlannedClip final {
               auto* track = mutableTrack(*sequence, replacement.track_id);
               track->clips = replacement.clips;
             }
+            if (command.transitions.has_value()) {
+              for (const auto& transition : *command.transitions) {
+                if (const auto issue = validateTransition(project, *sequence, transition)) {
+                  return issue;
+                }
+              }
+              sequence->transitions = *command.transitions;
+            }
             return std::nullopt;
           },
           [&](const AddClipEffectCommand& command) -> std::optional<EditError> {

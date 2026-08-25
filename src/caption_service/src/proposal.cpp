@@ -87,6 +87,173 @@ namespace {
   return result;
 }
 
+struct MappedFragment final {
+  edit::EntityId id;
+  edit::EntityId track_id;
+  edit::TimeRange timeline_range;
+  edit::Clip clip;
+};
+
+[[nodiscard]] bool has_source_handle_before(const edit::Project& project, const edit::Clip& clip,
+                                            const edit::Time timeline_duration) {
+  if (clip.kind == edit::ClipKind::Title) {
+    return true;
+  }
+  const auto* asset = edit::findAsset(project, clip.asset_id);
+  if (asset == nullptr) {
+    return false;
+  }
+  const auto source_duration =
+      timeline_duration
+          .scaled(clip.playback_rate.numerator(), clip.playback_rate.denominator(),
+                  edit::RoundingMode::NearestTiesEven)
+          .rescaledTo(clip.source_range.duration.timescale(), edit::RoundingMode::NearestTiesEven);
+  return clip.reversed ? asset->duration - clip.source_range.end() >= source_duration
+                       : clip.source_range.start >= source_duration;
+}
+
+[[nodiscard]] bool has_source_handle_after(const edit::Project& project, const edit::Clip& clip,
+                                           const edit::Time timeline_duration) {
+  if (clip.kind == edit::ClipKind::Title) {
+    return true;
+  }
+  const auto* asset = edit::findAsset(project, clip.asset_id);
+  if (asset == nullptr) {
+    return false;
+  }
+  const auto source_duration =
+      timeline_duration
+          .scaled(clip.playback_rate.numerator(), clip.playback_rate.denominator(),
+                  edit::RoundingMode::NearestTiesEven)
+          .rescaledTo(clip.source_range.duration.timescale(), edit::RoundingMode::NearestTiesEven);
+  return clip.reversed ? clip.source_range.start >= source_duration
+                       : asset->duration - clip.source_range.end() >= source_duration;
+}
+
+[[nodiscard]] bool remapped_transition_valid(
+    const edit::Project& project, const edit::Transition& transition,
+    const std::unordered_map<edit::EntityId, edit::Clip>& post_cut_clips,
+    const std::unordered_map<edit::EntityId, edit::EntityId>& clip_track_ids,
+    const std::vector<edit::Transition>& accepted) {
+  if (transition.id.isNil() || transition.outgoing_clip_id == transition.incoming_clip_id ||
+      transition.range.start.isNegative() || transition.range.duration <= edit::Time{}) {
+    return false;
+  }
+  const auto outgoing_it = post_cut_clips.find(transition.outgoing_clip_id);
+  const auto incoming_it = post_cut_clips.find(transition.incoming_clip_id);
+  if (outgoing_it == post_cut_clips.end() || incoming_it == post_cut_clips.end()) {
+    return false;
+  }
+  const auto outgoing_track_it = clip_track_ids.find(transition.outgoing_clip_id);
+  const auto incoming_track_it = clip_track_ids.find(transition.incoming_clip_id);
+  if (outgoing_track_it == clip_track_ids.end() ||
+      incoming_track_it == clip_track_ids.end() ||
+      outgoing_track_it->second != incoming_track_it->second) {
+    return false;
+  }
+  const auto& outgoing = outgoing_it->second;
+  const auto& incoming = incoming_it->second;
+  const auto cut = outgoing.timeline_range.end();
+  if (incoming.timeline_range.start != cut) {
+    return false;
+  }
+  if (transition.range.start >= cut || transition.range.end() <= cut) {
+    return false;
+  }
+  if (transition.range.start < outgoing.timeline_range.start ||
+      transition.range.end() > incoming.timeline_range.end()) {
+    return false;
+  }
+  const auto incoming_pre_cut = cut - transition.range.start;
+  const auto outgoing_post_cut = transition.range.end() - cut;
+  if (!has_source_handle_before(project, incoming, incoming_pre_cut) ||
+      !has_source_handle_after(project, outgoing, outgoing_post_cut)) {
+    return false;
+  }
+  if (!transition.enabled) {
+    return true;
+  }
+  const auto& track_id = outgoing_track_it->second;
+  for (const auto& other : accepted) {
+    if (!other.enabled || other.id == transition.id) {
+      continue;
+    }
+    const auto other_outgoing_track = clip_track_ids.find(other.outgoing_clip_id);
+    if (other_outgoing_track == clip_track_ids.end() ||
+        other_outgoing_track->second != track_id) {
+      continue;
+    }
+    if (other.range.overlaps(transition.range)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] std::vector<edit::Transition>
+remap_transitions(const edit::TimelineSnapshot& snapshot,
+                  std::span<const edit::TimeRange> selected_ranges,
+                  const std::unordered_map<edit::EntityId, std::vector<MappedFragment>>&
+                      fragments_by_source) {
+  std::unordered_map<edit::EntityId, edit::Clip> post_cut_clips;
+  std::unordered_map<edit::EntityId, edit::EntityId> clip_track_ids;
+  for (const auto& [source_id, fragments] : fragments_by_source) {
+    for (const auto& fragment : fragments) {
+      post_cut_clips.emplace(fragment.id, fragment.clip);
+      clip_track_ids.emplace(fragment.id, fragment.track_id);
+    }
+    (void)source_id;
+  }
+  std::vector<edit::Transition> remapped;
+  remapped.reserve(snapshot.sequence().transitions.size());
+  for (const auto& transition : snapshot.sequence().transitions) {
+    const auto mapped_range = map_range(transition.range, selected_ranges);
+    if (!mapped_range) {
+      continue;
+    }
+    const auto outgoing_fragments = fragments_by_source.find(transition.outgoing_clip_id);
+    const auto incoming_fragments = fragments_by_source.find(transition.incoming_clip_id);
+    if (outgoing_fragments == fragments_by_source.end() ||
+        incoming_fragments == fragments_by_source.end()) {
+      continue;
+    }
+    bool found_pair = false;
+    edit::EntityId new_outgoing;
+    edit::EntityId new_incoming;
+    for (const auto& outgoing : outgoing_fragments->second) {
+      for (const auto& incoming : incoming_fragments->second) {
+        const auto junction = outgoing.timeline_range.end();
+        if (incoming.timeline_range.start != junction) {
+          continue;
+        }
+        if (mapped_range->start >= junction || mapped_range->end() <= junction) {
+          continue;
+        }
+        new_outgoing = outgoing.id;
+        new_incoming = incoming.id;
+        found_pair = true;
+        break;
+      }
+      if (found_pair) {
+        break;
+      }
+    }
+    if (!found_pair) {
+      continue;
+    }
+    edit::Transition remapped_transition = transition;
+    remapped_transition.range = *mapped_range;
+    remapped_transition.outgoing_clip_id = new_outgoing;
+    remapped_transition.incoming_clip_id = new_incoming;
+    if (!remapped_transition_valid(snapshot.project(), remapped_transition, post_cut_clips,
+                                     clip_track_ids, remapped)) {
+      continue;
+    }
+    remapped.push_back(remapped_transition);
+  }
+  return remapped;
+}
+
 } // namespace
 
 std::optional<edit::Caption>
@@ -144,21 +311,10 @@ ProposalResult buildTimelineCutProposal(const edit::TimelineSnapshot& snapshot,
   CaptionProposal proposal;
   proposal.base_revision = snapshot.revision();
   proposal.caption_changes.sequence_id = snapshot.sequence().id;
-  proposal.timeline_cuts = edit::ApplyTimelineCutChangeSetCommand{snapshot.sequence().id, {}};
-  for (const auto& transition : snapshot.sequence().transitions) {
-    const auto* outgoing = snapshot.findClip(transition.outgoing_clip_id);
-    const auto* incoming = snapshot.findClip(transition.incoming_clip_id);
-    if (std::any_of(
-            selected_ranges.begin(), selected_ranges.end(), [&](const edit::TimeRange& range) {
-              return range.end() <= transition.range.start || transition.range.overlaps(range) ||
-                     (outgoing != nullptr && outgoing->timeline_range.overlaps(range)) ||
-                     (incoming != nullptr && incoming->timeline_range.overlaps(range));
-            })) {
-      return ProposalResult::failure(
-          {ProposalErrorCode::UnsupportedTransition,
-           "timeline cut proposals do not yet carry transition replacements"});
-    }
-  }
+  proposal.timeline_cuts =
+      edit::ApplyTimelineCutChangeSetCommand{snapshot.sequence().id, {}, std::nullopt};
+  std::unordered_map<edit::EntityId, std::vector<MappedFragment>> fragments_by_source;
+  std::unordered_set<edit::EntityId> replaced_tracks;
   for (const auto& caption : snapshot.sequence().captions) {
     const auto mapped = mapCaptionThroughCuts(caption, selected_ranges);
     if (mapped.has_value()) {
@@ -192,6 +348,7 @@ ProposalResult buildTimelineCutProposal(const edit::TimelineSnapshot& snapshot,
     if (!affected) {
       continue;
     }
+    replaced_tracks.insert(track.id);
     if (track.locked) {
       return ProposalResult::failure(
           {ProposalErrorCode::InvalidSnapshot, "selected cut would modify a locked track"});
@@ -224,16 +381,31 @@ ProposalResult buildTimelineCutProposal(const edit::TimelineSnapshot& snapshot,
         if (group && !preserve_id) {
           group = fragment_id(*group, segment_index);
         }
-        replacement.clips.push_back(make_fragment(clip, segment.start, segment.end(), shift,
-                                                  fragment_index++, preserve_id, group));
+        auto fragment = make_fragment(clip, segment.start, segment.end(), shift, fragment_index++,
+                                      preserve_id, group);
+        replacement.clips.push_back(fragment);
+        fragments_by_source[clip.id].push_back(
+            MappedFragment{fragment.id, track.id, fragment.timeline_range, fragment});
       }
     }
     if (affected) {
       proposal.timeline_cuts->tracks.push_back(std::move(replacement));
     }
   }
+  for (const auto& track : snapshot.sequence().tracks) {
+    if (track.kind == edit::TrackKind::Caption || replaced_tracks.contains(track.id)) {
+      continue;
+    }
+    for (const auto& clip : track.clips) {
+      fragments_by_source[clip.id].push_back(
+          MappedFragment{clip.id, track.id, clip.timeline_range, clip});
+    }
+  }
   if (proposal.timeline_cuts->tracks.empty()) {
     proposal.timeline_cuts.reset();
+  } else {
+    proposal.timeline_cuts->transitions =
+        remap_transitions(snapshot, selected_ranges, fragments_by_source);
   }
   return ProposalResult::success(std::move(proposal));
 }

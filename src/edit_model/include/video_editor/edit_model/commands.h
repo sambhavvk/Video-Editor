@@ -191,6 +191,9 @@ struct TrackClipReplacement final {
 struct ApplyTimelineCutChangeSetCommand final {
   EntityId sequence_id;
   std::vector<TrackClipReplacement> tracks;
+  // When set, replaces the sequence transition list after clip replacements apply.
+  // When nullopt, existing transitions are left unchanged (backward compatible).
+  std::optional<std::vector<Transition>> transitions;
 };
 struct AddClipEffectCommand final {
   EntityId sequence_id;

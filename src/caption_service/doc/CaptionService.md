@@ -37,7 +37,11 @@ between exchange documents and the canonical edit model. Returned values own all
 `buildTimelineCutProposal(snapshot, ranges)` accepts sorted, non-overlapping, positive exact ranges
 and materializes deterministic clip fragments for every affected media track. It preserves source
 mapping, playback rate/reverse behavior, linked A/V grouping, and unchanged clip IDs. A locked
-affected track or unsupported transition relationship fails before any command is published.
+affected track fails before any command is published. Transitions are remapped through the same
+ripple math as captions: cuts entirely before a transition shift its range and keep its ID when
+adjacency still holds; overlapping cuts drop the transition when the mapped range no longer
+straddles the surviving cut or validation would fail. The resulting
+`ApplyTimelineCutChangeSetCommand` carries the complete post-cut transition list.
 
 The function only prepares values. A controller must show the items, retain the proposal revision,
 and submit selected caption and timeline changes through `TimelineEditor::applyBatch` with that
