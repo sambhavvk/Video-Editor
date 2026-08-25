@@ -158,6 +158,12 @@ public:
   }
   [[nodiscard]] std::uint64_t playbackSeekCount() const noexcept;
   [[nodiscard]] std::uint64_t playbackDecodedFrameCount() const noexcept;
+  [[nodiscard]] std::uint64_t sourcePresentationCount() const noexcept {
+    return source_presentation_count_;
+  }
+  [[nodiscard]] bool sourceAssetLoaded() const noexcept {
+    return source_asset_id_.has_value();
+  }
   [[nodiscard]] bool gpuPreviewActive() const noexcept {
     return gpu_preview_active_;
   }
@@ -186,6 +192,15 @@ private slots:
   void chooseCaptionFile();
   void chooseCaptionExport();
   void insertAsset(const QString& assetId);
+  void loadSourceAsset(const QString& assetId);
+  void insertLoadedSource(edit::InsertMode mode);
+  void markSourceIn();
+  void markSourceOut();
+  void seekSource(qint64 position);
+  void setSourcePlaybackRate(double rate);
+  void stepSourceShuttle(int direction);
+  void stepSourceFrame(int direction);
+  void advanceSourcePlayback();
   void splitSelectedClip();
   void deleteSelectedClip(bool ripple);
   void undo();
@@ -392,8 +407,14 @@ private:
   void closeGap(const QString& gapKey);
   void requestPreview(PreviewRequestPolicy policy = PreviewRequestPolicy::Replace);
   void launchPreviewRequest();
+  void requestSourcePreview();
+  void launchSourcePreviewRequest();
+  void updateSourceMonitorChrome();
+  [[nodiscard]] qint64 sourceDurationUi() const;
+  [[nodiscard]] edit::TimeRange markedSourceRange() const;
   void syncPreviewCacheIdentity();
   void startGpuInitialization();
+  void startGpuInitializationWithPresentation(const desktop_ui::NativePresentationHandles& handles);
   void attachGpuRenderer(std::shared_ptr<render::GpuRenderer> gpu);
   [[nodiscard]] bool startAudioMasterPlayback();
   void stopAudioPlayback() noexcept;
@@ -411,6 +432,7 @@ private:
   std::shared_ptr<playback::AssetRegistry> playback_registry_;
   std::shared_ptr<audio_render::OriginalAudioRegistry> audio_registry_;
   std::shared_ptr<playback::FfmpegFrameProvider> frame_provider_;
+  std::shared_ptr<playback::FfmpegFrameProvider> source_frame_provider_;
   std::shared_ptr<render::CpuRenderer> renderer_;
   std::shared_ptr<render::RenderCache> preview_cache_;
   std::shared_ptr<render::GpuRenderer> gpu_renderer_;
@@ -538,6 +560,17 @@ private:
   std::int64_t audio_clock_origin_{0};
   QTimer playback_timer_;
   QElapsedTimer playback_clock_;
+  std::optional<edit::EntityId> source_asset_id_;
+  qint64 source_playhead_{0};
+  std::optional<qint64> source_mark_in_;
+  std::optional<qint64> source_mark_out_;
+  double source_playback_rate_{0.0};
+  std::uint64_t source_preview_epoch_{0};
+  std::uint64_t source_preview_serial_{0};
+  std::uint64_t source_presentation_count_{0};
+  bool source_preview_in_flight_{false};
+  QTimer source_playback_timer_;
+  QElapsedTimer source_playback_clock_;
 };
 
 } // namespace video_editor::app

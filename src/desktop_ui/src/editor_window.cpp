@@ -335,10 +335,12 @@ void EditorWindow::createCentralArea() {
   source_viewer_->setObjectName(QStringLiteral("sourceViewer"));
   source_viewer_->setAccessibleName(tr("Source viewer"));
   source_viewer_->setTitle(tr("Source"));
+  source_viewer_->setSourceEditKeysEnabled(true);
   sourceLayout->addWidget(source_viewer_);
 
   program_viewer_ = new ProgramViewer(viewerSplitter);
   program_viewer_->setObjectName(QStringLiteral("programViewer"));
+  program_viewer_->setNativePresentationEnabled(true);
   viewerSplitter->addWidget(source_container_);
   viewerSplitter->addWidget(program_viewer_);
   viewerSplitter->setStretchFactor(0, 1);
@@ -548,6 +550,14 @@ void EditorWindow::createActions() {
       create(QStringLiteral("sourceMonitor"), tr("Source Monitor"),
              tr("Show a second monitor for source media"), QKeySequence{tr("Shift+2")});
   sourceMonitor->setCheckable(true);
+  create(QStringLiteral("sourceMarkIn"), tr("Mark In"),
+         tr("Set the source in point at the source playhead"));
+  create(QStringLiteral("sourceMarkOut"), tr("Mark Out"),
+         tr("Set the source out point at the source playhead"));
+  create(QStringLiteral("sourceRippleInsert"), tr("Insert from Source"),
+         tr("Ripple-insert the marked source range at the program playhead"));
+  create(QStringLiteral("sourceOverwriteInsert"), tr("Overwrite from Source"),
+         tr("Overwrite the marked source range at the program playhead"));
   auto* precisionTrim = create(QStringLiteral("precisionTrim"), tr("Precision Trim Controls"),
                                tr("Show precision trim controls"), QKeySequence{tr("T")});
   precisionTrim->setCheckable(true);
@@ -595,13 +605,44 @@ void EditorWindow::createActions() {
   connect(action(QStringLiteral("rippleDelete")), &QAction::triggered, this,
           [this] { emit deleteSelectionRequested(true); });
 
-  connect(reverse, &QAction::triggered, this, [this] { stepShuttle(-1); });
-  connect(stop, &QAction::triggered, this, [this] { setShuttleRate(0.0); });
-  connect(playPause, &QAction::triggered, this,
-          [this] { setShuttleRate(shuttle_rate_ == 0.0 ? 1.0 : 0.0); });
-  connect(forward, &QAction::triggered, this, [this] { stepShuttle(1); });
+  connect(reverse, &QAction::triggered, this, [this] {
+    if (sourceMonitorHasFocus()) {
+      emit sourceStepShuttleRequested(-1);
+      return;
+    }
+    stepShuttle(-1);
+  });
+  connect(stop, &QAction::triggered, this, [this] {
+    if (sourceMonitorHasFocus()) {
+      emit sourcePlaybackRateRequested(0.0);
+      return;
+    }
+    setShuttleRate(0.0);
+  });
+  connect(playPause, &QAction::triggered, this, [this] {
+    if (sourceMonitorHasFocus()) {
+      emit sourcePlaybackRateRequested(shuttle_rate_ == 0.0 ? 1.0 : 0.0);
+      return;
+    }
+    setShuttleRate(shuttle_rate_ == 0.0 ? 1.0 : 0.0);
+  });
+  connect(forward, &QAction::triggered, this, [this] {
+    if (sourceMonitorHasFocus()) {
+      rippleInsertFromSource();
+      return;
+    }
+    stepShuttle(1);
+  });
   connect(sourceMonitor, &QAction::toggled, this, &EditorWindow::setSourceMonitorVisible);
   connect(precisionTrim, &QAction::toggled, this, &EditorWindow::setPrecisionTrimVisible);
+  connect(action(QStringLiteral("sourceMarkIn")), &QAction::triggered, this,
+          &EditorWindow::markSourceIn);
+  connect(action(QStringLiteral("sourceMarkOut")), &QAction::triggered, this,
+          &EditorWindow::markSourceOut);
+  connect(action(QStringLiteral("sourceRippleInsert")), &QAction::triggered, this,
+          &EditorWindow::rippleInsertFromSource);
+  connect(action(QStringLiteral("sourceOverwriteInsert")), &QAction::triggered, this,
+          &EditorWindow::overwriteInsertFromSource);
 }
 
 void EditorWindow::createMenus() {
@@ -642,6 +683,11 @@ void EditorWindow::createMenus() {
   timelineMenu->addAction(action(QStringLiteral("playPause")));
   timelineMenu->addAction(action(QStringLiteral("forward")));
   timelineMenu->addAction(action(QStringLiteral("nextFrame")));
+  timelineMenu->addSeparator();
+  timelineMenu->addAction(action(QStringLiteral("sourceMarkIn")));
+  timelineMenu->addAction(action(QStringLiteral("sourceMarkOut")));
+  timelineMenu->addAction(action(QStringLiteral("sourceRippleInsert")));
+  timelineMenu->addAction(action(QStringLiteral("sourceOverwriteInsert")));
   timelineMenu->addSeparator();
   timelineMenu->addAction(action(QStringLiteral("zoomInTimeline")));
   timelineMenu->addAction(action(QStringLiteral("zoomOutTimeline")));
@@ -688,9 +734,12 @@ void EditorWindow::createMenus() {
   shortcuts->setObjectName(QStringLiteral("action.keyboardShortcuts"));
   connect(shortcuts, &QAction::triggered, this, [this] {
     QMessageBox::information(this, tr("Keyboard Shortcuts"),
-                             tr("J / K / L — reverse, stop, forward\n"
+                             tr("J / K / L — reverse, stop, forward (program)\n"
                                 "Space — play or pause\n"
-                                "Comma / Period — previous or next frame\n"
+                                "Comma / Period — previous or next frame (program)\n"
+                                "I / O — source mark in / out\n"
+                                "L / Comma — ripple insert / overwrite when the source monitor "
+                                "has focus\n"
                                 "Ctrl+1…4 — switch workspace\n"
                                 "Ctrl+Shift+P — command palette"));
   });
@@ -764,8 +813,15 @@ void EditorWindow::connectControllerSurface() {
           [this](const QStringList&) { emit importMediaRequested(); });
   connect(program_viewer_, &ProgramViewer::togglePlaybackRequested,
           action(QStringLiteral("playPause")), &QAction::trigger);
-  connect(source_viewer_, &ProgramViewer::togglePlaybackRequested,
-          action(QStringLiteral("playPause")), &QAction::trigger);
+  connect(source_viewer_, &ProgramViewer::togglePlaybackRequested, this, [this] {
+    emit sourcePlaybackRateRequested(shuttle_rate_ == 0.0 ? 1.0 : 0.0);
+  });
+  connect(source_viewer_, &ProgramViewer::markInRequested, this, &EditorWindow::markSourceIn);
+  connect(source_viewer_, &ProgramViewer::markOutRequested, this, &EditorWindow::markSourceOut);
+  connect(source_viewer_, &ProgramViewer::rippleInsertRequested, this,
+          &EditorWindow::rippleInsertFromSource);
+  connect(source_viewer_, &ProgramViewer::overwriteInsertRequested, this,
+          &EditorWindow::overwriteInsertFromSource);
   connect(timeline_, &TimelineWidget::seekRequested, this, &EditorWindow::seekRequested);
   connect(effects_panel_, &EffectsPanelWidget::effectAddRequested, this,
           &EditorWindow::effectAddRequested);
@@ -817,11 +873,19 @@ void EditorWindow::connectControllerSurface() {
   bindTool("tool.slip", TimelineWidget::ToolMode::Slip);
   bindTool("tool.slide", TimelineWidget::ToolMode::Slide);
   connect(action(QStringLiteral("previousFrame")), &QAction::triggered, this, [this] {
+    if (sourceMonitorHasFocus()) {
+      overwriteInsertFromSource();
+      return;
+    }
     const auto frame = qMax<qint64>(1, timeline_->timeScale() / 30);
     timeline_->setPlayhead(timeline_->playhead() - frame);
     emit seekRequested(timeline_->playhead());
   });
   connect(action(QStringLiteral("nextFrame")), &QAction::triggered, this, [this] {
+    if (sourceMonitorHasFocus()) {
+      emit sourceStepFrameRequested(1);
+      return;
+    }
     const auto frame = qMax<qint64>(1, timeline_->timeScale() / 30);
     timeline_->setPlayhead(timeline_->playhead() + frame);
     emit seekRequested(timeline_->playhead());
@@ -905,6 +969,35 @@ void EditorWindow::updateWorkspaceLabel() {
   if (workspace_label_ != nullptr) {
     workspace_label_->setText(tr("Workspace: %1").arg(workspaceDisplayName(workspace_)));
   }
+}
+
+void EditorWindow::rippleInsertFromSource() {
+  emit sourceRippleInsertRequested();
+}
+
+void EditorWindow::overwriteInsertFromSource() {
+  emit sourceOverwriteInsertRequested();
+}
+
+void EditorWindow::markSourceIn() {
+  emit sourceMarkInRequested();
+}
+
+void EditorWindow::markSourceOut() {
+  emit sourceMarkOutRequested();
+}
+
+void EditorWindow::seekSource(qint64 position) {
+  emit sourceSeekRequested(position);
+}
+
+bool EditorWindow::sourceMonitorHasFocus() const {
+  if (source_container_ == nullptr || !source_container_->isVisible()) {
+    return false;
+  }
+  QWidget* focus = QApplication::focusWidget();
+  return focus != nullptr &&
+         (focus == source_viewer_ || source_container_->isAncestorOf(focus));
 }
 
 void EditorWindow::setShuttleRate(double rate) {

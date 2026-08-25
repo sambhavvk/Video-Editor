@@ -29,7 +29,8 @@ often and keep the original media files available.
   worker and explicitly shows analyzing/stale state. Normalization independently analyzes one
   immutable revision against an editable −24 through −9 LUFS target.
 - The Inspector and Effects panel author the supported title, transition, speed, effect, and
-  keyframe controls described below. Source-monitor insert/overwrite editing remains incomplete.
+  keyframe controls described below. The source monitor loads media on double-click; **I**/**O**
+  set in/out, **L** ripple-inserts, and **Comma** overwrites when the source viewer has focus.
 - Local transcription requires an explicitly downloaded, checksummed multilingual base model and a
   build with the pinned optional `whisper.cpp` backend. Builds without that backend keep manual
   captions available and report transcription as unavailable.
@@ -74,20 +75,28 @@ committed snapshot and marks the project dirty; save it to a `.veproj` to retain
 
 Import using **File > Import Media**, the media-bin Import button, a command-line media argument,
 or by dropping files on the program viewer. Import runs asynchronously and probes each file with
-FFmpeg. Failed items are reported without discarding successful imports.
+FFmpeg. PNG/JPEG/WebP/TIFF/BMP/PPM stills and numbered image sequences are included in the import
+filter. A still without a media duration becomes a five-second clip and preview holds its last
+decoded frame. Selecting the first file of a numbered run (`shot0001.png`, `shot0002.png`, …)
+imports one sequence asset. Failed items are reported without discarding successful imports.
 
 The media bin shows a thumbnail, name, duration, detected format, and status (Original, Offline,
 Changed, Proxy recommended, Creating proxy…, or Proxy ready). Search filters by name or format.
 The Inspector Asset group edits a cached display title, tags, notes, and rating; an empty title
-falls back to the file name. Double-click an item to insert it at the playhead:
+falls back to the file name. Double-click an item to load it in the source monitor (shown
+automatically). Mark **I**n / **O**ut on the source playhead, then **L** to ripple-insert or
+**Comma** to overwrite at the program playhead:
 
 - Video goes to the first unlocked targeted video track.
 - Audio goes to the first unlocked targeted audio track.
 - An asset containing both creates linked video and audio clips as one atomic undoable revision.
-- The insertion is rejected when it would overlap an existing clip; it does not silently replace
-  existing work.
+- Unmarked sources insert the full asset duration (five seconds when duration is unknown).
+- Overwrite replaces overlapping timeline material; ripple shifts following clips. The insertion
+  is rejected when the destination is locked or no targeted track matches.
 - The first inserted video clip derives sequence width, height, and nominal frame rate from the
   asset when those values are available. The sequence audio sample rate remains 48 kHz.
+- Source transport (Space / J / K / Period) is a silent timer and does not open a second audio
+  device. Program J/K/L remain the sequence shuttle when the source monitor does not have focus.
 
 The application references the original path. Missing files show **Offline** on the media bin and
 timeline; a fingerprint mismatch shows **Changed**. Right-click **Relink media…** to pick a
@@ -345,14 +354,16 @@ Qt maps standard shortcuts to the platform convention; the table uses the Window
 | Delete / Ripple delete | `Delete` / `Shift+Delete` |
 | Reverse / Stop / Forward | `J` / `K` / `L` |
 | Play or pause | `Space` |
-| Previous / next frame | `,` / `.` |
+| Previous / next frame | `,` / `.` (program; `,` overwrites when source has focus) |
+| Source mark in / out | `I` / `O` (source monitor focused) |
+| Ripple insert / overwrite from source | `L` / `,` (source monitor focused) |
 | Move playhead one frame | `Left` / `Right` |
 | Move playhead ten frames | `Shift+Left` / `Shift+Right` |
 | Sequence start / end | `Home` / `End` |
 | Nudge active clip | `Alt+Left` / `Alt+Right` |
 | Nudge active clip ten frames | `Alt+Shift+Left` / `Alt+Shift+Right` |
 | Timeline zoom in / out / fit | standard zoom shortcuts / `Shift+Z` |
-| Source-monitor placeholder | `Shift+2` |
+| Source monitor | `Shift+2` |
 | Precision-trim placeholder | `T` |
 | Import / Edit / Audio & Captions / Deliver | `Ctrl+1` / `Ctrl+2` / `Ctrl+3` / `Ctrl+4` |
 | Command palette | `Ctrl+Shift+P` |

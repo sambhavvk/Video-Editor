@@ -49,6 +49,9 @@ public:
   [[nodiscard]] ProgramViewer* programViewer() const noexcept {
     return program_viewer_;
   }
+  [[nodiscard]] ProgramViewer* sourceViewer() const noexcept {
+    return source_viewer_;
+  }
   [[nodiscard]] TimelineWidget* timeline() const noexcept {
     return timeline_;
   }
@@ -90,6 +93,11 @@ public slots:
   void setPrecisionTrimVisible(bool visible);
   void restoreUiState();
   void saveUiState();
+  void rippleInsertFromSource();
+  void overwriteInsertFromSource();
+  void markSourceIn();
+  void markSourceOut();
+  void seekSource(qint64 position);
 
 signals:
   void workspaceChanged(Workspace workspace);
@@ -106,6 +114,14 @@ signals:
   void deleteSelectionRequested(bool ripple);
   void playbackRateRequested(double rate);
   void seekRequested(qint64 position);
+  void sourcePlaybackRateRequested(double rate);
+  void sourceStepShuttleRequested(int direction);
+  void sourceStepFrameRequested(int direction);
+  void sourceSeekRequested(qint64 position);
+  void sourceRippleInsertRequested();
+  void sourceOverwriteInsertRequested();
+  void sourceMarkInRequested();
+  void sourceMarkOutRequested();
   void mediaActivated(const QString& mediaId);
   void mediaSelectionChanged(const QString& mediaId);
   void assetMetadataEdited(const AssetMetadataView& metadata);
@@ -149,6 +165,7 @@ private:
   void updateWorkspaceLabel();
   void setShuttleRate(double rate);
   void stepShuttle(int direction);
+  [[nodiscard]] bool sourceMonitorHasFocus() const;
   void addAction(const QString& id, QAction* action);
   [[nodiscard]] QString settingsKeyForWorkspace(Workspace workspace) const;
   [[nodiscard]] static QString workspaceDisplayName(Workspace workspace);

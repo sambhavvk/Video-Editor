@@ -321,6 +321,7 @@ void FaultInjectionTest::controllerPreviewDoesNotMutateRevision() {
   QTRY_COMPARE_WITH_TIMEOUT(
       controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
   window.mediaActivated(window.mediaBin()->items().front().id);
+  window.rippleInsertFromSource();
   QTRY_VERIFY_WITH_TIMEOUT(window.programViewer()->hasFrame(), 10'000);
 
   const auto revision = controller.editor().revision();

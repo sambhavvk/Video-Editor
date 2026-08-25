@@ -737,6 +737,7 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
       playback_registry_(std::make_shared<playback::AssetRegistry>()),
       audio_registry_(std::make_shared<audio_render::OriginalAudioRegistry>()),
       frame_provider_(std::make_shared<playback::FfmpegFrameProvider>(playback_registry_)),
+      source_frame_provider_(std::make_shared<playback::FfmpegFrameProvider>(playback_registry_)),
       renderer_(std::make_shared<render::CpuRenderer>(frame_provider_)),
       preview_cache_(std::make_shared<render::RenderCache>(kPreviewCacheBytes)) {
   try {
@@ -769,7 +770,23 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
   connect(&window_, &desktop_ui::EditorWindow::importMediaRequested, this,
           &EditorController::chooseMedia);
   connect(&window_, &desktop_ui::EditorWindow::mediaActivated, this,
-          &EditorController::insertAsset);
+          &EditorController::loadSourceAsset);
+  connect(&window_, &desktop_ui::EditorWindow::sourceRippleInsertRequested, this,
+          [this] { insertLoadedSource(edit::InsertMode::Ripple); });
+  connect(&window_, &desktop_ui::EditorWindow::sourceOverwriteInsertRequested, this,
+          [this] { insertLoadedSource(edit::InsertMode::Overwrite); });
+  connect(&window_, &desktop_ui::EditorWindow::sourceMarkInRequested, this,
+          &EditorController::markSourceIn);
+  connect(&window_, &desktop_ui::EditorWindow::sourceMarkOutRequested, this,
+          &EditorController::markSourceOut);
+  connect(&window_, &desktop_ui::EditorWindow::sourceSeekRequested, this,
+          &EditorController::seekSource);
+  connect(&window_, &desktop_ui::EditorWindow::sourcePlaybackRateRequested, this,
+          &EditorController::setSourcePlaybackRate);
+  connect(&window_, &desktop_ui::EditorWindow::sourceStepShuttleRequested, this,
+          &EditorController::stepSourceShuttle);
+  connect(&window_, &desktop_ui::EditorWindow::sourceStepFrameRequested, this,
+          &EditorController::stepSourceFrame);
   connect(&window_, &desktop_ui::EditorWindow::splitClipRequested, this,
           &EditorController::splitSelectedClip);
   connect(&window_, &desktop_ui::EditorWindow::deleteSelectionRequested, this,
@@ -970,6 +987,10 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
   playback_timer_.setTimerType(Qt::PreciseTimer);
   playback_timer_.setInterval(16);
   connect(&playback_timer_, &QTimer::timeout, this, &EditorController::advancePlayback);
+  source_playback_timer_.setTimerType(Qt::PreciseTimer);
+  source_playback_timer_.setInterval(16);
+  connect(&source_playback_timer_, &QTimer::timeout, this,
+          &EditorController::advanceSourcePlayback);
   connect(&normalization_watcher_, &QFutureWatcher<NormalizationReview>::finished, this, [this] {
     if (!normalization_completion_gate_.complete(active_normalization_generation_)) {
       normalization_review_.valid = false;
@@ -1079,6 +1100,10 @@ EditorController::~EditorController() {
   if (gpu_init_watcher_.isRunning()) {
     gpu_init_watcher_.waitForFinished();
   }
+  gpu_timeline_renderer_.reset();
+  gpu_renderer_.reset();
+  source_playback_timer_.stop();
+  ++source_preview_epoch_;
   stopAudioPlayback();
   if (model_download_reply_ != nullptr) {
     model_download_reply_->abort();
@@ -1388,6 +1413,18 @@ void EditorController::installProject(edit::Project project, std::filesystem::pa
   stopAudioPlayback();
   playback_timer_.stop();
   playback_rate_ = 0.0;
+  source_playback_timer_.stop();
+  source_playback_rate_ = 0.0;
+  source_asset_id_.reset();
+  source_playhead_ = 0;
+  source_mark_in_.reset();
+  source_mark_out_.reset();
+  ++source_preview_epoch_;
+  source_preview_in_flight_ = false;
+  if (window_.sourceViewer() != nullptr) {
+    window_.sourceViewer()->clearFrame();
+    window_.sourceViewer()->setTitle(tr("Source"));
+  }
   if (store_) {
     try {
       store_->mark_clean_close(store_->metadata().head_revision);
@@ -2150,7 +2187,94 @@ void EditorController::clearExportCheckpoint() {
 }
 
 void EditorController::insertAsset(const QString& assetId) {
+  loadSourceAsset(assetId);
+  insertLoadedSource(edit::InsertMode::RejectOverlap);
+}
+
+void EditorController::loadSourceAsset(const QString& assetId) {
   const edit::Asset* asset = assetByTextId(assetId);
+  if (asset == nullptr) {
+    return;
+  }
+  source_playback_timer_.stop();
+  source_playback_rate_ = 0.0;
+  source_asset_id_ = asset->id;
+  source_playhead_ = 0;
+  source_mark_in_.reset();
+  source_mark_out_.reset();
+  ++source_preview_epoch_;
+  source_preview_in_flight_ = false;
+  window_.setSourceMonitorVisible(true);
+  if (window_.sourceViewer() != nullptr) {
+    window_.sourceViewer()->setFocus(Qt::OtherFocusReason);
+  }
+  updateSourceMonitorChrome();
+  requestSourcePreview();
+}
+
+qint64 EditorController::sourceDurationUi() const {
+  if (!source_asset_id_.has_value() || !editor_) {
+    return 0;
+  }
+  const auto project = editor_->projectAt(editor_->revision());
+  const edit::Asset* asset = edit::findAsset(*project, *source_asset_id_);
+  if (asset == nullptr) {
+    return 0;
+  }
+  const edit::Time duration = asset->duration.isZero() ? edit::Time(5, 1) : asset->duration;
+  return std::max<qint64>(toUiTime(duration), 1);
+}
+
+edit::TimeRange EditorController::markedSourceRange() const {
+  const qint64 duration_ui = sourceDurationUi();
+  qint64 start_ui = source_mark_in_.value_or(0);
+  qint64 end_ui = source_mark_out_.value_or(duration_ui);
+  start_ui = std::clamp<qint64>(start_ui, 0, duration_ui);
+  end_ui = std::clamp<qint64>(end_ui, 0, duration_ui);
+  if (end_ui <= start_ui) {
+    start_ui = 0;
+    end_ui = duration_ui;
+  }
+  return {timelineTime(start_ui), timelineTime(end_ui - start_ui)};
+}
+
+void EditorController::updateSourceMonitorChrome() {
+  auto* viewer = window_.sourceViewer();
+  if (viewer == nullptr) {
+    return;
+  }
+  if (!source_asset_id_.has_value() || !editor_) {
+    viewer->setTitle(tr("Source"));
+    viewer->setTimecode(QStringLiteral("00:00:00:00"));
+    viewer->clearFrame();
+    return;
+  }
+  const auto project = editor_->projectAt(editor_->revision());
+  const edit::Asset* asset = edit::findAsset(*project, *source_asset_id_);
+  const edit::Rate rate = asset != nullptr && asset->nominal_frame_rate.has_value()
+                              ? *asset->nominal_frame_rate
+                              : (currentSequence() != nullptr ? currentSequence()->frame_rate
+                                                              : edit::Rate(30, 1));
+  QString title = tr("Source");
+  if (asset != nullptr) {
+    title = tr("Source · %1").arg(QString::fromStdString(asset->name));
+  }
+  if (source_mark_in_.has_value() || source_mark_out_.has_value()) {
+    title += tr(" · I %1 · O %2")
+                 .arg(timecodeText(source_mark_in_.value_or(0), rate))
+                 .arg(timecodeText(source_mark_out_.value_or(sourceDurationUi()), rate));
+  }
+  viewer->setTitle(title);
+  viewer->setTimecode(timecodeText(source_playhead_, rate));
+}
+
+void EditorController::insertLoadedSource(const edit::InsertMode mode) {
+  if (!source_asset_id_.has_value()) {
+    window_.showTransientMessage(tr("Load a source clip before inserting"));
+    return;
+  }
+  const auto project = editor_->projectAt(editor_->revision());
+  const edit::Asset* asset = edit::findAsset(*project, *source_asset_id_);
   const edit::Sequence* sequence = currentSequence();
   if (asset == nullptr || sequence == nullptr) {
     return;
@@ -2169,8 +2293,9 @@ void EditorController::insertAsset(const QString& assetId) {
       audio_track_id = track.id;
     }
   }
+  const edit::TimeRange source_range = markedSourceRange();
   const edit::Time start = playheadTime();
-  const edit::Time duration = asset_copy.duration.isZero() ? edit::Time(5, 1) : asset_copy.duration;
+  const edit::Time duration = source_range.duration;
   const edit::EntityId linked = edit::EntityId::generate();
   std::optional<edit::EntityId> first_inserted;
   std::vector<edit::EditCommand> commands;
@@ -2200,7 +2325,7 @@ void EditorController::insertAsset(const QString& assetId) {
     clip.kind = clip_kind;
     clip.name = asset_copy.name;
     clip.timeline_range = {start, duration};
-    clip.source_range = {edit::Time{}, duration};
+    clip.source_range = source_range;
     if (asset_copy.has_video && asset_copy.has_audio) {
       clip.linked_group = linked;
     }
@@ -2211,7 +2336,7 @@ void EditorController::insertAsset(const QString& assetId) {
         {.operation = edit::InsertClipCommand{.sequence_id = sequence_id,
                                               .track_id = *track_id,
                                               .clip = std::move(clip),
-                                              .mode = edit::InsertMode::RejectOverlap},
+                                              .mode = mode},
          .coalescing_key = {}});
     return true;
   };
@@ -2224,7 +2349,10 @@ void EditorController::insertAsset(const QString& assetId) {
     window_.showTransientMessage(tr("No unlocked targeted audio track is available"));
     return;
   }
-  if (applyBatch(std::move(commands), tr("Could not insert media at the playhead"))) {
+  const QString failure = mode == edit::InsertMode::Overwrite
+                              ? tr("Could not overwrite from the source monitor")
+                              : tr("Could not insert media at the playhead");
+  if (applyBatch(std::move(commands), failure)) {
     selected_clip_ids_.clear();
     if (first_inserted.has_value()) {
       selected_clip_ids_.insert(*first_inserted);
@@ -2234,6 +2362,184 @@ void EditorController::insertAsset(const QString& assetId) {
     selected_gap_key_.clear();
     refreshViews();
   }
+}
+
+void EditorController::markSourceIn() {
+  if (!source_asset_id_.has_value()) {
+    return;
+  }
+  source_mark_in_ = std::clamp<qint64>(source_playhead_, 0, sourceDurationUi());
+  if (source_mark_out_.has_value() && *source_mark_out_ <= *source_mark_in_) {
+    source_mark_out_.reset();
+  }
+  updateSourceMonitorChrome();
+}
+
+void EditorController::markSourceOut() {
+  if (!source_asset_id_.has_value()) {
+    return;
+  }
+  source_mark_out_ = std::clamp<qint64>(source_playhead_, 0, sourceDurationUi());
+  if (source_mark_in_.has_value() && *source_mark_out_ <= *source_mark_in_) {
+    source_mark_in_.reset();
+  }
+  updateSourceMonitorChrome();
+}
+
+void EditorController::seekSource(const qint64 position) {
+  if (!source_asset_id_.has_value()) {
+    return;
+  }
+  source_playhead_ = std::clamp<qint64>(position, 0, sourceDurationUi());
+  updateSourceMonitorChrome();
+  requestSourcePreview();
+}
+
+void EditorController::setSourcePlaybackRate(const double rate) {
+  if (!source_asset_id_.has_value()) {
+    return;
+  }
+  source_playback_rate_ = rate;
+  if (std::abs(source_playback_rate_) < std::numeric_limits<double>::epsilon()) {
+    source_playback_timer_.stop();
+    return;
+  }
+  source_playback_clock_.restart();
+  source_playback_timer_.start();
+}
+
+void EditorController::stepSourceShuttle(const int direction) {
+  if (!source_asset_id_.has_value()) {
+    return;
+  }
+  const bool same_direction = source_playback_rate_ * static_cast<double>(direction) > 0.0;
+  const double magnitude = same_direction ? std::min(8.0, std::abs(source_playback_rate_) * 2.0) : 1.0;
+  setSourcePlaybackRate(static_cast<double>(direction) * magnitude);
+}
+
+void EditorController::stepSourceFrame(const int direction) {
+  if (!source_asset_id_.has_value()) {
+    return;
+  }
+  const edit::Sequence* sequence = currentSequence();
+  const qint64 frame = sequence != nullptr
+                           ? std::max<qint64>(1, static_cast<qint64>(kUiTimescale) *
+                                                     static_cast<qint64>(sequence->frame_rate.denominator()) /
+                                                     std::max<qint64>(1, sequence->frame_rate.numerator()))
+                           : kUiTimescale / 30;
+  seekSource(source_playhead_ + static_cast<qint64>(direction) * frame);
+}
+
+void EditorController::advanceSourcePlayback() {
+  if (!source_asset_id_.has_value() ||
+      std::abs(source_playback_rate_) < std::numeric_limits<double>::epsilon()) {
+    source_playback_timer_.stop();
+    return;
+  }
+  const qint64 end = sourceDurationUi();
+  const qint64 delta = static_cast<qint64>(std::llround(
+      source_playback_rate_ * static_cast<double>(kUiTimescale) *
+      static_cast<double>(source_playback_clock_.nsecsElapsed()) / 1'000'000'000.0));
+  source_playback_clock_.restart();
+  source_playhead_ += delta;
+  if (source_playhead_ < 0 || source_playhead_ >= end) {
+    source_playhead_ = std::clamp<qint64>(source_playhead_, 0, end);
+    source_playback_rate_ = 0.0;
+    source_playback_timer_.stop();
+  }
+  updateSourceMonitorChrome();
+  requestSourcePreview();
+}
+
+void EditorController::requestSourcePreview() {
+  if (!source_asset_id_.has_value() || !source_frame_provider_) {
+    return;
+  }
+  ++source_preview_serial_;
+  if (source_preview_in_flight_) {
+    ++source_preview_epoch_;
+    source_frame_provider_->begin_epoch(source_preview_epoch_);
+    return;
+  }
+  launchSourcePreviewRequest();
+}
+
+void EditorController::launchSourcePreviewRequest() {
+  if (!source_asset_id_.has_value() || !source_frame_provider_) {
+    if (window_.sourceViewer() != nullptr) {
+      window_.sourceViewer()->clearFrame();
+    }
+    return;
+  }
+  const std::uint64_t request_serial = source_preview_serial_;
+  const std::uint64_t epoch = ++source_preview_epoch_;
+  source_frame_provider_->begin_epoch(epoch);
+  const auto provider = source_frame_provider_;
+  const auto cache = preview_cache_;
+  const edit::EntityId asset_id = *source_asset_id_;
+  const edit::Time source_time(source_playhead_, static_cast<std::uint32_t>(kUiTimescale));
+  const std::uint64_t generation =
+      playback_registry_ != nullptr ? playback_registry_->generation() : 0U;
+  const render::RenderCacheKey cache_key{
+      .revision = editor_ ? editor_->revision() : edit::Revision{},
+      .sequence_id = asset_id,
+      .time = source_time,
+      .width = 0,
+      .height = 0,
+      .graph_signature = render::preview_graph_signature(
+                             {.scale = render::PreviewScale::Half,
+                              .bypass_expensive_effects = true,
+                              .use_proxies = true},
+                             generation) ^
+                         0x534f5552ULL,
+  };
+  source_preview_in_flight_ = true;
+  using SourceWatcher = QFutureWatcher<PreviewOutcome>;
+  auto* watcher = new SourceWatcher(this);
+  connect(watcher, &SourceWatcher::finished, this, [this, watcher, request_serial] {
+    const PreviewOutcome outcome = watcher->result();
+    watcher->deleteLater();
+    source_preview_in_flight_ = false;
+    if (outcome.epoch == source_preview_epoch_ && window_.sourceViewer() != nullptr) {
+      if (!outcome.image.isNull()) {
+        window_.sourceViewer()->setFrame(outcome.image);
+        ++source_presentation_count_;
+      } else if (!outcome.error.isEmpty()) {
+        window_.sourceViewer()->clearFrame();
+      }
+    }
+    if (outcome.epoch != source_preview_epoch_ || request_serial != source_preview_serial_) {
+      launchSourcePreviewRequest();
+    }
+  });
+  watcher->setFuture(QtConcurrent::run([provider, cache, cache_key, asset_id, source_time,
+                                        epoch]() {
+    if (cache) {
+      if (auto cached = cache->get(cache_key)) {
+        return PreviewOutcome{.epoch = epoch,
+                              .image = EditorController::displayImage(*cached),
+                              .error = {}};
+      }
+    }
+    auto result = provider->request({.asset_id = asset_id,
+                                     .source_time = source_time,
+                                     .preferred_width = 0,
+                                     .preferred_height = 0,
+                                     .permit_proxy = true,
+                                     .request_epoch = epoch});
+    if (!result) {
+      return PreviewOutcome{.epoch = epoch,
+                            .image = {},
+                            .error = QString::fromStdString(result.error->message)};
+    }
+    if (cache && result.value) {
+      cache->put(cache_key, *result.value);
+    }
+    return PreviewOutcome{
+        .epoch = epoch,
+        .image = result.value ? EditorController::displayImage(**result.value) : QImage{},
+        .error = {}};
+  }));
 }
 
 void EditorController::splitSelectedClip() {

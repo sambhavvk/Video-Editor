@@ -129,6 +129,7 @@ private slots:
   void rollEditsUseTheGestureEdge();
   void presentsFramesContinuouslyWhilePlaybackIsRunning();
   void reusesPreviewCacheForTheSamePausedFrame();
+  void loadsSourceMonitorAndRippleInsertsMarkedRange();
   void importsSearchesAndExportsCaptions();
   void beginnerFifteenMinutePathWithoutFullEncode();
   void normalizationOnlyAdjustsAudibleContributingTracks();
@@ -279,6 +280,7 @@ void EditorControllerTest::importsInsertsAndRoundTripsUndo() {
   const QString asset_id = window.mediaBin()->items().front().id;
 
   window.mediaActivated(asset_id);
+  window.rippleInsertFromSource();
   QCOMPARE(audioClipCount(*controller.editor().projectAt(controller.editor().revision())), 1U);
   QVERIFY(controller.dirty());
 
@@ -351,6 +353,7 @@ void EditorControllerTest::derivesSequenceFormatFromFirstVideoClip() {
   QCOMPARE(before->sequences.front().height, 1'080U);
 
   window.mediaActivated(window.mediaBin()->items().front().id);
+  window.rippleInsertFromSource();
   const auto inserted = controller.editor().projectAt(controller.editor().revision());
   QCOMPARE(inserted->sequences.front().width, 16U);
   QCOMPARE(inserted->sequences.front().height, 10U);
@@ -421,6 +424,7 @@ void EditorControllerTest::professionalTimelineInteractionsUseOneAtomicHistorySt
       controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
   const QString asset_id = window.mediaBin()->items().front().id;
   window.mediaActivated(asset_id);
+  window.rippleInsertFromSource();
 
   auto project = controller.editor().projectAt(controller.editor().revision());
   const auto tracks_before_add = project->sequences.front().tracks.size();
@@ -452,6 +456,7 @@ void EditorControllerTest::professionalTimelineInteractionsUseOneAtomicHistorySt
 
   window.seekRequested(6 * 48'000);
   window.mediaActivated(asset_id);
+  window.rippleInsertFromSource();
   project = controller.editor().projectAt(controller.editor().revision());
   const auto second_track_after =
       std::find_if(project->sequences.front().tracks.begin(),
@@ -521,6 +526,7 @@ void EditorControllerTest::batchSplitAndFrameNudgePreserveExactSelectionGeometry
       controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
   const QString asset_id = window.mediaBin()->items().front().id;
   window.mediaActivated(asset_id);
+  window.rippleInsertFromSource();
 
   auto project = controller.editor().projectAt(controller.editor().revision());
   const auto& sequence = project->sequences.front();
@@ -530,6 +536,7 @@ void EditorControllerTest::batchSplitAndFrameNudgePreserveExactSelectionGeometry
       QString::fromStdString(sequence.tracks.front().clips.front().id.toString());
   window.timeline()->trackTargetToggled(first_track, false);
   window.mediaActivated(asset_id);
+  window.rippleInsertFromSource();
   project = controller.editor().projectAt(controller.editor().revision());
   const auto second_track_it =
       std::find_if(project->sequences.front().tracks.begin(),
@@ -602,6 +609,7 @@ void EditorControllerTest::rollEditsUseTheGestureEdge() {
       controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
   const QString asset_id = window.mediaBin()->items().front().id;
   window.mediaActivated(asset_id);
+  window.rippleInsertFromSource();
 
   auto project = controller.editor().projectAt(controller.editor().revision());
   const auto clip_duration =
@@ -623,6 +631,7 @@ void EditorControllerTest::rollEditsUseTheGestureEdge() {
       video_editor::desktop_ui::TimelineWidget::EditIntent::Normal, {});
   window.seekRequested(duration_ui - one_second);
   window.mediaActivated(asset_id);
+  window.rippleInsertFromSource();
   project = controller.editor().projectAt(controller.editor().revision());
   const QString middle_before_trim =
       QString::fromStdString(project->sequences.front().tracks.front().clips.at(1).id.toString());
@@ -632,6 +641,7 @@ void EditorControllerTest::rollEditsUseTheGestureEdge() {
       video_editor::desktop_ui::TimelineWidget::EditIntent::Normal, {});
   window.seekRequested((duration_ui - one_second) * 2);
   window.mediaActivated(asset_id);
+  window.rippleInsertFromSource();
   project = controller.editor().projectAt(controller.editor().revision());
   const auto& clips = project->sequences.front().tracks.front().clips;
   QCOMPARE(clips.size(), 3U);
@@ -672,6 +682,7 @@ void EditorControllerTest::presentsFramesContinuouslyWhilePlaybackIsRunning() {
   QTRY_COMPARE_WITH_TIMEOUT(
       controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
   window.mediaActivated(window.mediaBin()->items().front().id);
+  window.rippleInsertFromSource();
   QTRY_VERIFY_WITH_TIMEOUT(window.programViewer()->hasFrame(), 10'000);
 
   // Force the deterministic CPU fallback so a render lasts longer than the
@@ -699,6 +710,7 @@ void EditorControllerTest::reusesPreviewCacheForTheSamePausedFrame() {
   QTRY_COMPARE_WITH_TIMEOUT(
       controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
   window.mediaActivated(window.mediaBin()->items().front().id);
+  window.rippleInsertFromSource();
   QTRY_VERIFY_WITH_TIMEOUT(window.programViewer()->hasFrame(), 10'000);
   QTRY_VERIFY_WITH_TIMEOUT(controller.previewPresentationCount() >= 1U, 10'000);
 
@@ -711,6 +723,50 @@ void EditorControllerTest::reusesPreviewCacheForTheSamePausedFrame() {
   QTRY_VERIFY_WITH_TIMEOUT(controller.previewPresentationCount() > presented_after_first, 10'000);
   QCOMPARE(controller.playbackSeekCount(), seeks_after_first);
   QCOMPARE(controller.playbackDecodedFrameCount(), decoded_after_first);
+}
+
+void EditorControllerTest::loadsSourceMonitorAndRippleInsertsMarkedRange() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString video_path = directory.filePath(QStringLiteral("source-monitor.mkv"));
+  QVERIFY(writePlaybackVideo(video_path));
+
+  QSettings settings(directory.filePath(QStringLiteral("source-monitor-ui.ini")),
+                     QSettings::IniFormat);
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+  controller.importPaths({video_path});
+  QTRY_COMPARE_WITH_TIMEOUT(
+      controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
+
+  window.mediaActivated(window.mediaBin()->items().front().id);
+  QVERIFY(controller.sourceAssetLoaded());
+  QVERIFY(!window.findChild<QWidget*>(QStringLiteral("sourceMonitorContainer"))->isHidden());
+  QTRY_VERIFY_WITH_TIMEOUT(controller.sourcePresentationCount() >= 1U, 10'000);
+  QVERIFY(window.sourceViewer()->hasFrame());
+  QVERIFY(!window.programViewer()->hasFrame());
+
+  window.seekSource(48'000);
+  window.markSourceIn();
+  window.seekSource(96'000);
+  window.markSourceOut();
+  window.rippleInsertFromSource();
+
+  const auto project = controller.editor().projectAt(controller.editor().revision());
+  const auto video_track = std::find_if(
+      project->sequences.front().tracks.begin(), project->sequences.front().tracks.end(),
+      [](const auto& track) { return track.kind == video_editor::edit::TrackKind::Video; });
+  QVERIFY(video_track != project->sequences.front().tracks.end());
+  QCOMPARE(video_track->clips.size(), 1U);
+  QCOMPARE(video_track->clips.front().source_range.start.rescaledTo(
+               48'000, video_editor::edit::RoundingMode::NearestTiesEven)
+               .value(),
+           static_cast<std::int64_t>(48'000));
+  QCOMPARE(video_track->clips.front().source_range.duration.rescaledTo(
+               48'000, video_editor::edit::RoundingMode::NearestTiesEven)
+               .value(),
+           static_cast<std::int64_t>(48'000));
+  QTRY_VERIFY_WITH_TIMEOUT(window.programViewer()->hasFrame(), 10'000);
 }
 
 void EditorControllerTest::importsSearchesAndExportsCaptions() {
@@ -804,6 +860,7 @@ void EditorControllerTest::beginnerFifteenMinutePathWithoutFullEncode() {
       controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
   QCOMPARE(window.mediaBin()->items().size(), 1);
   window.mediaActivated(window.mediaBin()->items().front().id);
+  window.rippleInsertFromSource();
   QCOMPARE(audioClipCount(*controller.editor().projectAt(controller.editor().revision())), 1U);
 
   window.captionsPanel()->addCaptionRequested();
@@ -855,6 +912,7 @@ void EditorControllerTest::normalizationOnlyAdjustsAudibleContributingTracks() {
   QTRY_COMPARE_WITH_TIMEOUT(
       controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
   window.mediaActivated(window.mediaBin()->items().front().id);
+  window.rippleInsertFromSource();
 
   // Give an empty, non-contributing track no remaining headroom. It must not
   // make the audible mix's review unsafe and must not be changed by Apply.
@@ -916,6 +974,7 @@ void EditorControllerTest::realAudioDeviceUsesTheSampleCounterAsMasterClock() {
   QTRY_COMPARE_WITH_TIMEOUT(
       controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
   window.mediaActivated(window.mediaBin()->items().front().id);
+  window.rippleInsertFromSource();
 
   QElapsedTimer control_latency;
   control_latency.start();
