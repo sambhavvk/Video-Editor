@@ -199,6 +199,14 @@ TEST(GpuBackend, VulkanCompositeReadbackMatchesCpuReferenceWhenDeviceIsAvailable
   EXPECT_EQ(presentation.error->code, RenderErrorCode::GpuPresentationUnavailable);
 }
 
+TEST(GpuBackend, ResizePresentationWithoutSurfaceReturnsUnavailable) {
+  auto gpu = GpuRenderer::create({.allow_software = true});
+  ASSERT_NE(gpu, nullptr);
+  const auto resized = gpu->resize_presentation(640, 360);
+  ASSERT_FALSE(resized);
+  EXPECT_EQ(resized.error->code, RenderErrorCode::GpuPresentationUnavailable);
+}
+
 TEST(GpuBackend, DeviceLossLatchesCpuFallbackState) {
   auto gpu = GpuRenderer::create({.allow_software = true});
   ASSERT_NE(gpu, nullptr);

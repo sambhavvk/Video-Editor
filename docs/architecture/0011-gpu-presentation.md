@@ -53,12 +53,16 @@ not depend on the GPU.
   completed frame may be presented while the newest desired position is queued, after which the
   scheduler immediately renders the latest position. Explicit seeks, edits, and project changes
   still advance the epoch and cancel obsolete decode work.
-- The Qt controller requests the per-clip GPU timeline renderer before `CpuRenderer`, downloads the
-  offscreen result for `QImage`, and exposes an active-GPU diagnostic for tests/UI. An unsupported
-  timeline feature (effects, title, or non-Normal blend) falls back to CPU for that frame without
+- The Qt controller requests the per-clip GPU timeline renderer before `CpuRenderer`. On Linux,
+  when the program viewer supplies a `VkInstance` and `VkSurfaceKHR`, the controller creates the
+  libplacebo device with that surface and presents frames through `GpuRenderer::present()` without
+  host readback. Otherwise it downloads the offscreen result for `QImage`, and that download path
+  remains the CI/test fallback. An active-GPU diagnostic is exposed for tests/UI. An unsupported
+  timeline feature (unknown enabled clip effects) falls back to CPU for that frame without
   disabling later GPU attempts. Backend/device/upload/render/readback failures preserve a CPU frame
-  for the request and latch CPU fallback for the remainder of the session. No desktop path may claim
-  native presentation until it owns an actual swapchain/surface.
+  for the request and latch CPU fallback for the remainder of the session. Recoverable presentation
+  errors (occlusion, resize, temporary surface loss) fall back to download for that frame without
+  latching. No desktop path may claim native presentation until it owns an actual swapchain/surface.
 
 ## Consequences
 
@@ -72,11 +76,13 @@ not depend on the GPU.
   within declared tolerances; implementation convenience cannot change edit semantics.
 - D3D11 on Windows and Vulkan on Linux are platform requirements for acceleration, not requirements
   to open, edit, recover, or CPU-export a project.
-- The desktop currently creates the libplacebo device on a worker thread after the
-  controller is constructed. CPU preview is available immediately; GPU attaches when
-  the device is ready. A slow or unhealthy graphics driver no longer delays the
-  Qt startup thread. Public-beta hardening still needs a bounded wait diagnostic and
-  native swapchain presentation.
+- The desktop creates the libplacebo device on a worker thread after the controller is constructed.
+  CPU preview is available immediately; GPU attaches when the device is ready. On Linux, the program
+  viewer may create a Qt `QVulkanInstance`, child `QWindow`, and `VkSurfaceKHR` first so device
+  selection sees a presentable queue; when that surface is unavailable (offscreen QPA, missing
+  display, or Vulkan window creation failure), the controller keeps the offscreen create/download
+  path. A slow or unhealthy graphics driver no longer delays the Qt startup thread. Public-beta
+  hardening still needs a bounded wait diagnostic for GPU attach.
 
 ## Verification
 

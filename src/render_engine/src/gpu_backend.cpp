@@ -511,6 +511,11 @@ std::unique_ptr<GpuRenderer> GpuRenderer::create(const GpuOptions& options) {
     swapchain_params.surface = reinterpret_cast<VkSurfaceKHR>(options.presentation.surface);
     swapchain_params.present_mode = VK_PRESENT_MODE_FIFO_KHR;
     state->swapchain = pl_vulkan_create_swapchain(state->vulkan, &swapchain_params);
+    if (state->swapchain != nullptr) {
+      int width = std::max(1, options.presentation.width);
+      int height = std::max(1, options.presentation.height);
+      pl_swapchain_resize(state->swapchain, &width, &height);
+    }
 #endif
   }
 
@@ -1115,6 +1120,34 @@ RenderResult<bool> GpuRenderer::present(const GpuImage& image) {
   return RenderResult<bool>::success(true);
 }
 
+RenderResult<bool> GpuRenderer::resize_presentation(const int width, const int height) {
+  const auto state = implementation_ ? implementation_->state : nullptr;
+  if (!state) {
+    return RenderResult<bool>::failure(
+        {.code = RenderErrorCode::GpuUnavailable, .message = "GPU renderer has no state"});
+  }
+  std::scoped_lock lock(state->mutex);
+  if (!state->capabilities.available()) {
+    return RenderResult<bool>::failure(unavailable_error(state->capabilities));
+  }
+  if (state->swapchain == nullptr) {
+    return RenderResult<bool>::failure(
+        {.code = RenderErrorCode::GpuPresentationUnavailable,
+         .message = "GPU renderer was created without a working presentation surface"});
+  }
+  int resize_width = std::max(1, width);
+  int resize_height = std::max(1, height);
+  if (!pl_swapchain_resize(state->swapchain, &resize_width, &resize_height)) {
+    if (detect_device_loss(*state, "resizing the presentation surface")) {
+      return RenderResult<bool>::failure(unavailable_error(state->capabilities));
+    }
+    return RenderResult<bool>::failure(
+        {.code = RenderErrorCode::GpuPresentFailed,
+         .message = "presentation surface is temporarily unavailable"});
+  }
+  return RenderResult<bool>::success(true);
+}
+
 void GpuRenderer::notify_device_lost(std::string diagnostic) {
   const auto state = implementation_ ? implementation_->state : nullptr;
   if (!state) {
@@ -1210,6 +1243,11 @@ RenderResult<VideoFrame> GpuRenderer::download(const GpuImage&) {
 }
 RenderResult<bool> GpuRenderer::present(const GpuImage&) {
   return RenderResult<bool>::failure(unavailable_error(capabilities()));
+}
+RenderResult<bool> GpuRenderer::resize_presentation(int, int) {
+  return RenderResult<bool>::failure(
+      {.code = RenderErrorCode::GpuPresentationUnavailable,
+       .message = "GPU renderer was created without a working presentation surface"});
 }
 void GpuRenderer::notify_device_lost(std::string diagnostic) {
   if (!implementation_) {

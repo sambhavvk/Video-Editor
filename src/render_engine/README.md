@@ -128,9 +128,10 @@ the `core-only` preset functional.
 
 The current GPU path accelerates timeline transform/crop/opacity and normal
 source-over composition, color-aware libplacebo rendering, readback, and
-swapchain presentation. Decode still produces CPU RGBA frames that are
-uploaded per active clip. Non-normal blend shaders, titles, effects,
+swapchain presentation. On Linux the desktop program viewer owns the `VkInstance`/`VkSurfaceKHR`
+when window creation succeeds; download remains the offscreen/CI fallback. Decode still produces
+CPU RGBA frames that are uploaded per active clip. Non-normal blend shaders, titles, effects,
 transitions, YUV/native-handle uploads, zero-copy decode, shader/texture
-pooling, and UI-owned swapchain creation remain later integration work. The CPU
+pooling remain later integration work. The CPU
 renderer is the required typed fallback for all unsupported or failed GPU
 frames.

@@ -143,6 +143,10 @@ public:
   // libplacebo reports a failed GPU.
   [[nodiscard]] RenderResult<bool> present(const GpuImage& image);
 
+  // Resizes the presentation swapchain. Returns GpuPresentationUnavailable when
+  // the renderer was created without a working surface/swapchain.
+  [[nodiscard]] RenderResult<bool> resize_presentation(int width, int height);
+
   // Allows an owning platform integration to forward an independently
   // observed D3D/Vulkan device-loss notification. All later GPU operations
   // fail deterministically so the caller can switch to CpuRenderer.

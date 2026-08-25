@@ -268,11 +268,13 @@ private:
   struct PreviewOutcome {
     std::uint64_t epoch{0};
     QImage image;
+    std::shared_ptr<const render::CpuFrame> cpu_frame;
     QString error;
     QString gpu_backend;
     QString gpu_diagnostic;
     bool gpu_used{false};
     bool gpu_failed{false};
+    bool native_presented{false};
   };
 
   struct VideoExportOutcome {
@@ -483,11 +485,14 @@ private:
   std::optional<edit::Revision> preview_cache_revision_;
   std::uint64_t preview_cache_generation_{0};
   bool preview_in_flight_{false};
+  std::shared_ptr<const render::CpuFrame> last_preview_frame_;
+  bool white_balance_sampling_{false};
   bool gpu_preview_active_{false};
   bool gpu_fallback_latched_{false};
   bool gpu_status_announced_{false};
   QFutureWatcher<std::shared_ptr<render::GpuRenderer>> gpu_init_watcher_;
   std::uint64_t gpu_init_generation_{0};
+  bool gpu_init_started_{false};
   bool audio_master_active_{false};
   bool audio_status_announced_{false};
   bool audio_fallback_announced_{false};

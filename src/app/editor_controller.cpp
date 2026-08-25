@@ -411,6 +411,38 @@ QString gpuBackendName(const render::GpuBackendKind backend) {
   }
 }
 
+QString gpuReadyTitle(const render::GpuCapabilities& capabilities) {
+  QString title = QObject::tr("Program · %1 GPU ready").arg(gpuBackendName(capabilities.backend));
+  if (capabilities.presentation) {
+    title += QObject::tr(" · present");
+  }
+  return title;
+}
+
+QString gpuActiveTitle(const render::GpuCapabilities& capabilities) {
+  QString title = QObject::tr("Program · %1 GPU").arg(gpuBackendName(capabilities.backend));
+  if (capabilities.presentation) {
+    title += QObject::tr(" · present");
+  }
+  return title;
+}
+
+[[nodiscard]] render::GpuOptions gpuOptionsForPresentation(
+    const desktop_ui::NativePresentationHandles& handles) {
+  render::GpuOptions options;
+#if defined(__linux__)
+  options.preferred_backend = render::GpuBackendKind::Vulkan;
+  options.presentation = {.backend = render::GpuBackendKind::Vulkan,
+                          .instance = static_cast<std::uintptr_t>(handles.instance),
+                          .surface = static_cast<std::uintptr_t>(handles.surface),
+                          .width = handles.width,
+                          .height = handles.height};
+#else
+  Q_UNUSED(handles)
+#endif
+  return options;
+}
+
 [[nodiscard]] bool isUnityPlaybackRate(const double rate) noexcept {
   return std::abs(rate - 1.0) < 1.0e-9;
 }
@@ -1091,7 +1123,37 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
   audio_device_poll_timer_.start();
   refreshAudioDevices();
   refreshTranscriptionState();
+#if defined(__linux__)
+  connect(window_.programViewer(), &desktop_ui::ProgramViewer::nativePresentationReady, this,
+          [this](const desktop_ui::NativePresentationHandles& handles) {
+            startGpuInitializationWithPresentation(handles);
+          });
+  connect(window_.programViewer(), &desktop_ui::ProgramViewer::nativePresentationUnavailable, this,
+          [this] {
+            if (!gpu_init_started_) {
+              startGpuInitialization();
+            }
+          });
+  connect(window_.programViewer(), &desktop_ui::ProgramViewer::nativePresentationResized, this,
+          [this](const int width, const int height) {
+            if (gpu_renderer_ != nullptr) {
+              (void)gpu_renderer_->resize_presentation(width, height);
+              requestPreview();
+            }
+          });
+  connect(window_.programViewer(), &desktop_ui::ProgramViewer::nativePresentationLost, this,
+          [this] {
+            window_.programViewer()->setNativePresented(false);
+            requestPreview();
+          });
+  QTimer::singleShot(2'000, this, [this] {
+    if (!gpu_init_started_) {
+      startGpuInitialization();
+    }
+  });
+#else
   startGpuInitialization();
+#endif
   newProject();
 }
 
@@ -6170,9 +6232,10 @@ void EditorController::syncPreviewCacheIdentity() {
 }
 
 void EditorController::startGpuInitialization() {
-  if (gpu_fallback_latched_ || gpu_init_watcher_.isRunning()) {
+  if (gpu_fallback_latched_ || gpu_init_watcher_.isRunning() || gpu_init_started_) {
     return;
   }
+  gpu_init_started_ = true;
   const std::uint64_t generation = ++gpu_init_generation_;
   connect(&gpu_init_watcher_, &QFutureWatcher<std::shared_ptr<render::GpuRenderer>>::finished, this,
           [this, generation] {
@@ -6184,6 +6247,40 @@ void EditorController::startGpuInitialization() {
           Qt::UniqueConnection);
   gpu_init_watcher_.setFuture(QtConcurrent::run([] {
     auto gpu = render::GpuRenderer::create();
+    return std::shared_ptr<render::GpuRenderer>(std::move(gpu));
+  }));
+}
+
+void EditorController::startGpuInitializationWithPresentation(
+    const desktop_ui::NativePresentationHandles& handles) {
+  if (gpu_fallback_latched_) {
+    return;
+  }
+  gpu_init_started_ = true;
+  ++gpu_init_generation_;
+  if (gpu_init_watcher_.isRunning()) {
+    gpu_init_watcher_.waitForFinished();
+  }
+  gpu_renderer_.reset();
+  gpu_timeline_renderer_.reset();
+  ++preview_epoch_;
+  renderer_->begin_epoch(preview_epoch_);
+  if (frame_provider_ != nullptr) {
+    frame_provider_->begin_epoch(preview_epoch_);
+  }
+
+  const std::uint64_t generation = ++gpu_init_generation_;
+  connect(&gpu_init_watcher_, &QFutureWatcher<std::shared_ptr<render::GpuRenderer>>::finished, this,
+          [this, generation] {
+            if (generation != gpu_init_generation_) {
+              return;
+            }
+            attachGpuRenderer(gpu_init_watcher_.result());
+          },
+          Qt::UniqueConnection);
+  const render::GpuOptions options = gpuOptionsForPresentation(handles);
+  gpu_init_watcher_.setFuture(QtConcurrent::run([options] {
+    auto gpu = render::GpuRenderer::create(options);
     return std::shared_ptr<render::GpuRenderer>(std::move(gpu));
   }));
 }
@@ -6210,8 +6307,7 @@ void EditorController::attachGpuRenderer(std::shared_ptr<render::GpuRenderer> gp
   gpu_renderer_ = std::move(gpu);
   gpu_timeline_renderer_ =
       std::make_shared<render::GpuTimelineRenderer>(frame_provider_, gpu_renderer_);
-  window_.programViewer()->setTitle(
-      tr("Program · %1 GPU ready").arg(gpuBackendName(capabilities.backend)));
+  window_.programViewer()->setTitle(gpuReadyTitle(capabilities));
   requestPreview();
 }
 
@@ -6276,6 +6372,8 @@ void EditorController::launchPreviewRequest() {
   const auto gpu_renderer = gpu_fallback_latched_ ? nullptr : gpu_renderer_;
   const auto gpu_timeline_renderer = gpu_fallback_latched_ ? nullptr : gpu_timeline_renderer_;
   const auto preview_cache = preview_cache_;
+  const bool allow_native_present =
+      window_.programViewer() != nullptr && !window_.programViewer()->safeGuidesVisible();
   const render::PreviewProfile profile{
       .scale = render::PreviewScale::Half, .bypass_expensive_effects = true, .use_proxies = true};
   const render::RenderCacheKey cache_key{
@@ -6307,7 +6405,9 @@ void EditorController::launchPreviewRequest() {
                 .arg(outcome.gpu_diagnostic),
             8'000);
       } else if (outcome.gpu_used) {
-        window_.programViewer()->setTitle(tr("Program · %1 GPU").arg(outcome.gpu_backend));
+        const auto capabilities =
+            gpu_renderer_ != nullptr ? gpu_renderer_->capabilities() : render::GpuCapabilities{};
+        window_.programViewer()->setTitle(gpuActiveTitle(capabilities));
         if (!gpu_status_announced_) {
           gpu_status_announced_ = true;
           window_.showTransientMessage(
@@ -6321,12 +6421,23 @@ void EditorController::launchPreviewRequest() {
         window_.programViewer()->setTitle(
             tr("Program · CPU frame · %1 GPU ready").arg(outcome.gpu_backend));
       }
-      if (!outcome.image.isNull()) {
-        window_.programViewer()->setFrame(outcome.image);
+      if (outcome.native_presented) {
+        window_.programViewer()->setNativePresented(true);
         ++preview_presentation_count_;
-      } else if (!outcome.error.isEmpty()) {
-        window_.programViewer()->clearFrame();
-        window_.showTransientMessage(outcome.error);
+      } else {
+        window_.programViewer()->setNativePresented(false);
+        if (!outcome.image.isNull()) {
+          window_.programViewer()->setFrame(outcome.image);
+          ++preview_presentation_count_;
+        } else if (!outcome.error.isEmpty()) {
+          window_.programViewer()->clearFrame();
+          window_.showTransientMessage(outcome.error);
+        }
+      }
+      if (outcome.cpu_frame != nullptr) {
+        last_preview_frame_ = outcome.cpu_frame;
+        window_.programViewer()->setSamplingFrameSize(
+            QSize(outcome.cpu_frame->width(), outcome.cpu_frame->height()));
       }
     }
     if (outcome.epoch != preview_epoch_ || request_serial != preview_request_serial_) {
@@ -6335,7 +6446,7 @@ void EditorController::launchPreviewRequest() {
   });
   watcher->setFuture(QtConcurrent::run([renderer, gpu_renderer, gpu_timeline_renderer, preview_cache,
                                         cache_key, profile, snapshot = std::move(snapshot),
-                                        requested_time, epoch]() mutable {
+                                        requested_time, epoch, allow_native_present]() mutable {
     const auto present = [&](std::shared_ptr<const render::CpuFrame> frame, QString backend,
                              QString diagnostic, const bool gpu_used,
                              const bool gpu_failed) -> PreviewOutcome {
@@ -6344,6 +6455,7 @@ void EditorController::launchPreviewRequest() {
       }
       return PreviewOutcome{.epoch = epoch,
                             .image = frame ? EditorController::displayImage(*frame) : QImage{},
+                            .cpu_frame = frame,
                             .error = {},
                             .gpu_backend = std::move(backend),
                             .gpu_diagnostic = std::move(diagnostic),
@@ -6354,6 +6466,7 @@ void EditorController::launchPreviewRequest() {
       if (auto cached = preview_cache->get(cache_key)) {
         return PreviewOutcome{.epoch = epoch,
                               .image = EditorController::displayImage(*cached),
+                              .cpu_frame = cached,
                               .error = {},
                               .gpu_backend = QStringLiteral("CPU"),
                               .gpu_diagnostic = {},
@@ -6397,6 +6510,28 @@ void EditorController::launchPreviewRequest() {
       auto gpu_frame =
           gpu_timeline_renderer->request_frame(snapshot, requested_time, profile, epoch);
       if (gpu_frame) {
+        if (capabilities.presentation && allow_native_present) {
+          const auto presented = gpu_renderer->present(*gpu_frame.value);
+          if (presented) {
+            return PreviewOutcome{.epoch = epoch,
+                                  .image = {},
+                                  .error = {},
+                                  .gpu_backend = backend,
+                                  .gpu_diagnostic = {},
+                                  .gpu_used = true,
+                                  .gpu_failed = false,
+                                  .native_presented = true};
+          }
+          if (presented.error.has_value() &&
+              presented.error->code != render::RenderErrorCode::GpuPresentFailed &&
+              presented.error->code != render::RenderErrorCode::GpuPresentationUnavailable) {
+            const bool should_latch =
+                presented.error->code == render::RenderErrorCode::GpuUnavailable ||
+                presented.error->code == render::RenderErrorCode::GpuDeviceLost;
+            return cpu_fallback(backend, QString::fromStdString(presented.error->message),
+                                should_latch);
+          }
+        }
         auto downloaded = gpu_renderer->download(*gpu_frame.value);
         if (downloaded) {
           const auto* gpu_cpu =
