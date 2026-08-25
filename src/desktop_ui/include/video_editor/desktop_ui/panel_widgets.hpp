@@ -104,6 +104,8 @@ signals:
   void effectKeyframeControlPointsEdited(const QString& effectId, const QString& parameterId,
                                          const QString& keyframeId, const QPointF& incoming,
                                          const QPointF& outgoing);
+  void pickWhiteBalanceRequested();
+  void effectLutBrowseRequested(const QString& effectId, const QString& parameterId);
   void addTitleRequested();
 
 private:
@@ -128,6 +130,7 @@ private:
   QWidget* title_controls_{nullptr};
   QWidget* speed_controls_{nullptr};
   QGroupBox* effects_controls_{nullptr};
+  QPushButton* pick_white_balance_{nullptr};
   QWidget* effect_parameter_editor_{nullptr};
   QFormLayout* effect_parameter_form_{nullptr};
   QComboBox* effect_parameter_selector_{nullptr};

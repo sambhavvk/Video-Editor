@@ -20,6 +20,7 @@ enum class CacheKind : std::uint8_t {
   Metadata = 3,
   Proxy = 4,
   ProxyPtsMap = 5,
+  Lut = 6,
 };
 
 // Options for opening a CacheStore. Defined as a freestanding struct (rather

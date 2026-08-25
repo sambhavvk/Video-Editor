@@ -236,6 +236,9 @@ private slots:
   void updateSelectedEffectControlPoints(const QString& effectId, const QString& parameterId,
                                          const QString& keyframeId, const QPointF& incoming,
                                          const QPointF& outgoing);
+  void beginWhiteBalanceSampling();
+  void applyWhiteBalanceSample(int frameX, int frameY);
+  void browseEffectLut(const QString& effectId, const QString& parameterId);
   void addTitleClip();
   void setTransitionSelection(const QString& transitionId);
   void updateTransitionDuration(const QString& transitionId, qint64 duration);
@@ -361,6 +364,7 @@ private:
   void presentAssetMetadata(const QString& assetId);
   void reregisterAssetMedia(const assets::AssetRecord& record);
   void dropCachedPreview(const std::string& asset_id);
+  void cacheLutFile(const std::filesystem::path& path);
   void waitForInFlightCacheJob(bool cancel);
   void refreshViews();
   void refreshMediaView();

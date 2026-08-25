@@ -46,8 +46,8 @@ make animations change when a clip moves or when preview and export use differen
 ### Reference rendering and GPU fallback
 
 - The dependency-free evaluator is shared by the CPU render graph. Known `video.color`,
-  `video.crop`, and `video.gaussian_blur` parameters are evaluated at the active clip-local time.
-  The CPU implementation establishes preview/export reference behavior.
+  `video.crop`, `video.gaussian_blur`, `video.lut`, and `video.curves` parameters are evaluated at
+  the active clip-local time. The CPU implementation establishes preview/export reference behavior.
 - Expensive blur may be bypassed only when the preview profile explicitly permits it; full-quality
   export applies it. Unknown or disabled effects do not change the frame.
 - An active effect remains a typed unsupported-timeline result for the current GPU compositor, so

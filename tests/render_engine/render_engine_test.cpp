@@ -1,14 +1,19 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "video_editor/render_engine/cpu_renderer.h"
+#include "video_editor/render_engine/lut3d.h"
 #include "video_editor/render_engine/render_cache.h"
+#include "video_editor/render_engine/white_balance.h"
 
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <map>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <vector>
 
 namespace video_editor::render {
@@ -804,6 +809,157 @@ TEST(RenderCache, DistinguishesGraphSignaturesAndPreviewProfileHash) {
   ASSERT_TRUE(hit_b);
   EXPECT_FLOAT_EQ(hit_a->pixel(0, 0)[0], 1.0F);
   EXPECT_FLOAT_EQ(hit_b->pixel(0, 0)[1], 1.0F);
+}
+
+std::filesystem::path write_temp_cube(const std::string& contents) {
+  const auto path =
+      std::filesystem::temp_directory_path() /
+      ("video_editor_lut_test_" + std::to_string(reinterpret_cast<std::uintptr_t>(&contents)) +
+       ".cube");
+  std::ofstream output(path);
+  output << contents;
+  output.close();
+  return path;
+}
+
+std::string identity_cube_contents(const int size) {
+  std::ostringstream stream;
+  stream << "LUT_3D_SIZE " << size << '\n';
+  for (int blue = 0; blue < size; ++blue) {
+    for (int green = 0; green < size; ++green) {
+      for (int red = 0; red < size; ++red) {
+        const double scale = size > 1 ? 1.0 / static_cast<double>(size - 1) : 0.0;
+        stream << (static_cast<double>(red) * scale) << ' ' << (static_cast<double>(green) * scale)
+               << ' ' << (static_cast<double>(blue) * scale) << '\n';
+      }
+    }
+  }
+  return stream.str();
+}
+
+TEST(Lut3D, IdentityCubeSamplesInputColor) {
+  const auto path = write_temp_cube(identity_cube_contents(3));
+  const Lut3D* lut = cached_lut_for_path(path);
+  ASSERT_NE(lut, nullptr);
+  const auto sampled = lut->sample(0.2F, 0.4F, 0.6F);
+  EXPECT_NEAR(sampled[0], 0.2F, 0.07F);
+  EXPECT_NEAR(sampled[1], 0.4F, 0.07F);
+  EXPECT_NEAR(sampled[2], 0.6F, 1.0e-3F);
+  std::filesystem::remove(path);
+}
+
+TEST(CpuRenderer, IdentityLutLeavesSolidColorUnchanged) {
+  const auto asset_id = edit::EntityId::generate();
+  const auto cube_path = write_temp_cube(identity_cube_contents(3));
+  edit::Effect lut;
+  lut.type = "video.lut";
+  lut.parameters.emplace("path", edit::EffectParameter{.id = "path",
+                                                       .value = cube_path.string(),
+                                                       .keyframes = {}});
+  const auto snapshot = make_effect_snapshot(asset_id, {lut}, 1, 1);
+  auto source = std::make_shared<CpuFrame>(1, 1);
+  source->clear(0.2F, 0.4F, 0.6F, 1.0F);
+  auto provider = std::make_shared<PatternProvider>();
+  provider->frames.emplace(asset_id, source);
+  CpuRenderer renderer(provider);
+  renderer.begin_epoch(1);
+  const auto result = renderer.request_frame(snapshot, edit::Time(0, 1), {}, 1);
+  ASSERT_TRUE(result);
+  const auto frame = std::get<std::shared_ptr<const CpuFrame>>(result.value->storage);
+  EXPECT_NEAR(frame->pixel(0, 0)[0], 0.2F, 0.08F);
+  EXPECT_NEAR(frame->pixel(0, 0)[1], 0.4F, 0.08F);
+  EXPECT_NEAR(frame->pixel(0, 0)[2], 0.6F, 0.08F);
+  std::filesystem::remove(cube_path);
+}
+
+TEST(CpuRenderer, LutCanTintOutputRed) {
+  const auto asset_id = edit::EntityId::generate();
+  const auto cube_path = write_temp_cube("LUT_3D_SIZE 2\n"
+                                         "1 0 0\n"
+                                         "1 0 0\n"
+                                         "1 0 0\n"
+                                         "1 0 0\n"
+                                         "1 0 0\n"
+                                         "1 0 0\n"
+                                         "1 0 0\n"
+                                         "1 0 0\n");
+  edit::Effect lut;
+  lut.type = "video.lut";
+  lut.parameters.emplace("path", edit::EffectParameter{.id = "path",
+                                                       .value = cube_path.string(),
+                                                       .keyframes = {}});
+  const auto snapshot = make_effect_snapshot(asset_id, {lut}, 1, 1);
+  auto source = std::make_shared<CpuFrame>(1, 1);
+  source->clear(0.1F, 0.8F, 0.2F, 1.0F);
+  auto provider = std::make_shared<PatternProvider>();
+  provider->frames.emplace(asset_id, source);
+  CpuRenderer renderer(provider);
+  renderer.begin_epoch(2);
+  const auto result = renderer.request_frame(snapshot, edit::Time(0, 1), {}, 2);
+  ASSERT_TRUE(result);
+  const auto frame = std::get<std::shared_ptr<const CpuFrame>>(result.value->storage);
+  EXPECT_NEAR(frame->pixel(0, 0)[0], 1.0F, 1.0e-4F);
+  EXPECT_NEAR(frame->pixel(0, 0)[1], 0.0F, 1.0e-4F);
+  EXPECT_NEAR(frame->pixel(0, 0)[2], 0.0F, 1.0e-4F);
+  std::filesystem::remove(cube_path);
+}
+
+TEST(CpuRenderer, LumaCurveLiftsMidtones) {
+  const auto asset_id = edit::EntityId::generate();
+  edit::Effect curves;
+  curves.type = "video.curves";
+  curves.parameters.emplace("red", edit::EffectParameter{.id = "red", .value = std::string{"0,0;1,1"}, .keyframes = {}});
+  curves.parameters.emplace("green",
+                            edit::EffectParameter{.id = "green", .value = std::string{"0,0;1,1"}, .keyframes = {}});
+  curves.parameters.emplace("blue",
+                            edit::EffectParameter{.id = "blue", .value = std::string{"0,0;1,1"}, .keyframes = {}});
+  curves.parameters.emplace("luma", edit::EffectParameter{.id = "luma",
+                                                          .value = std::string{"0,0;0.5,0.7;1,1"},
+                                                          .keyframes = {}});
+  const auto snapshot = make_effect_snapshot(asset_id, {curves}, 1, 1);
+  auto source = std::make_shared<CpuFrame>(1, 1);
+  source->clear(0.5F, 0.5F, 0.5F, 1.0F);
+  auto provider = std::make_shared<PatternProvider>();
+  provider->frames.emplace(asset_id, source);
+  CpuRenderer renderer(provider);
+  renderer.begin_epoch(3);
+  const auto result = renderer.request_frame(snapshot, edit::Time(0, 1), {}, 3);
+  ASSERT_TRUE(result);
+  const auto frame = std::get<std::shared_ptr<const CpuFrame>>(result.value->storage);
+  EXPECT_GT(frame->pixel(0, 0)[0], 0.5F);
+  EXPECT_GT(frame->pixel(0, 0)[1], 0.5F);
+  EXPECT_GT(frame->pixel(0, 0)[2], 0.5F);
+}
+
+TEST(CpuRenderer, AppliesColorBeforeLutInEffectOrder) {
+  const auto asset_id = edit::EntityId::generate();
+  const auto cube_path = write_temp_cube(identity_cube_contents(2));
+  edit::Effect color;
+  color.type = "video.color";
+  color.parameters.emplace("exposure", edit::EffectParameter{.id = "exposure", .value = 1.0, .keyframes = {}});
+  edit::Effect lut;
+  lut.type = "video.lut";
+  lut.parameters.emplace("path", edit::EffectParameter{.id = "path",
+                                                     .value = cube_path.string(),
+                                                     .keyframes = {}});
+  const auto snapshot = make_effect_snapshot(asset_id, {color, lut}, 1, 1);
+  auto source = std::make_shared<CpuFrame>(1, 1);
+  source->clear(0.25F, 0.25F, 0.25F, 1.0F);
+  auto provider = std::make_shared<PatternProvider>();
+  provider->frames.emplace(asset_id, source);
+  CpuRenderer renderer(provider);
+  renderer.begin_epoch(4);
+  const auto result = renderer.request_frame(snapshot, edit::Time(0, 1), {}, 4);
+  ASSERT_TRUE(result);
+  const auto frame = std::get<std::shared_ptr<const CpuFrame>>(result.value->storage);
+  EXPECT_GT(frame->pixel(0, 0)[0], 0.4F);
+  std::filesystem::remove(cube_path);
+}
+
+TEST(WhiteBalance, NeutralGrayMapsNearZero) {
+  const auto adjustment = white_balance_from_linear_rgb(0.5, 0.5, 0.5);
+  EXPECT_NEAR(adjustment.temperature, 0.0, 1.0e-6);
+  EXPECT_NEAR(adjustment.tint, 0.0, 1.0e-6);
 }
 
 } // namespace

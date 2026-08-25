@@ -114,6 +114,42 @@ TEST(EffectEvaluator, RejectsMapMismatchesAndKnownOutOfRangeValuesAtPublish) {
   expect_rejected_effect(std::move(out_of_range));
 }
 
+TEST(EffectEvaluator, RejectsMalformedCurvesAndEmptyLutPath) {
+  Effect malformed_curves;
+  malformed_curves.type = "video.curves";
+  malformed_curves.parameters.emplace("red", EffectParameter{.id = "red", .value = std::string{"0,0;0,1"}});
+  malformed_curves.parameters.emplace("green",
+                                      EffectParameter{.id = "green", .value = std::string{"0,0;1,1"}});
+  malformed_curves.parameters.emplace("blue",
+                                      EffectParameter{.id = "blue", .value = std::string{"0,0;1,1"}});
+  malformed_curves.parameters.emplace("luma",
+                                      EffectParameter{.id = "luma", .value = std::string{"0,0;1,1"}});
+  expect_rejected_effect(std::move(malformed_curves));
+
+  Effect identity_curves;
+  identity_curves.type = "video.curves";
+  identity_curves.parameters.emplace("red",
+                                       EffectParameter{.id = "red", .value = std::string{"0,0;1,1"}});
+  identity_curves.parameters.emplace("green",
+                                     EffectParameter{.id = "green", .value = std::string{"0,0;1,1"}});
+  identity_curves.parameters.emplace("blue",
+                                     EffectParameter{.id = "blue", .value = std::string{"0,0;1,1"}});
+  identity_curves.parameters.emplace("luma",
+                                     EffectParameter{.id = "luma", .value = std::string{"0,0;1,1"}});
+  EXPECT_FALSE(validateEffect(identity_curves, Time(10, 1)).has_value());
+
+  Effect empty_lut;
+  empty_lut.type = "video.lut";
+  empty_lut.parameters.emplace("path", EffectParameter{.id = "path", .value = std::string{}});
+  expect_rejected_effect(std::move(empty_lut));
+
+  Effect valid_lut;
+  valid_lut.type = "video.lut";
+  valid_lut.parameters.emplace("path",
+                               EffectParameter{.id = "path", .value = std::string{"/tmp/test.cube"}});
+  EXPECT_FALSE(validateEffect(valid_lut, Time(10, 1)).has_value());
+}
+
 TEST(EffectEvaluator, RejectsDuplicateKeyframeIdsAcrossEffectState) {
   Effect effect;
   effect.type = "video.color";

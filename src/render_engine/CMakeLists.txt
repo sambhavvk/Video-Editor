@@ -57,11 +57,15 @@ endif()
 
 add_library(video_editor_render_engine
   src/bitmap_glyphs.cpp
+  src/color_curves.cpp
   src/cpu_renderer.cpp
+  src/text_shaper.cpp
   src/frame.cpp
   src/gpu_backend.cpp
   src/gpu_timeline_renderer.cpp
-  src/render_cache.cpp)
+  src/lut3d.cpp
+  src/render_cache.cpp
+  src/white_balance.cpp)
 
 add_library(video_editor::render_engine ALIAS video_editor_render_engine)
 

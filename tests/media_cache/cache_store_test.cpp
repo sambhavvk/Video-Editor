@@ -430,4 +430,16 @@ TEST(CacheStoreTest, ProxyKindsSupportPutContainsAndRemoveKind) {
   EXPECT_TRUE(store.contains(thumb_key).value());
 }
 
+TEST(CacheStoreTest, LutKindPutGetRoundtrip) {
+  TemporaryDirectory dir;
+  CacheStore store(dir.path());
+  const auto key = make_key("lut:deadbeef", CacheKind::Lut, "cube-v1");
+  const auto bytes = make_bytes(1, 64);
+  ASSERT_TRUE(store.put(key, bytes).has_value());
+  const auto loaded = store.get(key);
+  ASSERT_TRUE(loaded);
+  EXPECT_EQ(loaded.value().size(), bytes.size());
+  EXPECT_EQ(loaded.value().front(), bytes.front());
+}
+
 } // namespace video_editor::media_cache

@@ -571,6 +571,14 @@ InspectorWidget::InspectorWidget(QWidget* parent) : QWidget(parent) {
   effects_controls_ = effects;
   auto* effectsLayout = new QVBoxLayout(effects);
   effectsLayout->setContentsMargins(8, 8, 8, 8);
+  pick_white_balance_ = new QPushButton(tr("Pick white balance"), effects);
+  pick_white_balance_->setObjectName(QStringLiteral("pickWhiteBalance"));
+  pick_white_balance_->setAccessibleName(tr("Pick white balance from program viewer"));
+  pick_white_balance_->setToolTip(tr("Click the program viewer to sample neutral gray"));
+  pick_white_balance_->hide();
+  effectsLayout->addWidget(pick_white_balance_);
+  connect(pick_white_balance_, &QPushButton::clicked, this,
+          &InspectorWidget::pickWhiteBalanceRequested);
   auto* effectsBody = new QWidget(effects);
   effectsBody->setObjectName(QStringLiteral("effectParameterEditor"));
   effect_parameter_editor_ = effectsBody;
@@ -838,6 +846,13 @@ void InspectorWidget::setEffectParameters(const QVector<EffectParameterView>& pa
     effects_controls_->setVisible(!effect_parameters_.isEmpty());
     effects_controls_->setChecked(!effect_parameters_.isEmpty());
   }
+  if (pick_white_balance_ != nullptr) {
+    const bool has_color_effect = std::any_of(
+        effect_parameters_.cbegin(), effect_parameters_.cend(), [](const EffectParameterView& view) {
+          return view.effectType == QStringLiteral("video.color");
+        });
+    pick_white_balance_->setVisible(has_color_effect);
+  }
 }
 
 void InspectorWidget::rebuildEffectParameterFields() {
@@ -893,6 +908,24 @@ void InspectorWidget::rebuildEffectParameterFields() {
         }
       });
       rowLayout->addWidget(line, 1);
+      if (parameter.effectType == QStringLiteral("video.lut") &&
+          parameter.parameterId == QStringLiteral("path")) {
+        auto* browse = new QPushButton(tr("Browse LUT…"), row);
+        browse->setAccessibleName(tr("Browse for LUT file"));
+        connect(browse, &QPushButton::clicked, this, [this, index] {
+          if (index < effect_parameters_.size()) {
+            const auto& parameter = effect_parameters_.at(index);
+            emit effectLutBrowseRequested(parameter.effectId, parameter.parameterId);
+          }
+        });
+        rowLayout->addWidget(browse);
+      }
+      if (parameter.effectType == QStringLiteral("video.curves")) {
+        auto* note = new QLabel(tr("Format: x,y;x,y (0–1)"), row);
+        note->setObjectName(QStringLiteral("curvesFormatNote"));
+        note->setWordWrap(true);
+        rowLayout->addWidget(note);
+      }
     }
     auto* keyframe = new QToolButton(row);
     keyframe->setObjectName(QStringLiteral("effectKeyframe.%1").arg(index));
@@ -1028,6 +1061,8 @@ EffectsPanelWidget::EffectsPanelWidget(QWidget* parent) : QWidget(parent) {
       {QStringLiteral("transition.cross_dissolve"), tr("Cross Dissolve"), tr("Transitions"), true},
       {QStringLiteral("transition.dip_to_black"), tr("Dip to Black"), tr("Transitions"), true},
       {QStringLiteral("video.color"), tr("Color Adjustments"), tr("Video"), true},
+      {QStringLiteral("video.curves"), tr("Color Curves"), tr("Video"), true},
+      {QStringLiteral("video.lut"), tr("LUT"), tr("Video"), true},
       {QStringLiteral("video.crop"), tr("Crop"), tr("Video"), true},
       {QStringLiteral("video.gaussian_blur"), tr("Gaussian Blur"), tr("Video"), true},
   });

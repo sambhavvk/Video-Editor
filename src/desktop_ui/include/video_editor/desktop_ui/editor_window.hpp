@@ -142,6 +142,8 @@ signals:
   void effectKeyframeControlPointsEdited(const QString& effectId, const QString& parameterId,
                                          const QString& keyframeId, const QPointF& incoming,
                                          const QPointF& outgoing);
+  void pickWhiteBalanceRequested();
+  void effectLutBrowseRequested(const QString& effectId, const QString& parameterId);
   void addTitleRequested();
   void transitionActivated(const QString& transitionId);
   void transitionDurationEdited(const QString& transitionId, qint64 duration);

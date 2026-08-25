@@ -7,6 +7,7 @@
 
 #include "video_editor/audio_engine/async_realtime_playback.h"
 #include "video_editor/audio_engine/miniaudio_output_device.h"
+#include "video_editor/audio_engine/output_latency_calibration.h"
 #include "video_editor/audio_render/loudness_normalize.h"
 #include "video_editor/audio_render/original_audio_registry.h"
 #include "video_editor/audio_render/timeline_audio_renderer.h"
@@ -33,12 +34,14 @@
 #include "video_editor/render_engine/gpu_backend.h"
 #include "video_editor/render_engine/gpu_timeline_renderer.h"
 #include "video_editor/render_engine/render_cache.h"
+#include "video_editor/render_engine/white_balance.h"
 #include "video_editor/transcription_service/transcription_service.h"
 
 #include <QtConcurrent/QtConcurrentRun>
 
 #include <QCloseEvent>
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -64,6 +67,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <fstream>
 #include <limits>
 #include <numeric>
 #include <span>
@@ -262,6 +266,8 @@ waveformBucketsForUi(const media_cache::Waveform& waveform) {
     return QStringLiteral("Proxy");
   case media_cache::CacheKind::ProxyPtsMap:
     return QStringLiteral("PTS map");
+  case media_cache::CacheKind::Lut:
+    return QStringLiteral("LUT");
   }
   return QStringLiteral("Thumbnail");
 }
@@ -281,6 +287,9 @@ waveformBucketsForUi(const media_cache::Waveform& waveform) {
   }
   if (text == QLatin1String("PTS map")) {
     return media_cache::CacheKind::ProxyPtsMap;
+  }
+  if (text == QLatin1String("LUT")) {
+    return media_cache::CacheKind::Lut;
   }
   return std::nullopt;
 }
@@ -532,6 +541,12 @@ QString effectDisplayName(const std::string& type) {
   if (id == QStringLiteral("video.gaussian_blur")) {
     return QObject::tr("Gaussian Blur");
   }
+  if (id == QStringLiteral("video.curves")) {
+    return QObject::tr("Color Curves");
+  }
+  if (id == QStringLiteral("video.lut")) {
+    return QObject::tr("LUT");
+  }
   if (id == QStringLiteral("audio.eq")) {
     return QObject::tr("Parametric Equalizer");
   }
@@ -567,6 +582,13 @@ edit::Effect effectPreset(const QString& effectId) {
     add("bottom", 0.0);
   } else if (effectId == QStringLiteral("video.gaussian_blur")) {
     add("radius", 0.0);
+  } else if (effectId == QStringLiteral("video.lut")) {
+    add("path", std::string{});
+  } else if (effectId == QStringLiteral("video.curves")) {
+    add("red", std::string{"0,0;1,1"});
+    add("green", std::string{"0,0;1,1"});
+    add("blue", std::string{"0,0;1,1"});
+    add("luma", std::string{"0,0;1,1"});
   } else if (effectId == QStringLiteral("audio.eq")) {
     add("frequency", 1000.0);
     add("gain", 0.0);
@@ -911,6 +933,12 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::removeSelectedEffectKeyframe);
   connect(&window_, &desktop_ui::EditorWindow::effectKeyframeControlPointsEdited, this,
           &EditorController::updateSelectedEffectControlPoints);
+  connect(&window_, &desktop_ui::EditorWindow::pickWhiteBalanceRequested, this,
+          &EditorController::beginWhiteBalanceSampling);
+  connect(&window_, &desktop_ui::EditorWindow::effectLutBrowseRequested, this,
+          &EditorController::browseEffectLut);
+  connect(window_.programViewer(), &desktop_ui::ProgramViewer::frameSampleRequested, this,
+          &EditorController::applyWhiteBalanceSample);
   connect(&window_, &desktop_ui::EditorWindow::addTitleRequested, this,
           &EditorController::addTitleClip);
   connect(&window_, &desktop_ui::EditorWindow::transitionActivated, this,
@@ -4376,6 +4404,17 @@ void EditorController::addEffect(const QString& effectId) {
     return;
   }
   edit::Effect effect = effectPreset(effectId);
+  if (effectId == QStringLiteral("video.lut")) {
+    const QString path = QFileDialog::getOpenFileName(
+        &window_, tr("Choose LUT"), {}, tr("Adobe Cube LUT (*.cube)"));
+    if (path.isEmpty()) {
+      return;
+    }
+    if (auto found = effect.parameters.find("path"); found != effect.parameters.end()) {
+      found->second.value = path.toStdString();
+    }
+    cacheLutFile(std::filesystem::path{path.toStdString()});
+  }
   if (clip->kind != edit::ClipKind::Video && clip->kind != edit::ClipKind::Title) {
     window_.showTransientMessage(tr("Select a video clip for this effect"));
     return;
@@ -4420,6 +4459,95 @@ void EditorController::updateSelectedEffectParameter(const QString& effectId,
                                                            .parameter = std::move(updated)},
           .coalescing_key = "effect:" + effectId.toStdString() + ":" + parameterId.toStdString()},
       tr("Could not update the effect parameter"));
+}
+
+void EditorController::browseEffectLut(const QString& effectId, const QString& parameterId) {
+  const QString path = QFileDialog::getOpenFileName(
+      &window_, tr("Choose LUT"), {}, tr("Adobe Cube LUT (*.cube)"));
+  if (path.isEmpty()) {
+    return;
+  }
+  cacheLutFile(std::filesystem::path{path.toStdString()});
+  updateSelectedEffectParameter(effectId, parameterId, path);
+}
+
+void EditorController::beginWhiteBalanceSampling() {
+  white_balance_sampling_ = true;
+  window_.programViewer()->setFrameSamplingEnabled(true);
+  window_.showTransientMessage(tr("Click the program viewer to sample white balance"));
+}
+
+void EditorController::applyWhiteBalanceSample(const int frameX, const int frameY) {
+  if (!white_balance_sampling_) {
+    return;
+  }
+  white_balance_sampling_ = false;
+  window_.programViewer()->setFrameSamplingEnabled(false);
+  if (last_preview_frame_ == nullptr) {
+    window_.showTransientMessage(
+        tr("White balance sampling needs a CPU preview frame. Pause playback or wait for CPU "
+           "fallback."));
+    return;
+  }
+  const render::CpuFrame& frame = *last_preview_frame_;
+  if (frameX < 0 || frameY < 0 || frameX >= frame.width() || frameY >= frame.height()) {
+    return;
+  }
+  const auto pixel = frame.pixel(frameX, frameY);
+  const float alpha = std::clamp(pixel[3], 0.0F, 1.0F);
+  if (alpha <= 0.0F) {
+    window_.showTransientMessage(tr("Choose an opaque pixel for white balance sampling"));
+    return;
+  }
+  const double red = std::clamp(static_cast<double>(pixel[0]) / alpha, 0.0, 1.0);
+  const double green = std::clamp(static_cast<double>(pixel[1]) / alpha, 0.0, 1.0);
+  const double blue = std::clamp(static_cast<double>(pixel[2]) / alpha, 0.0, 1.0);
+  const render::WhiteBalanceAdjustment adjustment =
+      render::white_balance_from_linear_rgb(red, green, blue);
+
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || !active_clip_id_.has_value()) {
+    return;
+  }
+  const edit::Clip* clip = edit::findClip(*sequence, *active_clip_id_);
+  if (clip == nullptr) {
+    return;
+  }
+  std::vector<edit::EditCommand> commands;
+  edit::EntityId color_effect_id{};
+  const auto existing = std::find_if(clip->effects.begin(), clip->effects.end(),
+                                     [](const edit::Effect& effect) {
+                                       return effect.type == "video.color";
+                                     });
+  if (existing == clip->effects.end()) {
+    edit::Effect color_effect = effectPreset(QStringLiteral("video.color"));
+    color_effect_id = color_effect.id;
+    commands.push_back(edit::EditCommand{
+        .operation = edit::AddClipEffectCommand{.sequence_id = sequence->id,
+                                                .clip_id = clip->id,
+                                                .effect = std::move(color_effect)},
+        .coalescing_key = {}});
+  } else {
+    color_effect_id = existing->id;
+  }
+  const auto make_parameter = [](const char* id, const double value) {
+    return edit::EffectParameter{.id = id, .value = value, .keyframes = {}};
+  };
+  commands.push_back(edit::EditCommand{
+      .operation = edit::SetClipEffectParameterCommand{.sequence_id = sequence->id,
+                                                       .clip_id = clip->id,
+                                                       .effect_id = color_effect_id,
+                                                       .parameter = make_parameter(
+                                                           "temperature", adjustment.temperature)},
+      .coalescing_key = "white-balance:temperature"});
+  commands.push_back(edit::EditCommand{
+      .operation = edit::SetClipEffectParameterCommand{
+          .sequence_id = sequence->id,
+          .clip_id = clip->id,
+          .effect_id = color_effect_id,
+          .parameter = make_parameter("tint", adjustment.tint)},
+      .coalescing_key = "white-balance:tint"});
+  (void)applyBatch(std::move(commands), tr("Could not apply white balance"));
 }
 
 void EditorController::toggleSelectedEffectKeyframe(const QString& effectId,
@@ -5910,6 +6038,7 @@ void EditorController::refreshInspectorView() {
     for (const auto& [parameter_id, parameter] : effect.parameters) {
       desktop_ui::EffectParameterView view;
       view.effectId = effect_id;
+      view.effectType = QString::fromStdString(effect.type);
       view.effectName = effect_name;
       view.parameterId = QString::fromStdString(parameter_id);
       view.displayName = view.parameterId;
@@ -6636,6 +6765,35 @@ void EditorController::waitForInFlightCacheJob(const bool cancel) {
     cache_job_queue_.clear();
     cache_job_stop_source_ = std::stop_source();
   }
+}
+
+void EditorController::cacheLutFile(const std::filesystem::path& path) {
+  if (media_cache_ == nullptr || path.empty()) {
+    return;
+  }
+  std::ifstream input(path, std::ios::binary);
+  if (!input) {
+    return;
+  }
+  const std::vector<std::byte> bytes((std::istreambuf_iterator<char>(input)),
+                                     std::istreambuf_iterator<char>());
+  if (bytes.empty()) {
+    return;
+  }
+  QCryptographicHash digest(QCryptographicHash::Sha256);
+  digest.addData(QByteArray::fromStdString(path.lexically_normal().string()));
+  std::error_code error;
+  const auto size = std::filesystem::file_size(path, error);
+  const auto mtime = std::filesystem::last_write_time(path, error);
+  if (!error) {
+    digest.addData(QByteArray::number(static_cast<qulonglong>(size)));
+    digest.addData(
+        QByteArray::number(static_cast<qulonglong>(mtime.time_since_epoch().count())));
+  }
+  const media_cache::CacheKey key{.asset_id = "lut:" + digest.result().toHex().toStdString(),
+                                  .kind = media_cache::CacheKind::Lut,
+                                  .parameter_hash = "cube-v1"};
+  (void)media_cache_->put(key, bytes);
 }
 
 void EditorController::dropCachedPreview(const std::string& asset_id) {

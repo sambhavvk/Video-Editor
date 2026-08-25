@@ -2,6 +2,8 @@
 #include "video_editor/render_engine/cpu_renderer.h"
 #include "video_editor/edit_model/effect_evaluator.h"
 #include "video_editor/render_engine/bitmap_glyphs.h"
+#include "video_editor/render_engine/color_curves.h"
+#include "video_editor/render_engine/lut3d.h"
 
 #include <algorithm>
 #include <array>
@@ -162,6 +164,22 @@ void fill_color(CpuFrame& frame, const edit::ColorRgba& color) noexcept {
               static_cast<float>(color.blue), static_cast<float>(color.alpha));
 }
 
+[[nodiscard]] std::optional<std::string>
+effect_string(const edit::Effect& effect, const std::string_view id, const edit::Time local_time) {
+  const auto found = effect.parameters.find(id);
+  if (found == effect.parameters.end()) {
+    return std::nullopt;
+  }
+  const auto value = edit::evaluateEffectParameter(found->second, local_time);
+  if (!value) {
+    return std::nullopt;
+  }
+  if (const auto* text = std::get_if<std::string>(&*value)) {
+    return *text;
+  }
+  return std::nullopt;
+}
+
 [[nodiscard]] std::optional<double>
 effect_number(const edit::Effect& effect, const std::string_view id, const edit::Time local_time) {
   const auto found = effect.parameters.find(id);
@@ -217,6 +235,63 @@ void apply_color(CpuFrame& frame, const edit::Effect& effect, const edit::Time l
       pixel[0] = static_cast<float>(std::clamp(red, 0.0, 1.0) * alpha);
       pixel[1] = static_cast<float>(std::clamp(green, 0.0, 1.0) * alpha);
       pixel[2] = static_cast<float>(std::clamp(blue, 0.0, 1.0) * alpha);
+    }
+  }
+}
+
+void apply_lut(CpuFrame& frame, const edit::Effect& effect, const edit::Time local_time) {
+  const auto path = effect_string(effect, "path", local_time);
+  if (!path || path->empty()) {
+    return;
+  }
+  const Lut3D* lut = cached_lut_for_path(std::filesystem::path{*path});
+  if (lut == nullptr) {
+    return;
+  }
+  for (int y = 0; y < frame.height(); ++y) {
+    for (int x = 0; x < frame.width(); ++x) {
+      auto pixel = frame.pixel(x, y);
+      const double alpha = std::clamp(static_cast<double>(pixel[3]), 0.0, 1.0);
+      if (alpha <= 0.0) {
+        continue;
+      }
+      const double red = std::clamp(static_cast<double>(pixel[0]) / alpha, 0.0, 1.0);
+      const double green = std::clamp(static_cast<double>(pixel[1]) / alpha, 0.0, 1.0);
+      const double blue = std::clamp(static_cast<double>(pixel[2]) / alpha, 0.0, 1.0);
+      const auto mapped = lut->sample(static_cast<float>(red), static_cast<float>(green),
+                                      static_cast<float>(blue));
+      pixel[0] = static_cast<float>(std::clamp(static_cast<double>(mapped[0]), 0.0, 1.0) * alpha);
+      pixel[1] = static_cast<float>(std::clamp(static_cast<double>(mapped[1]), 0.0, 1.0) * alpha);
+      pixel[2] = static_cast<float>(std::clamp(static_cast<double>(mapped[2]), 0.0, 1.0) * alpha);
+    }
+  }
+}
+
+void apply_curves(CpuFrame& frame, const edit::Effect& effect, const edit::Time local_time) {
+  const auto red = effect_string(effect, "red", local_time).value_or("0,0;1,1");
+  const auto green = effect_string(effect, "green", local_time).value_or("0,0;1,1");
+  const auto blue = effect_string(effect, "blue", local_time).value_or("0,0;1,1");
+  const auto luma = effect_string(effect, "luma", local_time).value_or("0,0;1,1");
+  const auto curves = parse_color_curves(red, green, blue, luma);
+  if (!curves) {
+    return;
+  }
+  for (int y = 0; y < frame.height(); ++y) {
+    for (int x = 0; x < frame.width(); ++x) {
+      auto pixel = frame.pixel(x, y);
+      const double alpha = std::clamp(static_cast<double>(pixel[3]), 0.0, 1.0);
+      if (alpha <= 0.0) {
+        continue;
+      }
+      float straight_red = static_cast<float>(std::clamp(static_cast<double>(pixel[0]) / alpha, 0.0, 1.0));
+      float straight_green =
+          static_cast<float>(std::clamp(static_cast<double>(pixel[1]) / alpha, 0.0, 1.0));
+      float straight_blue =
+          static_cast<float>(std::clamp(static_cast<double>(pixel[2]) / alpha, 0.0, 1.0));
+      apply_color_curves(straight_red, straight_green, straight_blue, *curves);
+      pixel[0] = straight_red * static_cast<float>(alpha);
+      pixel[1] = straight_green * static_cast<float>(alpha);
+      pixel[2] = straight_blue * static_cast<float>(alpha);
     }
   }
 }

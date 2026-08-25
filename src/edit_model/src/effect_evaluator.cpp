@@ -2,12 +2,15 @@
 #include "video_editor/edit_model/effect_evaluator.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <iterator>
 #include <limits>
+#include <string_view>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace video_editor::edit {
 namespace {
@@ -91,6 +94,97 @@ namespace {
   const long double right = static_cast<long double>(denominator.value()) /
                             static_cast<long double>(denominator.timescale());
   return right == 0.0L ? 0.0 : static_cast<double>(left / right);
+}
+
+[[nodiscard]] bool parseCurveToken(std::string_view token, double& value) noexcept {
+  if (token.empty()) {
+    return false;
+  }
+  const char* begin = token.data();
+  const char* end = begin + token.size();
+  const auto result = std::from_chars(begin, end, value);
+  return result.ec == std::errc{} && result.ptr == end && std::isfinite(value);
+}
+
+[[nodiscard]] std::optional<std::string> validateCurvesString(const std::string& encoded) {
+  if (encoded.empty()) {
+    return "curves string cannot be empty";
+  }
+  std::vector<std::pair<double, double>> points;
+  std::string_view remaining{encoded};
+  while (!remaining.empty()) {
+    const auto separator = remaining.find(';');
+    const auto segment = remaining.substr(0, separator);
+    remaining = separator == std::string_view::npos ? std::string_view{} : remaining.substr(separator + 1);
+    if (segment.empty()) {
+      return "curves string contains an empty segment";
+    }
+    const auto comma = segment.find(',');
+    if (comma == std::string_view::npos) {
+      return "curves string segments must be x,y pairs";
+    }
+    double x = 0.0;
+    double y = 0.0;
+    if (!parseCurveToken(segment.substr(0, comma), x) ||
+        !parseCurveToken(segment.substr(comma + 1), y)) {
+      return "curves string contains a non-finite coordinate";
+    }
+    if (x < 0.0 || x > 1.0 || y < 0.0 || y > 1.0) {
+      return "curves coordinates must be within [0, 1]";
+    }
+    points.emplace_back(x, y);
+  }
+  if (points.size() < 2U) {
+    return "curves string must contain at least two points";
+  }
+  std::sort(points.begin(), points.end(),
+            [](const auto& left, const auto& right) { return left.first < right.first; });
+  for (std::size_t index = 1; index < points.size(); ++index) {
+    if (points[index].first <= points[index - 1].first) {
+      return "curves x coordinates must be strictly increasing";
+    }
+  }
+  return std::nullopt;
+}
+
+[[nodiscard]] std::optional<std::string> validateKnownStringParameter(const Effect& effect,
+                                                                      const EffectParameter& parameter) {
+  if (effect.type == "video.lut" && parameter.id == "path") {
+    const auto check = [](const EffectValue& value) {
+      const auto* text = std::get_if<std::string>(&value);
+      return text != nullptr && !text->empty();
+    };
+    if (!check(parameter.value)) {
+      return "video.lut path must be a non-empty string";
+    }
+    for (const auto& keyframe : parameter.keyframes) {
+      if (!check(keyframe.value)) {
+        return "video.lut path must be a non-empty string";
+      }
+    }
+    return std::nullopt;
+  }
+  if (effect.type == "video.curves" &&
+      (parameter.id == "red" || parameter.id == "green" || parameter.id == "blue" ||
+       parameter.id == "luma")) {
+    const auto check = [&](const EffectValue& value) {
+      const auto* text = std::get_if<std::string>(&value);
+      if (text == nullptr) {
+        return std::optional<std::string>{"video.curves parameters must be strings"};
+      }
+      return validateCurvesString(*text);
+    };
+    if (const auto issue = check(parameter.value)) {
+      return issue;
+    }
+    for (const auto& keyframe : parameter.keyframes) {
+      if (const auto issue = check(keyframe.value)) {
+        return issue;
+      }
+    }
+    return std::nullopt;
+  }
+  return std::nullopt;
 }
 
 [[nodiscard]] EffectValue interpolate(const EffectValue& left, const EffectValue& right,
@@ -250,6 +344,9 @@ std::optional<std::string> validateEffect(const Effect& effect,
       if (const auto issue = validate_number(range->first, range->second)) {
         return issue;
       }
+    }
+    if (const auto issue = validateKnownStringParameter(effect, parameter)) {
+      return issue;
     }
   }
   return std::nullopt;

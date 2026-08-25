@@ -205,6 +205,7 @@ struct KeyframeView {
 
 struct EffectParameterView {
   QString effectId;
+  QString effectType;
   QString effectName;
   QString parameterId;
   QString displayName;

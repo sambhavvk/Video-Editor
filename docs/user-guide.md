@@ -179,18 +179,25 @@ Selecting an audio clip reveals Gain (-96 to +24 dB), Pan, Fade In, and Fade Out
 validated, undoable, persistent, and used by realtime forward playback and reference export.
 
 Use **Add title** to create a title at the playhead. A selected title exposes text, font family,
-size, horizontal alignment, bold, and italic controls. A selected media clip exposes constant speed
+size, horizontal alignment, bold, and italic controls. `sans-serif`, empty, `Noto Sans`, and
+`NotoSans` (case-insensitive) render through the bundled Noto Sans TTF with pinned HarfBuzz and
+FreeType shaping. Unknown font families fall back to deterministic 5×7 bitmap glyphs. Platform
+fonts are never loaded. A selected media clip exposes constant speed
 from 0.01× through 100× and Reverse. On the timeline, transition regions expose duration handles;
 their menu changes between Cross Dissolve and Dip to Black or removes the transition. These edits
 are ordinary undoable schema-v2 state and use the CPU reference renderer when the GPU path reports
 that frame unsupported.
 
 Adjacent Inspector changes to the same property and clip use one coalescing key so continuous
-spin-box adjustment collapses in undo history. The Effects panel adds supported color, crop, and
-blur nodes. Expand **Effects & animation** to edit typed values, add/remove a keyframe at the
-playhead, select a keyframe, enter exact clip-local time/value, choose Hold/Linear/Bezier, delete it,
-or edit its curve. A curve drag commits once on release; Escape restores its pre-drag value. Moving
-a clip preserves its animation because keyframe times are local to that clip.
+spin-box adjustment collapses in undo history. The Effects panel adds supported color, curves, LUT,
+crop, and blur nodes. Expand **Effects & animation** to edit typed values, add/remove a keyframe at
+the playhead, select a keyframe, enter exact clip-local time/value, choose Hold/Linear/Bezier,
+delete it, or edit its curve. Color Adjustments includes a **Pick white balance** eyedropper that
+samples linear preview pixels and writes temperature/tint. LUT effects store a filesystem `.cube`
+path (not LUT bytes in the project) and expose a **Browse LUT…** control. Curves use
+`x,y;x,y` strings in `[0,1]` per channel (default identity `0,0;1,1`). A curve drag commits once
+on release; Escape restores its pre-drag value. Moving a clip preserves its animation because
+keyframe times are local to that clip.
 
 ## Mix and normalize audio
 

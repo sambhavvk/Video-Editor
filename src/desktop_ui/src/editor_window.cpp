@@ -844,6 +844,10 @@ void EditorWindow::connectControllerSurface() {
           &EditorWindow::effectKeyframeRemoved);
   connect(inspector_, &InspectorWidget::effectKeyframeControlPointsEdited, this,
           &EditorWindow::effectKeyframeControlPointsEdited);
+  connect(inspector_, &InspectorWidget::pickWhiteBalanceRequested, this,
+          &EditorWindow::pickWhiteBalanceRequested);
+  connect(inspector_, &InspectorWidget::effectLutBrowseRequested, this,
+          &EditorWindow::effectLutBrowseRequested);
   connect(inspector_, &InspectorWidget::addTitleRequested, this, &EditorWindow::addTitleRequested);
   connect(timeline_, &TimelineWidget::transitionActivated, this,
           &EditorWindow::transitionActivated);
