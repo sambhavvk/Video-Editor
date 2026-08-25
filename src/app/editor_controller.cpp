@@ -665,22 +665,8 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
         tr("Media cache could not be opened: %1").arg(QString::fromUtf8(exception.what())));
   }
   transcription_network_ = new QNetworkAccessManager(this);
-  if (auto gpu = render::GpuRenderer::create(); gpu != nullptr) {
-    const render::GpuCapabilities capabilities = gpu->capabilities();
-    if (capabilities.available() && capabilities.offscreen_rendering) {
-      gpu_renderer_ = std::shared_ptr<render::GpuRenderer>(std::move(gpu));
-      gpu_timeline_renderer_ =
-          std::make_shared<render::GpuTimelineRenderer>(frame_provider_, gpu_renderer_);
-      window_.programViewer()->setTitle(
-          tr("Program · %1 GPU ready").arg(gpuBackendName(capabilities.backend)));
-    } else {
-      gpu_fallback_latched_ = true;
-      window_.programViewer()->setTitle(tr("Program · CPU"));
-    }
-  } else {
-    gpu_fallback_latched_ = true;
-    window_.programViewer()->setTitle(tr("Program · CPU"));
-  }
+  gpu_fallback_latched_ = false;
+  window_.programViewer()->setTitle(tr("Program · CPU"));
   window_.installEventFilter(this);
   connect(&window_, &desktop_ui::EditorWindow::newProjectRequested, this,
           &EditorController::newProject);
@@ -994,10 +980,15 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
   audio_device_poll_timer_.start();
   refreshAudioDevices();
   refreshTranscriptionState();
+  startGpuInitialization();
   newProject();
 }
 
 EditorController::~EditorController() {
+  ++gpu_init_generation_;
+  if (gpu_init_watcher_.isRunning()) {
+    gpu_init_watcher_.waitForFinished();
+  }
   stopAudioPlayback();
   if (model_download_reply_ != nullptr) {
     model_download_reply_->abort();
@@ -5746,6 +5737,52 @@ void EditorController::syncPreviewCacheIdentity() {
   }
   preview_cache_revision_ = revision;
   preview_cache_generation_ = generation;
+}
+
+void EditorController::startGpuInitialization() {
+  if (gpu_fallback_latched_ || gpu_init_watcher_.isRunning()) {
+    return;
+  }
+  const std::uint64_t generation = ++gpu_init_generation_;
+  connect(&gpu_init_watcher_, &QFutureWatcher<std::shared_ptr<render::GpuRenderer>>::finished, this,
+          [this, generation] {
+            if (generation != gpu_init_generation_) {
+              return;
+            }
+            attachGpuRenderer(gpu_init_watcher_.result());
+          },
+          Qt::UniqueConnection);
+  gpu_init_watcher_.setFuture(QtConcurrent::run([] {
+    auto gpu = render::GpuRenderer::create();
+    return std::shared_ptr<render::GpuRenderer>(std::move(gpu));
+  }));
+}
+
+void EditorController::attachGpuRenderer(std::shared_ptr<render::GpuRenderer> gpu) {
+  if (gpu_fallback_latched_) {
+    return;
+  }
+  if (gpu == nullptr) {
+    gpu_fallback_latched_ = true;
+    gpu_renderer_.reset();
+    gpu_timeline_renderer_.reset();
+    window_.programViewer()->setTitle(tr("Program · CPU"));
+    return;
+  }
+  const render::GpuCapabilities capabilities = gpu->capabilities();
+  if (!capabilities.available() || !capabilities.offscreen_rendering) {
+    gpu_fallback_latched_ = true;
+    gpu_renderer_.reset();
+    gpu_timeline_renderer_.reset();
+    window_.programViewer()->setTitle(tr("Program · CPU"));
+    return;
+  }
+  gpu_renderer_ = std::move(gpu);
+  gpu_timeline_renderer_ =
+      std::make_shared<render::GpuTimelineRenderer>(frame_provider_, gpu_renderer_);
+  window_.programViewer()->setTitle(
+      tr("Program · %1 GPU ready").arg(gpuBackendName(capabilities.backend)));
+  requestPreview();
 }
 
 void EditorController::requestPreview(const PreviewRequestPolicy policy) {

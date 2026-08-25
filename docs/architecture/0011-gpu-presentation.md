@@ -69,10 +69,11 @@ not depend on the GPU.
   within declared tolerances; implementation convenience cannot change edit semantics.
 - D3D11 on Windows and Vulkan on Linux are platform requirements for acceleration, not requirements
   to open, edit, recover, or CPU-export a project.
-- The desktop currently creates the libplacebo device synchronously while constructing its
-  controller. This is functionally correct, but a slow or unhealthy graphics driver can delay the
-  Qt startup thread. Public-beta hardening must move device creation and recreation behind an
-  asynchronous startup service with a bounded wait and immediate CPU-preview availability.
+- The desktop currently creates the libplacebo device on a worker thread after the
+  controller is constructed. CPU preview is available immediately; GPU attaches when
+  the device is ready. A slow or unhealthy graphics driver no longer delays the
+  Qt startup thread. Public-beta hardening still needs a bounded wait diagnostic and
+  native swapchain presentation.
 
 ## Verification
 

@@ -7,6 +7,7 @@
 #include "video_editor/desktop_ui/ui_types.hpp"
 #include "video_editor/edit_model/edit_model.h"
 #include "video_editor/job_service/protocol.h"
+#include "video_editor/render_engine/gpu_backend.h"
 
 #include <QElapsedTimer>
 #include <QFuture>
@@ -56,7 +57,6 @@ class FfmpegFrameProvider;
 namespace video_editor::render {
 class CpuFrame;
 class CpuRenderer;
-class GpuRenderer;
 class GpuTimelineRenderer;
 class RenderCache;
 } // namespace video_editor::render
@@ -393,6 +393,8 @@ private:
   void requestPreview(PreviewRequestPolicy policy = PreviewRequestPolicy::Replace);
   void launchPreviewRequest();
   void syncPreviewCacheIdentity();
+  void startGpuInitialization();
+  void attachGpuRenderer(std::shared_ptr<render::GpuRenderer> gpu);
   [[nodiscard]] bool startAudioMasterPlayback();
   void stopAudioPlayback() noexcept;
   [[nodiscard]] static QImage displayImage(const render::CpuFrame& frame);
@@ -462,6 +464,8 @@ private:
   bool gpu_preview_active_{false};
   bool gpu_fallback_latched_{false};
   bool gpu_status_announced_{false};
+  QFutureWatcher<std::shared_ptr<render::GpuRenderer>> gpu_init_watcher_;
+  std::uint64_t gpu_init_generation_{0};
   bool audio_master_active_{false};
   bool audio_status_announced_{false};
   bool audio_fallback_announced_{false};
