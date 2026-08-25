@@ -184,6 +184,8 @@ public:
                       bool lufsValid = false, bool lufsStale = true);
   void setOutputDevices(const QStringList& ids, const QStringList& names, const QString& selectedId,
                         bool available, const QString& status = {});
+  void setCalibratedLatencyFrames(std::optional<std::uint64_t> frames);
+  void setCalibrationBusy(bool busy);
   void setNormalizationReview(double measuredLufs, double gainDb, double targetLufs);
   void setNormalizationBusy(bool busy);
   void setNormalizationStatus(const QString& status);
@@ -200,6 +202,7 @@ signals:
   void trackEffectParameterEdited(int trackIndex, const QString& effectId,
                                   const QString& parameterId, const QVariant& value);
   void outputDeviceSelected(const QString& deviceId);
+  void calibrateOutputLatencyRequested();
   void normalizationAnalyzeRequested();
   void normalizationApplyRequested();
   void normalizationTargetChanged(double targetLufs);
@@ -217,6 +220,8 @@ private:
   QLabel* master_lufs_{nullptr};
   QLabel* device_status_{nullptr};
   QComboBox* device_selector_{nullptr};
+  QPushButton* calibrate_latency_{nullptr};
+  QLabel* calibrated_latency_label_{nullptr};
   QLabel* normalization_status_{nullptr};
   QPushButton* normalization_analyze_{nullptr};
   QPushButton* normalization_apply_{nullptr};

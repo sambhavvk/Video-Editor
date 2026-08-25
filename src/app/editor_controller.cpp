@@ -178,6 +178,32 @@ constexpr qint64 kUiTimescale = 48'000;
 constexpr std::size_t kPreviewCacheBytes = 256U * 1024U * 1024U;
 constexpr qint64 kModelNetworkReadBufferBytes = 1'048'576;
 
+[[nodiscard]] QString audioCalibratedLatencySettingsKey(const QString& deviceId) {
+  return QStringLiteral("audio/calibratedLatencyFrames/") +
+         (deviceId.isEmpty() ? QStringLiteral("__system_default__") : deviceId);
+}
+
+[[nodiscard]] std::optional<std::uint64_t> loadCalibratedLatencyFrames(const QString& deviceId) {
+  QSettings settings;
+  const QVariant value = settings.value(audioCalibratedLatencySettingsKey(deviceId));
+  if (!value.isValid()) {
+    return std::nullopt;
+  }
+  bool ok = false;
+  const qulonglong frames = value.toULongLong(&ok);
+  if (!ok || frames == 0U) {
+    return std::nullopt;
+  }
+  return static_cast<std::uint64_t>(frames);
+}
+
+void storeCalibratedLatencyFrames(const QString& deviceId, const std::uint64_t frames) {
+  QSettings settings;
+  settings.setValue(audioCalibratedLatencySettingsKey(deviceId),
+                    QVariant::fromValue<qulonglong>(frames));
+  settings.sync();
+}
+
 [[nodiscard]] qint64 modelReplyContentLength(const QNetworkReply& reply) {
   bool valid = false;
   const qint64 value = reply.header(QNetworkRequest::ContentLengthHeader).toLongLong(&valid);
@@ -969,6 +995,8 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::applyLoudnessNormalization);
   connect(window_.audioMixer(), &desktop_ui::AudioMixerWidget::outputDeviceSelected, this,
           &EditorController::selectAudioOutputDevice);
+  connect(window_.audioMixer(), &desktop_ui::AudioMixerWidget::calibrateOutputLatencyRequested, this,
+          &EditorController::calibrateOutputLatency);
   connect(window_.audioMixer(), &desktop_ui::AudioMixerWidget::normalizationTargetChanged, this,
           &EditorController::setNormalizationTarget);
   connect(window_.timeline(), &desktop_ui::TimelineWidget::clipActivated, this,
@@ -1073,6 +1101,22 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::captionAnalysisFinished);
   connect(&model_verification_watcher_, &QFutureWatcher<ModelVerificationOutcome>::finished, this,
           &EditorController::modelVerificationFinished);
+  connect(&latency_calibration_watcher_,
+          &QFutureWatcher<std::optional<std::uint64_t>>::finished, this, [this] {
+            window_.audioMixer()->setCalibrationBusy(false);
+            const std::optional<std::uint64_t> measured = latency_calibration_watcher_.result();
+            if (!measured.has_value()) {
+              window_.showTransientMessage(
+                  tr("Could not measure output latency for the selected device."), 8'000);
+              return;
+            }
+            storeCalibratedLatencyFrames(selected_audio_device_id_, *measured);
+            selected_device_calibrated_latency_frames_ = measured;
+            refreshCalibratedLatencyPresentation();
+            window_.showTransientMessage(
+                tr("Output latency calibration saved; it applies on the next playback start."),
+                8'000);
+          });
   connect(
       &audio_devices_watcher_, &QFutureWatcher<std::vector<audio::AudioDeviceInfo>>::finished, this,
       [this] {
@@ -1141,6 +1185,9 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
   QSettings audioSettings;
   selected_audio_device_id_ =
       audioSettings.value(QStringLiteral("audio/outputDeviceId")).toString();
+  selected_device_calibrated_latency_frames_ =
+      loadCalibratedLatencyFrames(selected_audio_device_id_);
+  refreshCalibratedLatencyPresentation();
   normalization_target_lufs_ = std::clamp(
       audioSettings.value(QStringLiteral("audio/normalizationTargetLufs"), -14.0).toDouble(), -24.0,
       -9.0);
@@ -5243,11 +5290,41 @@ void EditorController::applyLoudnessNormalization() {
 
 void EditorController::selectAudioOutputDevice(const QString& deviceId) {
   selected_audio_device_id_ = deviceId;
+  selected_device_calibrated_latency_frames_ = loadCalibratedLatencyFrames(deviceId);
+  refreshCalibratedLatencyPresentation();
   audio_recovery_pending_ = false;
   QSettings settings;
   settings.setValue(QStringLiteral("audio/outputDeviceId"), deviceId);
   settings.sync();
   window_.showTransientMessage(tr("Audio output changes apply on the next playback start."));
+}
+
+void EditorController::calibrateOutputLatency() {
+  if (latency_calibration_watcher_.isRunning()) {
+    return;
+  }
+  if (!audio::MiniaudioOutputDevice::available()) {
+    window_.showTransientMessage(tr("The realtime audio backend is unavailable in this build."),
+                                   8'000);
+    return;
+  }
+  if (playback_rate_ != 0.0 || audio_playback_ != nullptr) {
+    window_.showTransientMessage(tr("Stop playback before calibrating output latency."), 8'000);
+    return;
+  }
+  const QString deviceId = selected_audio_device_id_;
+  window_.audioMixer()->setCalibrationBusy(true);
+  latency_calibration_future_ = QtConcurrent::run([deviceId] {
+    audio::MiniaudioOutputDevice device;
+    return audio::measure_output_latency_frames(
+        device, {.device_id = deviceId.toStdString(), .timeout = std::chrono::milliseconds(2'000)});
+  });
+  latency_calibration_watcher_.setFuture(latency_calibration_future_);
+  SessionEventLog::instance().log_backend("calibrateOutputLatency", "start");
+}
+
+void EditorController::refreshCalibratedLatencyPresentation() {
+  window_.audioMixer()->setCalibratedLatencyFrames(selected_device_calibrated_latency_frames_);
 }
 
 void EditorController::setNormalizationTarget(const double targetLufs) {
@@ -6288,6 +6365,7 @@ bool EditorController::startAudioMasterPlayback() {
         .prefill_frames = 48'000,
         .prefill_timeout = std::chrono::milliseconds(2'000),
         .device_id = selected_audio_device_id_.toStdString(),
+        .calibrated_latency_frames = selected_device_calibrated_latency_frames_,
     };
     auto candidate = std::make_unique<audio::AsyncRealtimeAudioPlayback>(
         std::move(provider), configuration, std::make_unique<audio::MiniaudioOutputDevice>());

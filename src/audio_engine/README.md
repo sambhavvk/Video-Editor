@@ -33,12 +33,15 @@ is explicitly **not** the video/audible clock.
 The canonical `sample_counter()` is a conservative playback position. It
 subtracts the greater of the current callback period and the backend's
 callback-safe output-latency estimate from the submitted position, clamped at
-the current seek origin. `PlaybackDiagnostics` publishes both positions,
+the current seek origin. When a per-device calibration is supplied,
+`sample_counter()` subtracts that measured offset instead and
+`clock_is_estimated` is false; `clock_uncertainty_frames` is the residual
+between the live buffer estimate and the calibration (never zero). Without
+calibration, `PlaybackDiagnostics` publishes both positions,
 `estimated_output_latency_frames`, and an equal `clock_uncertainty_frames` with
 `clock_is_estimated = true`. This prevents video from following the unplayed end
-of a newly submitted buffer. There is no hardware timestamp interpolation or
-calibration yet, so this is not evidence for the beta's less-than-10-ms A/V
-gate. `clock_seconds()` is diagnostic convenience only. Paused callbacks return
+of a newly submitted buffer. Calibration is not evidence for the beta's
+less-than-10-ms A/V lab gate. `clock_seconds()` is diagnostic convenience only. Paused callbacks return
 silence without advancing either position.
 
 `pause()`, `seek()`, and `stop()` first make playback non-playing, then rely on

@@ -255,9 +255,9 @@ or the device later stops, the application reports the reason and continues with
 timer-driven video. J/K/L shuttle at 0.5×, 2×, 4×, and 8× (including reverse) stays audible when
 the output device is available; audio is resampled, not pitch-preserved. An underrun inserts silence while
 the master counter continues and reports a local warning; this prevents a backwards clock jump but
-does not make the present build a calibrated A/V-sync reference. Accelerated one-hour zero-xrun and
-two-hour less-than-one-frame drift simulations pass, but the stricter 10 ms requirement,
-physical-device latency calibration, and the supported hardware/OS matrix still gate beta.
+does not make the present build a release-grade A/V-sync reference. Accelerated one-hour zero-xrun and
+two-hour less-than-one-frame drift simulations pass, but the stricter 10 ms requirement and the
+one-hour/two-hour physical-device lab protocol still gate beta even after per-device calibration.
 
 If a development build has no sound at forward 1×, check its CMake configure output first. The
 phrase `miniaudio adapter unavailable; manual callback fallback enabled` means that executable has

@@ -176,6 +176,11 @@ Work through the [user guide](docs/user-guide.md). Useful Linux-beta checks:
 5. Run **Analyze** loudness, then apply or cancel.
 6. Export a short FOSS VP9/Opus WebM from Deliver.
 
+For release-style audio sync validation (not required for casual smoke testing), see the
+[physical-device A/V lab protocol](docs/quality/testing-and-release-gates.md#physical-device-av-lab-protocol)
+in the quality gates doc: one hour zero xruns, two hours drift below 10 ms, with per-device
+calibration saved from the Audio Mixer.
+
 After a session, glance at the newest file in
 `~/.local/share/VideoEditor/VideoEditor/logs/` and confirm it has `SESSION start` and, if you quit
 normally, `SHUTDOWN clean`.

@@ -11,6 +11,7 @@ add_library(video_editor_audio_engine
   src/dsp.cpp
   src/loudness_meter.cpp
   src/miniaudio_output_device.cpp
+  src/output_latency_calibration.cpp
   src/playback_meter.cpp
   src/realtime_playback.cpp
   src/spsc_audio_ring.cpp)

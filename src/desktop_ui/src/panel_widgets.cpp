@@ -1150,12 +1150,23 @@ AudioMixerWidget::AudioMixerWidget(QWidget* parent) : QWidget(parent) {
   device_status_->setObjectName(QStringLiteral("audioDeviceStatus"));
   device_status_->setProperty("muted", true);
   deviceRow->addWidget(device_status_);
+  calibrate_latency_ = new QPushButton(tr("Calibrate"), this);
+  calibrate_latency_->setObjectName(QStringLiteral("audioOutputCalibrate"));
+  calibrate_latency_->setAccessibleName(tr("Calibrate output latency"));
+  deviceRow->addWidget(calibrate_latency_);
+  calibrated_latency_label_ = new QLabel(this);
+  calibrated_latency_label_->setObjectName(QStringLiteral("audioCalibratedLatency"));
+  calibrated_latency_label_->setProperty("muted", true);
+  calibrated_latency_label_->hide();
+  deviceRow->addWidget(calibrated_latency_label_);
   layout->addLayout(deviceRow);
   connect(device_selector_, &QComboBox::currentIndexChanged, this, [this](int index) {
     if (index >= 0) {
       emit outputDeviceSelected(device_selector_->itemData(index).toString());
     }
   });
+  connect(calibrate_latency_, &QPushButton::clicked, this,
+          &AudioMixerWidget::calibrateOutputLatencyRequested);
 
   auto* normalize = new QGroupBox(tr("Loudness normalization"), this);
   normalize->setObjectName(QStringLiteral("loudnessNormalization"));
@@ -1670,6 +1681,30 @@ void AudioMixerWidget::setOutputDevices(const QStringList& ids, const QStringLis
   device_selector_->setEnabled(available && device_selector_->count() > 0);
   device_status_->setText(status.isEmpty() ? (available ? tr("Ready") : tr("Unavailable"))
                                            : status);
+  if (calibrate_latency_ != nullptr) {
+    calibrate_latency_->setEnabled(available && device_selector_->count() > 0);
+  }
+}
+
+void AudioMixerWidget::setCalibratedLatencyFrames(const std::optional<std::uint64_t> frames) {
+  if (calibrated_latency_label_ == nullptr) {
+    return;
+  }
+  if (!frames.has_value()) {
+    calibrated_latency_label_->hide();
+    calibrated_latency_label_->clear();
+    return;
+  }
+  calibrated_latency_label_->setText(
+      tr("Calibrated: %1 frames").arg(QString::number(*frames)));
+  calibrated_latency_label_->show();
+}
+
+void AudioMixerWidget::setCalibrationBusy(const bool busy) {
+  if (calibrate_latency_ != nullptr) {
+    calibrate_latency_->setEnabled(!busy && device_selector_ != nullptr &&
+                                   device_selector_->isEnabled());
+  }
 }
 
 void AudioMixerWidget::setNormalizationReview(const double measuredLufs, const double gainDb,

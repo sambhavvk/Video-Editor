@@ -74,6 +74,9 @@ struct RealtimePlaybackConfiguration final {
   std::chrono::milliseconds prefill_timeout{2'000};
   // Stable opaque output-device identifier. Empty selects the backend default.
   std::string device_id;
+  // Per-device measured output latency from QSettings calibration. When set, the
+  // master clock subtracts this value instead of the live backend estimate.
+  std::optional<std::uint64_t> calibrated_latency_frames{};
 };
 
 enum class PlaybackState : std::uint8_t {

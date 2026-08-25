@@ -572,6 +572,41 @@ TEST(RealtimeAudioPlayback, DeviceFramesDriveTheExactFortyEightKilohertzMasterCl
   EXPECT_FALSE(fake->is_open());
 }
 
+TEST(RealtimeAudioPlayback, CalibratedLatencyFramesDriveTheMasterClockWithReducedUncertainty) {
+  auto provider = std::make_shared<DeterministicPlaybackProvider>();
+  auto device = std::make_unique<FakeAudioDevice>();
+  FakeAudioDevice* const fake = device.get();
+  RealtimeAudioPlayback playback(
+      provider,
+      {.ring_capacity_frames = 1'920,
+       .render_block_frames = 480,
+       .prefill_frames = 960,
+       .prefill_timeout = std::chrono::seconds(1),
+       .device_id = {},
+       .calibrated_latency_frames = 960U},
+      std::move(device));
+
+  ASSERT_TRUE(playback.start(48'001));
+  EXPECT_EQ(playback.sample_counter(), 48'001);
+
+  std::array<float, 960> first{};
+  ASSERT_TRUE(fake->pump(first));
+  EXPECT_EQ(playback.submitted_sample_counter(), 48'481);
+  EXPECT_EQ(playback.sample_counter(), 48'001);
+
+  std::array<float, 960> second{};
+  ASSERT_TRUE(fake->pump(second));
+  EXPECT_EQ(playback.submitted_sample_counter(), 48'961);
+  EXPECT_EQ(playback.sample_counter(), 48'001);
+
+  const PlaybackDiagnostics diagnostics = playback.diagnostics();
+  EXPECT_FALSE(diagnostics.clock_is_estimated);
+  EXPECT_EQ(diagnostics.estimated_output_latency_frames, 480U);
+  EXPECT_LT(diagnostics.clock_uncertainty_frames, 960U);
+  EXPECT_EQ(diagnostics.clock_uncertainty_frames, 240U);
+  playback.stop();
+}
+
 TEST(RealtimeAudioPlayback, PublicManualCallbackCannotBecomeASecondPhysicalDeviceConsumer) {
   auto provider = std::make_shared<DeterministicPlaybackProvider>();
   auto device = std::make_unique<FakeAudioDevice>();

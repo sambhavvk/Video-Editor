@@ -162,7 +162,8 @@ passed to miniaudio when playback opens. When miniaudio is absent or a device/pr
 controller reports the limitation and uses silent timer-driven video. Reverse and non-1× shuttle
 rates of 0.5×, 2×, 4×, and 8× keep audio as master when the device is available. The desktop polls devices off the UI thread, pauses on selected/default loss, and retries a
 returned endpoint only after serialized stop settles while playback remains intended. Native OS
-notifications and calibrated hardware timestamps remain outside the current wiring.
+notifications remain outside the current wiring. Per-device output latency may be calibrated into
+QSettings; the 10 ms physical A/V gate is still a lab requirement.
 
 ## Further reading
 

@@ -90,7 +90,8 @@ The repository currently includes tests for:
   start/seek/pause Qt signal calls to return within 250 ms, selected/system-default startup,
   selected/default loss-return recovery, delayed stop, canceled recovery, stale normalization
   generations, and an opt-in 48 kHz physical-device smoke check with zero xruns. Accelerated one-hour
-  zero-xrun and two-hour drift simulations are available through `VE_RUN_LONG_TESTS=1`;
+  zero-xrun and two-hour drift simulations are available through `VE_RUN_LONG_TESTS=1`; they do not
+  satisfy the physical 10 ms / one-hour / two-hour gates (see lab protocol below).
 - Protobuf framing/protocol compatibility and cancellation registry, plus worker probe/proxy and
   typed transcription-v2 request/range validation, monotonic events, streaming model byte ceilings,
   digest cancellation and atomic-replacement failures, exact FFmpeg source-window seek and
@@ -116,6 +117,20 @@ The repository currently includes tests for:
   during desktop proxy generation are ordinary local tests.
 
 Always use `ctest -N` for the count in the current build; the number changes as beta work lands.
+
+## Physical-device A/V lab protocol
+
+Before claiming Linux public-beta audio sync, run on a real output device with per-device calibration
+saved from the Audio Mixer **Calibrate** control (QSettings key
+`audio/calibratedLatencyFrames/<deviceId>`, or `audio/calibratedLatencyFrames/__system_default__`
+for System default):
+
+1. One hour of continuous 1× playback with zero audio xruns on the target Linux device.
+2. Two hours of 1× playback with A/V drift versus program video remaining below 10 ms.
+
+These runs require calibrated latency and real hardware. Accelerated fake-device tests and CI jobs do
+not satisfy them. Residual clock uncertainty after calibration is expected and must not be reported
+as zero.
 
 ## Corpus status
 
@@ -162,10 +177,12 @@ supported matrix. Windows Intel/AMD/NVIDIA D3D11, signed MSI, and Windows Instal
 - accessibility review, beginner study, security review, dependency notices/source offers, and
   codec/patent review are complete.
 
-The current application does not meet these gates because physical-device xrun/drift and latency
-calibration, native event-driven hot-plug validation, non-1× realtime audio, native GPU
-presentation/effect-color parity, H.264/AAC approval, physical multilingual/Vulkan transcription,
-worker fault injection, corpus, and production Flatpak paths are incomplete. See the
+The current application does not meet these gates because physical-device xrun/drift endurance on
+the supported matrix, native event-driven hot-plug validation, non-1× realtime audio, approved
+H.264/AAC export, physical multilingual/Vulkan transcription, worker fault injection, corpus, and
+production Flatpak paths are incomplete. An engineering per-device latency calibration path now
+exists in QSettings and the Audio Mixer; the 10 ms / one-hour / two-hour lab protocol above still
+must pass on real hardware before beta. See the
 [feature-status matrix](../beta-feature-status.md).
 
 ## Packaging gates

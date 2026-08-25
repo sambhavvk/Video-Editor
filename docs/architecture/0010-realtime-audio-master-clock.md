@@ -28,11 +28,15 @@ underrun, device absence, and revision changes.
   for diagnostics, but is not an audible clock. The canonical playback master clock subtracts a
   conservative estimated device/output-buffer latency from that submitted position, clamps at the seek
   origin, and
-  exposes the remaining latency as `clock_uncertainty_frames`. Video derives requested timeline time
-  from this conservative position; a UI elapsed timer must not independently advance the playhead.
+  exposes the remaining latency as `clock_uncertainty_frames`. When a per-device calibration exists in
+  QSettings, the subtracted term uses that measured offset instead of the live backend estimate;
+  uncertainty becomes the residual between estimate and calibration (never zero). Video derives
+  requested timeline time from this conservative position; a UI elapsed timer must not independently
+  advance the playhead.
 - Pause stops clock advancement without changing its absolute position. Resume continues from that
-  sample after the ring is ready. Latency is an estimate, not hardware timestamp calibration, so the
-  reported playhead deliberately carries explicit uncertainty until platform calibration exists.
+  sample after the ring is ready. Without calibration, latency is an estimate rather than a hardware
+  timestamp, so the reported playhead deliberately carries explicit uncertainty. Calibration reduces
+  but does not eliminate that uncertainty.
 - Seek is a generation boundary: stop device and worker, increment the request epoch, reset ring and
   producer/consumer cursors, set the absolute sample counter, prefill, then restart only if transport
   was playing. Blocks from older epochs cannot enter the new ring.
@@ -87,7 +91,9 @@ receipts and versions, holds timer-driven video during pending start/seek, polls
 its precise timer, and adopts the audio master only after successful completion. Stop is enqueued on
 edits and project replacement. Callback-thread constraints do not change.
 
-Public beta additionally requires real-device latency measurement/calibration, a one-hour zero-xrun
-run, and two-hour A/V drift below 10 ms on the supported Windows and Linux matrix. Reverse/non-1×
+Public beta additionally requires real-device latency calibration evidence, a one-hour zero-xrun
+run, and two-hour A/V drift below 10 ms on the supported Windows and Linux matrix. The desktop now
+stores a measured per-device latency offset in QSettings and applies it on playback start; the 10 ms,
+one-hour, and two-hour gates remain physical lab requirements, not CI fake-device claims. Reverse/non-1×
 audible transport and adaptive buffer policy also remain product work; the connected desktop path
 is not yet a release-grade audible-preview claim.

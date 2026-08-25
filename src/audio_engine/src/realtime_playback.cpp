@@ -493,13 +493,34 @@ public:
     return std::max(current_buffer, backend);
   }
 
+  [[nodiscard]] std::uint64_t subtracted_latency_frames(
+      const std::uint64_t submitted_delta) const noexcept {
+    if (configuration.calibrated_latency_frames.has_value()) {
+      return std::min(*configuration.calibrated_latency_frames, submitted_delta);
+    }
+    return std::min(estimated_output_latency_frames(), submitted_delta);
+  }
+
+  [[nodiscard]] std::uint64_t clock_uncertainty_frames() const noexcept {
+    const std::uint64_t effective = estimated_output_latency_frames();
+    if (!configuration.calibrated_latency_frames.has_value()) {
+      return effective;
+    }
+    const std::uint64_t calibrated = *configuration.calibrated_latency_frames;
+    if (effective > calibrated) {
+      return effective - calibrated;
+    }
+    const std::uint64_t last_buffer =
+        last_submitted_buffer_frames.load(std::memory_order_acquire);
+    return std::max<std::uint64_t>(last_buffer / 2U, 1U);
+  }
+
   [[nodiscard]] std::int64_t playback_position_sample() const noexcept {
     const std::int64_t origin = playback_origin_sample.load(std::memory_order_acquire);
     const std::int64_t submitted = submitted_sample_counter.load(std::memory_order_acquire);
     const std::uint64_t submitted_delta =
         submitted > origin ? static_cast<std::uint64_t>(submitted - origin) : 0U;
-    const std::uint64_t latency = std::min(estimated_output_latency_frames(), submitted_delta);
-    return submitted - static_cast<std::int64_t>(latency);
+    return submitted - static_cast<std::int64_t>(subtracted_latency_frames(submitted_delta));
   }
 
   void stop() noexcept {
@@ -581,14 +602,15 @@ public:
   [[nodiscard]] PlaybackDiagnostics diagnostics() const {
     const std::int64_t playback_position = playback_position_sample();
     const std::uint64_t latency = estimated_output_latency_frames();
+    const bool calibrated = configuration.calibrated_latency_frames.has_value();
     PlaybackDiagnostics result{
         .state = state.load(std::memory_order_acquire),
         .playback_position_sample = playback_position,
         .sample_counter = playback_position,
         .submitted_sample_counter = submitted_sample_counter.load(std::memory_order_acquire),
         .estimated_output_latency_frames = latency,
-        .clock_uncertainty_frames = latency,
-        .clock_is_estimated = true,
+        .clock_uncertainty_frames = clock_uncertainty_frames(),
+        .clock_is_estimated = !calibrated,
         .epoch = epoch.load(std::memory_order_acquire),
         .callback_count = callback_count.load(std::memory_order_relaxed),
         .pre_rendered_frames = pre_rendered_frames.load(std::memory_order_relaxed),

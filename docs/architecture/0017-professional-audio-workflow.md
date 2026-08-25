@@ -65,8 +65,9 @@ the device callback.
 The same track controls and processing are heard in realtime pre-render and deterministic export,
 and loudness adjustment remains a visible ordinary edit. The device callback still performs no
 allocation, locking, decoding, filesystem access, Qt work, libebur128 analysis, or stateful DSP.
-Arbitrary buses, time-stretch, native event-driven hot-plug notification, calibrated hardware
-timestamps, and the supported physical-device endurance matrix remain explicit follow-up work.
+Arbitrary buses, time-stretch, native event-driven hot-plug notification, and the supported
+physical-device endurance matrix remain explicit follow-up work. Per-device output latency
+calibration is stored in QSettings and applied on playback start; residual uncertainty remains.
 
 ## Required verification
 

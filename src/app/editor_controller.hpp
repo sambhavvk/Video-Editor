@@ -255,6 +255,7 @@ private slots:
   void analyzeLoudnessNormalization();
   void applyLoudnessNormalization();
   void selectAudioOutputDevice(const QString& deviceId);
+  void calibrateOutputLatency();
   void setNormalizationTarget(double targetLufs);
   void chooseVideoExport(const QString& presetId);
 
@@ -431,6 +432,7 @@ private:
   void setDirty(bool dirty);
   void showError(const QString& title, const QString& message);
   void refreshAudioDevices();
+  void refreshCalibratedLatencyPresentation();
 
   desktop_ui::EditorWindow& window_;
   std::unique_ptr<edit::TimelineEditor> editor_;
@@ -521,7 +523,10 @@ private:
   QFuture<std::vector<audio::AudioDeviceInfo>> audio_devices_future_;
   QFutureWatcher<NormalizationReview> normalization_watcher_;
   QFutureWatcher<std::vector<audio::AudioDeviceInfo>> audio_devices_watcher_;
+  QFuture<std::optional<std::uint64_t>> latency_calibration_future_;
+  QFutureWatcher<std::optional<std::uint64_t>> latency_calibration_watcher_;
   QString selected_audio_device_id_;
+  std::optional<std::uint64_t> selected_device_calibrated_latency_frames_;
   double normalization_target_lufs_{-14.0};
   std::vector<audio::AudioDeviceInfo> known_audio_devices_;
   QTimer audio_device_poll_timer_;
