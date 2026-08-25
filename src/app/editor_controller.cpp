@@ -411,6 +411,26 @@ QString gpuBackendName(const render::GpuBackendKind backend) {
   }
 }
 
+[[nodiscard]] bool isUnityPlaybackRate(const double rate) noexcept {
+  return std::abs(rate - 1.0) < 1.0e-9;
+}
+
+[[nodiscard]] bool isSupportedShuttleAudioRate(const double rate) noexcept {
+  const double magnitude = std::abs(rate);
+  return std::abs(magnitude - 0.5) < 1.0e-9 || std::abs(magnitude - 1.0) < 1.0e-9 ||
+         std::abs(magnitude - 2.0) < 1.0e-9 || std::abs(magnitude - 4.0) < 1.0e-9 ||
+         std::abs(magnitude - 8.0) < 1.0e-9;
+}
+
+[[nodiscard]] qint64 timelinePlayheadFromAudioClock(const std::int64_t sample_counter,
+                                                    const std::int64_t origin, const double rate,
+                                                    const qint64 end) noexcept {
+  const double offset =
+      static_cast<double>(sample_counter - origin) * rate;
+  const auto mapped = origin + static_cast<qint64>(std::llround(offset));
+  return std::clamp(mapped, qint64{0}, end);
+}
+
 bool isKnownPlatformPreset(const int value) noexcept {
   return value >= static_cast<int>(export_service::PlatformPreset::ReferenceFfv1) &&
          value <= static_cast<int>(export_service::PlatformPreset::PodcastAudioOnly);
@@ -603,13 +623,32 @@ private:
 class TimelinePlaybackAudioProvider final : public audio::PlaybackAudioProvider {
 public:
   TimelinePlaybackAudioProvider(std::shared_ptr<audio_render::TimelineAudioRenderer> renderer,
-                                edit::TimelineSnapshot snapshot, const std::int64_t endSample)
-      : renderer_(std::move(renderer)), snapshot_(std::move(snapshot)), end_sample_(endSample) {}
+                                edit::TimelineSnapshot snapshot, const std::int64_t endSample,
+                                const double transport_rate, const std::int64_t origin_sample)
+      : renderer_(std::move(renderer)), snapshot_(std::move(snapshot)), end_sample_(endSample),
+        transport_rate_(transport_rate), origin_sample_(origin_sample) {}
 
   audio::PlaybackRenderResult render(const audio::PlaybackRenderRequest& request) override {
     if (request.cancellation.stop_requested()) {
       return audio::PlaybackRenderResult::cancelled("audio pre-render request was cancelled");
     }
+    if (request.sample_count == 0U) {
+      return audio::PlaybackRenderResult::failure("audio pre-render requested an empty block");
+    }
+    if (isUnityPlaybackRate(transport_rate_)) {
+      return renderUnity(request);
+    }
+    return renderShuttle(request);
+  }
+
+private:
+  [[nodiscard]] std::int64_t timelineSample(const std::int64_t engine_sample) const noexcept {
+    const double offset =
+        static_cast<double>(engine_sample - origin_sample_) * transport_rate_;
+    return origin_sample_ + static_cast<std::int64_t>(std::floor(offset));
+  }
+
+  audio::PlaybackRenderResult renderUnity(const audio::PlaybackRenderRequest& request) {
     if (request.start_sample >= end_sample_) {
       return audio::PlaybackRenderResult::end_of_stream();
     }
@@ -634,10 +673,61 @@ public:
     return audio::PlaybackRenderResult::ready(std::move(block));
   }
 
-private:
+  audio::PlaybackRenderResult renderShuttle(const audio::PlaybackRenderRequest& request) {
+    const std::int64_t first = timelineSample(request.start_sample);
+    const std::int64_t last =
+        timelineSample(request.start_sample + static_cast<std::int64_t>(request.sample_count) - 1);
+    if ((transport_rate_ > 0.0 && first >= end_sample_) ||
+        (transport_rate_ < 0.0 && last < 0)) {
+      return audio::PlaybackRenderResult::end_of_stream();
+    }
+    const std::int64_t min_sample = std::min(first, last);
+    const std::int64_t max_sample = std::max(first, last);
+    const std::int64_t render_start = std::max<std::int64_t>(min_sample, 0);
+    const std::int64_t render_end = std::min(max_sample + 1, end_sample_);
+    audio::AudioBlock output(audio::kPlaybackAudioFormat, request.start_sample,
+                             request.sample_count);
+    output.clear();
+    if (render_end <= render_start) {
+      return audio::PlaybackRenderResult::ready(std::move(output));
+    }
+    auto rendered = renderer_->render(
+        snapshot_, {.start_sample = render_start,
+                    .sample_count = static_cast<std::size_t>(render_end - render_start),
+                    .cancellation = request.cancellation});
+    if (!rendered) {
+      const auto& error = rendered.error();
+      if (error.code == audio_render::AudioRenderErrorCode::Cancelled) {
+        return audio::PlaybackRenderResult::cancelled(error.message);
+      }
+      return audio::PlaybackRenderResult::failure(error.message);
+    }
+    const audio::AudioBlock source = std::move(rendered).value();
+    if (source.start_sample() != render_start ||
+        source.frame_count() != static_cast<std::size_t>(render_end - render_start) ||
+        source.format().channels != audio::kPlaybackAudioFormat.channels) {
+      return audio::PlaybackRenderResult::failure(
+          "timeline audio renderer returned a block outside the requested 48 kHz stereo range");
+    }
+    for (std::size_t frame = 0; frame < request.sample_count; ++frame) {
+      const std::int64_t timeline =
+          timelineSample(request.start_sample + static_cast<std::int64_t>(frame));
+      if (timeline < render_start || timeline >= render_end) {
+        continue;
+      }
+      const std::size_t source_frame = static_cast<std::size_t>(timeline - render_start);
+      for (std::uint32_t channel = 0; channel < audio::kPlaybackAudioFormat.channels; ++channel) {
+        output.channel(channel)[frame] = source.channel(channel)[source_frame];
+      }
+    }
+    return audio::PlaybackRenderResult::ready(std::move(output));
+  }
+
   std::shared_ptr<audio_render::TimelineAudioRenderer> renderer_;
   edit::TimelineSnapshot snapshot_;
   std::int64_t end_sample_{0};
+  double transport_rate_{1.0};
+  std::int64_t origin_sample_{0};
 };
 
 } // namespace
@@ -924,10 +1014,10 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
         }
         known_audio_devices_ = devices;
         if ((transition.selected_recovered || transition.default_recovered) &&
-            playback_rate_ > 0.0) {
+            playback_rate_ != 0.0) {
           audio_recovery_pending_ = true;
         }
-        if (audio_recovery_pending_ && playback_rate_ > 0.0 && !selectedLost && !defaultLost) {
+        if (audio_recovery_pending_ && playback_rate_ != 0.0 && !selectedLost && !defaultLost) {
           if (audio_playback_ != nullptr) {
             const auto diagnostics = audio_playback_->diagnostics();
             if (diagnostics.requested_state == audio::PlaybackState::Stopped &&
@@ -1042,7 +1132,11 @@ EditorController::~EditorController() {
 }
 
 std::int64_t EditorController::audioMasterSampleCounter() const noexcept {
-  return audio_playback_ != nullptr ? audio_playback_->sample_counter() : playhead_;
+  if (audio_playback_ == nullptr) {
+    return playhead_;
+  }
+  return timelinePlayheadFromAudioClock(audio_playback_->sample_counter(), audio_clock_origin_,
+                                        audio_transport_rate_, std::numeric_limits<qint64>::max());
 }
 
 std::uint64_t EditorController::audioXrunCount() const {
@@ -2453,23 +2547,31 @@ void EditorController::seek(const qint64 position) {
   playhead_ = toUiTime(timelineTime(std::max<qint64>(position, 0)));
   if (audio_playback_ != nullptr && !audio_session_stale_ &&
       audio_playback_->requested_state() != audio::PlaybackState::Stopped) {
-    const audio::PlaybackCommandReceipt receipt = audio_playback_->request_seek(playhead_);
-    if (receipt.accepted) {
-      audio_control_intent_ = AudioControlIntent::Seek;
-      audio_command_version_ = receipt.version;
-      audio_master_active_ = false;
-      playback_timer_.start();
-    } else {
-      const QString failure = receipt.error.has_value()
-                                  ? QString::fromStdString(receipt.error->message)
-                                  : tr("the audio control queue rejected the seek");
+    if (!isUnityPlaybackRate(audio_transport_rate_)) {
       stopAudioPlayback();
-      playback_clock_.restart();
-      if (!audio_fallback_announced_) {
-        audio_fallback_announced_ = true;
-        window_.showTransientMessage(
-            tr("Audio device seek failed; continuing with silent timer playback: %1").arg(failure),
-            8'000);
+      if (std::abs(playback_rate_) > std::numeric_limits<double>::epsilon() &&
+          startAudioMasterPlayback()) {
+        playback_timer_.start();
+      }
+    } else {
+      const audio::PlaybackCommandReceipt receipt = audio_playback_->request_seek(playhead_);
+      if (receipt.accepted) {
+        audio_control_intent_ = AudioControlIntent::Seek;
+        audio_command_version_ = receipt.version;
+        audio_master_active_ = false;
+        playback_timer_.start();
+      } else {
+        const QString failure = receipt.error.has_value()
+                                    ? QString::fromStdString(receipt.error->message)
+                                    : tr("the audio control queue rejected the seek");
+        stopAudioPlayback();
+        playback_clock_.restart();
+        if (!audio_fallback_announced_) {
+          audio_fallback_announced_ = true;
+          window_.showTransientMessage(
+              tr("Audio device seek failed; continuing with silent timer playback: %1").arg(failure),
+              8'000);
+        }
       }
     }
   }
@@ -2501,8 +2603,11 @@ void EditorController::setPlaybackRate(const double rate) {
     return;
   }
 
-  if (std::abs(playback_rate_ - 1.0) < std::numeric_limits<double>::epsilon()) {
-    if (audio_playback_ != nullptr && !audio_session_stale_) {
+  if (isSupportedShuttleAudioRate(playback_rate_)) {
+    const bool rate_matches_session =
+        audio_playback_ != nullptr && !audio_session_stale_ &&
+        std::abs(audio_transport_rate_ - playback_rate_) < 1.0e-9;
+    if (rate_matches_session) {
       const audio::AsyncPlaybackDiagnostics diagnostics = audio_playback_->diagnostics();
       if (diagnostics.requested_state == audio::PlaybackState::Paused ||
           diagnostics.effective_state == audio::PlaybackState::Paused) {
@@ -2521,6 +2626,13 @@ void EditorController::setPlaybackRate(const double rate) {
         playback_timer_.start();
         return;
       }
+    } else if (audio_playback_ != nullptr) {
+      playhead_ = timelinePlayheadFromAudioClock(audio_playback_->sample_counter(),
+                                                audio_clock_origin_, audio_transport_rate_,
+                                                std::numeric_limits<qint64>::max());
+      window_.timeline()->setPlayhead(timelineValue(playheadTime()));
+      requestPreview();
+      stopAudioPlayback();
     }
     if (startAudioMasterPlayback()) {
       playback_timer_.start();
@@ -2528,15 +2640,14 @@ void EditorController::setPlaybackRate(const double rate) {
     }
   } else {
     if (audio_playback_ != nullptr) {
-      playhead_ = std::max<qint64>(audio_playback_->sample_counter(), 0);
+      playhead_ = timelinePlayheadFromAudioClock(audio_playback_->sample_counter(),
+                                                audio_clock_origin_, audio_transport_rate_,
+                                                std::numeric_limits<qint64>::max());
       window_.timeline()->setPlayhead(timelineValue(playheadTime()));
       requestPreview();
     }
     stopAudioPlayback();
-    if (!shuttle_silence_announced_) {
-      shuttle_silence_announced_ = true;
-      window_.showTransientMessage(tr("Shuttle playback outside 1× is silent"));
-    }
+    window_.showTransientMessage(tr("Shuttle playback at this rate is silent"));
   }
   playback_clock_.restart();
   playback_timer_.start();
@@ -2565,8 +2676,7 @@ void EditorController::advancePlayback() {
       audio_control_intent_ = AudioControlIntent::None;
       audio_command_version_ = 0;
       audio_start_pending_ = false;
-      if (std::abs(playback_rate_ - 1.0) < std::numeric_limits<double>::epsilon() &&
-          startAudioMasterPlayback()) {
+      if (isSupportedShuttleAudioRate(playback_rate_) && startAudioMasterPlayback()) {
         return;
       }
       playback_clock_.restart();
@@ -2582,7 +2692,8 @@ void EditorController::advancePlayback() {
         matching_result && diagnostics.latest_status == audio::PlaybackCommandStatus::Pending;
     if (pending) {
       if (audio_control_intent_ == AudioControlIntent::Pause) {
-        playhead_ = std::clamp<qint64>(diagnostics.playback.sample_counter, 0, end);
+        playhead_ = timelinePlayheadFromAudioClock(diagnostics.playback.sample_counter,
+                                                  audio_clock_origin_, audio_transport_rate_, end);
         window_.timeline()->setPlayhead(timelineValue(playheadTime()));
         requestPreview();
       }
@@ -2614,7 +2725,7 @@ void EditorController::advancePlayback() {
       playhead_ = std::clamp<qint64>(diagnostics.playback.sample_counter, 0, end);
       if (diagnostics.effective_state == audio::PlaybackState::Playing &&
           diagnostics.playback.device_running &&
-          std::abs(playback_rate_ - 1.0) < std::numeric_limits<double>::epsilon()) {
+          isSupportedShuttleAudioRate(playback_rate_)) {
         audio_master_active_ = true;
         audio_clock_applied = true;
         if (!audio_status_announced_) {
@@ -2642,7 +2753,8 @@ void EditorController::advancePlayback() {
       const QString failure = playback.last_error.empty()
                                   ? tr("the audio device stopped")
                                   : QString::fromStdString(playback.last_error);
-      playhead_ = std::clamp<qint64>(playback.sample_counter, 0, end);
+      playhead_ = timelinePlayheadFromAudioClock(playback.sample_counter, audio_clock_origin_,
+                                                audio_transport_rate_, end);
       stopAudioPlayback();
       playback_clock_.restart();
       if (!audio_fallback_announced_) {
@@ -2652,7 +2764,8 @@ void EditorController::advancePlayback() {
             8'000);
       }
     } else {
-      playhead_ = std::clamp<qint64>(playback.sample_counter, 0, end);
+      playhead_ = timelinePlayheadFromAudioClock(playback.sample_counter, audio_clock_origin_,
+                                                audio_transport_rate_, end);
       audio_clock_applied = true;
       if (playback.xrun_count > last_audio_xrun_count_) {
         if (last_audio_xrun_count_ == 0) {
@@ -2685,8 +2798,7 @@ void EditorController::advancePlayback() {
           // The renderer may be several blocks ahead in the pre-render ring.
           // Select telemetry using the latency-compensated device master clock,
           // never the most recently completed future block.
-          const auto track_meters =
-              playback_audio_renderer_->trackMetersAt(playback.sample_counter);
+          const auto track_meters = playback_audio_renderer_->trackMetersAt(playhead_);
           QVector<desktop_ui::AudioTrackMeterView> meter_views;
           meter_views.reserve(static_cast<qsizetype>(track_meters.tracks.size()));
           for (const auto& track_meter : track_meters.tracks) {
@@ -5660,7 +5772,9 @@ bool EditorController::startAudioMasterPlayback() {
 
     auto timeline_renderer = std::make_shared<audio_render::TimelineAudioRenderer>(audio_registry_);
     auto provider = std::make_shared<TimelinePlaybackAudioProvider>(
-        timeline_renderer, std::move(snapshot), end_sample);
+        timeline_renderer, std::move(snapshot), end_sample, playback_rate_, playhead_);
+    audio_transport_rate_ = playback_rate_;
+    audio_clock_origin_ = playhead_;
     audio::RealtimePlaybackConfiguration configuration{
         .ring_capacity_frames = 192'000,
         .render_block_frames = 24'000,

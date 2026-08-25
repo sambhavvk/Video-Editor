@@ -51,10 +51,10 @@ including titles, transitions, and active effects falls back to the CPU referenc
 frame; backend/device failures preserve a CPU result and latch CPU-only preview for the session.
 The CPU graph evaluates typed clip-local Hold/Linear/Bezier curves and known color/crop/blur
 effects. The desktop does not yet supply a native presentation surface, zero-copy decode import, or
-GPU effect parity. Forward 1× desktop transport connects the timeline audio renderer to the realtime
-pre-render ring and selected miniaudio output; its latency-compensated
-sample position, not the end of the submitted device buffer, drives video requests. Other shuttle
-rates and unavailable/failed devices use an explicit silent timer fallback. The worker host can
+GPU effect parity. Forward 1× and J/K/L shuttle (0.5×, 2×, 4×, 8×, including reverse) connect the
+timeline audio renderer to the realtime pre-render ring and selected miniaudio output; a
+rate-scaled latency-compensated sample position drives video requests. Unavailable/failed devices
+and unsupported shuttle rates use an explicit silent timer fallback. The worker host can
 execute probe, proxy, export, and typed transcription requests. The desktop launches a fresh framed
 worker process for each proxy, export, and transcription job. Kill is the cancellation and crash
 boundary. The generic named-pipe or Unix-socket job service is not connected.
@@ -158,9 +158,9 @@ playback. `AsyncRealtimeAudioPlayback` supplies a serialized background control 
 requested/effective state; the desktop enqueues commands, waits for effective completion without
 blocking Qt signals, and only then adopts audio as master. During a pending start or seek it holds the
 video position rather than advancing from a conflicting timer. A stable selected-device ID is
-passed to miniaudio when playback opens. When miniaudio is absent or a device/provider fails, and
-for reverse or non-1× shuttle, the controller reports the limitation and uses silent timer-driven
-video. The desktop polls devices off the UI thread, pauses on selected/default loss, and retries a
+passed to miniaudio when playback opens. When miniaudio is absent or a device/provider fails, the
+controller reports the limitation and uses silent timer-driven video. Reverse and non-1× shuttle
+rates of 0.5×, 2×, 4×, and 8× keep audio as master when the device is available. The desktop polls devices off the UI thread, pauses on selected/default loss, and retries a
 returned endpoint only after serialized stop settles while playback remains intended. Native OS
 notifications and calibrated hardware timestamps remain outside the current wiring.
 

@@ -469,7 +469,6 @@ private:
   bool audio_master_active_{false};
   bool audio_status_announced_{false};
   bool audio_fallback_announced_{false};
-  bool shuttle_silence_announced_{false};
   bool audio_start_pending_{false};
   bool audio_session_stale_{true};
   AudioControlIntent audio_control_intent_{AudioControlIntent::None};
@@ -535,6 +534,8 @@ private:
   bool dirty_{false};
   bool closing_after_confirmation_{false};
   double playback_rate_{0.0};
+  double audio_transport_rate_{1.0};
+  std::int64_t audio_clock_origin_{0};
   QTimer playback_timer_;
   QElapsedTimer playback_clock_;
 };
