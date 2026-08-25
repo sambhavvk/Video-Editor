@@ -851,6 +851,8 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::chooseMedia);
   connect(&window_, &desktop_ui::EditorWindow::mediaActivated, this,
           &EditorController::loadSourceAsset);
+  connect(&window_, &desktop_ui::EditorWindow::mediaInsertRequested, this,
+          &EditorController::insertAsset);
   connect(&window_, &desktop_ui::EditorWindow::sourceRippleInsertRequested, this,
           [this] { insertLoadedSource(edit::InsertMode::Ripple); });
   connect(&window_, &desktop_ui::EditorWindow::sourceOverwriteInsertRequested, this,
@@ -1035,6 +1037,9 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::selectGap);
   connect(window_.timeline(), &desktop_ui::TimelineWidget::closeGapRequested, this,
           &EditorController::closeGap);
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::insertAtPlayheadRequested, this, [this] {
+    insertLoadedSource(edit::InsertMode::Ripple);
+  });
   connect(window_.timeline(), &desktop_ui::TimelineWidget::trackAddRequested, this,
           [this](const desktop_ui::TrackKind kind) { addTrack(static_cast<int>(kind)); });
   connect(window_.timeline(), &desktop_ui::TimelineWidget::trackRenameRequested, this,
@@ -1198,6 +1203,9 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
   audio_device_poll_timer_.start();
   refreshAudioDevices();
   refreshTranscriptionState();
+  connect(&gpu_init_watcher_,
+          &QFutureWatcher<std::shared_ptr<render::GpuRenderer>>::finished, this,
+          &EditorController::onGpuInitFinished);
 #if defined(__linux__)
   connect(window_.programViewer(), &desktop_ui::ProgramViewer::nativePresentationReady, this,
           [this](const desktop_ui::NativePresentationHandles& handles) {
@@ -2335,7 +2343,7 @@ void EditorController::clearExportCheckpoint() {
 
 void EditorController::insertAsset(const QString& assetId) {
   loadSourceAsset(assetId);
-  insertLoadedSource(edit::InsertMode::RejectOverlap);
+  insertLoadedSource(edit::InsertMode::Ripple);
 }
 
 void EditorController::loadSourceAsset(const QString& assetId) {
@@ -2417,8 +2425,13 @@ void EditorController::updateSourceMonitorChrome() {
 
 void EditorController::insertLoadedSource(const edit::InsertMode mode) {
   if (!source_asset_id_.has_value()) {
-    window_.showTransientMessage(tr("Load a source clip before inserting"));
-    return;
+    if (!selected_media_id_.isEmpty()) {
+      loadSourceAsset(selected_media_id_);
+    }
+    if (!source_asset_id_.has_value()) {
+      window_.showTransientMessage(tr("Load a source clip before inserting"));
+      return;
+    }
   }
   const auto project = editor_->projectAt(editor_->revision());
   const edit::Asset* asset = edit::findAsset(*project, *source_asset_id_);
@@ -6443,15 +6456,7 @@ void EditorController::startGpuInitialization() {
     return;
   }
   gpu_init_started_ = true;
-  const std::uint64_t generation = ++gpu_init_generation_;
-  connect(&gpu_init_watcher_, &QFutureWatcher<std::shared_ptr<render::GpuRenderer>>::finished, this,
-          [this, generation] {
-            if (generation != gpu_init_generation_) {
-              return;
-            }
-            attachGpuRenderer(gpu_init_watcher_.result());
-          },
-          Qt::UniqueConnection);
+  gpu_init_attach_generation_ = ++gpu_init_generation_;
   gpu_init_watcher_.setFuture(QtConcurrent::run([] {
     auto gpu = render::GpuRenderer::create();
     return std::shared_ptr<render::GpuRenderer>(std::move(gpu));
@@ -6476,20 +6481,19 @@ void EditorController::startGpuInitializationWithPresentation(
     frame_provider_->begin_epoch(preview_epoch_);
   }
 
-  const std::uint64_t generation = ++gpu_init_generation_;
-  connect(&gpu_init_watcher_, &QFutureWatcher<std::shared_ptr<render::GpuRenderer>>::finished, this,
-          [this, generation] {
-            if (generation != gpu_init_generation_) {
-              return;
-            }
-            attachGpuRenderer(gpu_init_watcher_.result());
-          },
-          Qt::UniqueConnection);
+  gpu_init_attach_generation_ = ++gpu_init_generation_;
   const render::GpuOptions options = gpuOptionsForPresentation(handles);
   gpu_init_watcher_.setFuture(QtConcurrent::run([options] {
     auto gpu = render::GpuRenderer::create(options);
     return std::shared_ptr<render::GpuRenderer>(std::move(gpu));
   }));
+}
+
+void EditorController::onGpuInitFinished() {
+  if (gpu_init_attach_generation_ != gpu_init_generation_) {
+    return;
+  }
+  attachGpuRenderer(gpu_init_watcher_.result());
 }
 
 void EditorController::attachGpuRenderer(std::shared_ptr<render::GpuRenderer> gpu) {
@@ -6853,10 +6857,14 @@ void EditorController::cacheLutFile(const std::filesystem::path& path) {
   if (!input) {
     return;
   }
-  const std::vector<std::byte> bytes((std::istreambuf_iterator<char>(input)),
-                                     std::istreambuf_iterator<char>());
-  if (bytes.empty()) {
+  const std::vector<char> raw((std::istreambuf_iterator<char>(input)),
+                              std::istreambuf_iterator<char>());
+  if (raw.empty()) {
     return;
+  }
+  std::vector<std::byte> bytes(raw.size());
+  for (std::size_t i = 0; i < raw.size(); ++i) {
+    bytes[i] = static_cast<std::byte>(static_cast<unsigned char>(raw[i]));
   }
   QCryptographicHash digest(QCryptographicHash::Sha256);
   digest.addData(QByteArray::fromStdString(path.lexically_normal().string()));

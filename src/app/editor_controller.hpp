@@ -39,6 +39,7 @@ class QVariant;
 
 namespace video_editor::desktop_ui {
 class EditorWindow;
+struct NativePresentationHandles;
 }
 
 namespace video_editor::media_cache {
@@ -422,6 +423,7 @@ private:
   void syncPreviewCacheIdentity();
   void startGpuInitialization();
   void startGpuInitializationWithPresentation(const desktop_ui::NativePresentationHandles& handles);
+  void onGpuInitFinished();
   void attachGpuRenderer(std::shared_ptr<render::GpuRenderer> gpu);
   [[nodiscard]] bool startAudioMasterPlayback();
   void stopAudioPlayback() noexcept;
@@ -498,6 +500,7 @@ private:
   bool gpu_status_announced_{false};
   QFutureWatcher<std::shared_ptr<render::GpuRenderer>> gpu_init_watcher_;
   std::uint64_t gpu_init_generation_{0};
+  std::uint64_t gpu_init_attach_generation_{0};
   bool gpu_init_started_{false};
   bool audio_master_active_{false};
   bool audio_status_announced_{false};

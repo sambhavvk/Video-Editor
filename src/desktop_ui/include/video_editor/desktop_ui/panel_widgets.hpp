@@ -46,6 +46,7 @@ public:
 
 signals:
   void importRequested();
+  void insertRequested(const QString& mediaId);
   void relinkRequested(const QString& mediaId);
   void proxyRequested(const QString& mediaId);
   void mediaActivated(const QString& mediaId);

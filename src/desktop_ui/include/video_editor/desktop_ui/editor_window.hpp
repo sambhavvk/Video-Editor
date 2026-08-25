@@ -123,6 +123,7 @@ signals:
   void sourceMarkInRequested();
   void sourceMarkOutRequested();
   void mediaActivated(const QString& mediaId);
+  void mediaInsertRequested(const QString& mediaId);
   void mediaSelectionChanged(const QString& mediaId);
   void assetMetadataEdited(const AssetMetadataView& metadata);
   void effectAddRequested(const QString& effectId);

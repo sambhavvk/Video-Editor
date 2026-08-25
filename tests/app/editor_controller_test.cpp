@@ -123,6 +123,7 @@ class EditorControllerTest final : public QObject {
 private slots:
   void initTestCase();
   void importsInsertsAndRoundTripsUndo();
+  void insertAssetInsertsImportedMediaWithoutSourceMonitor();
   void derivesSequenceFormatFromFirstVideoClip();
   void professionalTimelineInteractionsUseOneAtomicHistoryStep();
   void batchSplitAndFrameNudgePreserveExactSelectionGeometry();
@@ -333,6 +334,28 @@ void EditorControllerTest::importsInsertsAndRoundTripsUndo() {
   QCOMPARE(reopened->assets.size(), 1U);
   QCOMPARE(audioClipCount(*reopened), 1U);
   QVERIFY(!reopened_controller.dirty());
+}
+
+void EditorControllerTest::insertAssetInsertsImportedMediaWithoutSourceMonitor() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString wave_path = directory.filePath(QStringLiteral("dialogue.wav"));
+  writeSilentWave(wave_path);
+
+  QSettings settings(directory.filePath(QStringLiteral("insert-ui.ini")), QSettings::IniFormat);
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+
+  controller.importPaths({wave_path});
+  QTRY_COMPARE_WITH_TIMEOUT(
+      controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
+  QCOMPARE(window.mediaBin()->items().size(), 1);
+  const QString asset_id = window.mediaBin()->items().front().id;
+
+  QVERIFY(QMetaObject::invokeMethod(&window, "mediaInsertRequested", Qt::DirectConnection,
+                                    Q_ARG(QString, asset_id)));
+  QCOMPARE(audioClipCount(*controller.editor().projectAt(controller.editor().revision())), 1U);
+  QVERIFY(controller.dirty());
 }
 
 void EditorControllerTest::derivesSequenceFormatFromFirstVideoClip() {

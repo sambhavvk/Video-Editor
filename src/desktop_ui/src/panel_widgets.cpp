@@ -194,6 +194,10 @@ MediaBinWidget::MediaBinWidget(QWidget* parent) : QWidget(parent) {
         std::find_if(items_.cbegin(), items_.cend(),
                      [&id](const MediaItemView& candidate) { return candidate.id == id; });
     QMenu menu(this);
+    auto* insert = menu.addAction(tr("Insert at playhead"));
+    insert->setEnabled(item != items_.cend() && !item->offline);
+    insert->setToolTip(tr("Insert the selected media at the timeline playhead"));
+    menu.addSeparator();
     auto* relink = menu.addAction(tr("Relink media…"));
     relink->setEnabled(item != items_.cend() && (item->offline || item->contentChanged));
     QAction* proxy = nullptr;
@@ -201,12 +205,12 @@ MediaBinWidget::MediaBinWidget(QWidget* parent) : QWidget(parent) {
       proxy = menu.addAction(item->proxyGenerating ? tr("Cancel proxy generation")
                                                    : tr("Create editing proxy"));
     }
-    const QAction* chosen = menu.exec(table_->viewport()->mapToGlobal(point));
-    if (chosen == relink) {
-      emit relinkRequested(id);
-    } else if (proxy != nullptr && chosen == proxy) {
-      emit proxyRequested(id);
+    connect(insert, &QAction::triggered, this, [this, id] { emit insertRequested(id); });
+    connect(relink, &QAction::triggered, this, [this, id] { emit relinkRequested(id); });
+    if (proxy != nullptr) {
+      connect(proxy, &QAction::triggered, this, [this, id] { emit proxyRequested(id); });
     }
+    menu.exec(table_->viewport()->mapToGlobal(point));
   });
 }
 

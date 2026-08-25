@@ -9,14 +9,17 @@
 #include "video_editor/desktop_ui/timeline_widget.hpp"
 
 #include <QAction>
+#include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QContextMenuEvent>
 #include <QCoreApplication>
 #include <QDockWidget>
 #include <QFileInfo>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QProgressBar>
 #include <QPointer>
@@ -28,6 +31,7 @@
 #include <QTableWidget>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTimer>
 #include <QToolBar>
 #include <QToolButton>
 #include <QWheelEvent>
@@ -69,6 +73,8 @@ private slots:
   void timelineMarkerSnappingExcludesTheDraggedMarker();
   void timelineRefreshCancelsMarkerGesturesAndUsesAuthoritativeSelection();
   void timelineCanCreateTracksWithoutAnExistingTrack();
+  void timelineGapContextMenuCanAddTracks();
+  void mediaBinContextMenuCanInsertAtPlayhead();
   void inspectorExposesKeyframeAuthoring();
   void deliverPanelShowsCancelableProgress();
   void audioMixerShowsSystemDefaultAndAuthoritativeLufsStates();
@@ -994,6 +1000,93 @@ void EditorWindowTest::timelineCanCreateTracksWithoutAnExistingTrack() {
   QCOMPARE(added.count(), 2);
   QCOMPARE(added.at(0).at(0).value<TrackKind>(), TrackKind::Video);
   QCOMPARE(added.at(1).at(0).value<TrackKind>(), TrackKind::Audio);
+}
+
+void EditorWindowTest::timelineGapContextMenuCanAddTracks() {
+  TimelineWidget timeline;
+  timeline.resize(900, 180);
+  timeline.setTimeline(
+      10'000, 1'000,
+      {{QStringLiteral("video-1"), QStringLiteral("Video 1"), TrackKind::Video},
+       {QStringLiteral("audio-1"), QStringLiteral("Audio 1"), TrackKind::Audio}},
+      {{QStringLiteral("clip-a"), QStringLiteral("Clip A"), 0, 1'000, 2'000}});
+  timeline.setGaps(
+      {{QStringLiteral("gap-a1-full"), QStringLiteral("audio-1"), 1, 0, 10'000}});
+  timeline.setPixelsPerSecond(100.0);
+  timeline.show();
+  QCoreApplication::processEvents();
+
+  QSignalSpy trackAdded(&timeline, &TimelineWidget::trackAddRequested);
+  const QPoint gapPosition{300, 117};
+  QMenu* menu = nullptr;
+  QTimer::singleShot(0, [&menu] {
+    menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
+    if (menu == nullptr) {
+      return;
+    }
+    QAction* closeGap = nullptr;
+    for (auto* action : menu->actions()) {
+      if (action->text() == QStringLiteral("Close Gap")) {
+        closeGap = action;
+        break;
+      }
+    }
+    QVERIFY(closeGap != nullptr);
+    QVERIFY(!closeGap->isEnabled());
+    for (auto* action : menu->actions()) {
+      if (action->text() == QStringLiteral("Add Audio Track")) {
+        menu->setActiveAction(action);
+        action->trigger();
+        break;
+      }
+    }
+    menu->close();
+  });
+  QContextMenuEvent openMenu(QContextMenuEvent::Mouse, gapPosition,
+                             timeline.viewport()->mapToGlobal(gapPosition));
+  QCoreApplication::sendEvent(timeline.viewport(), &openMenu);
+  QTRY_COMPARE_WITH_TIMEOUT(trackAdded.count(), 1, 2'000);
+  QCOMPARE(trackAdded.at(0).at(0).value<TrackKind>(), TrackKind::Audio);
+}
+
+void EditorWindowTest::mediaBinContextMenuCanInsertAtPlayhead() {
+  video_editor::desktop_ui::MediaBinWidget media_bin;
+  auto* table = media_bin.findChild<QTableWidget*>(QStringLiteral("mediaTable"));
+  QVERIFY(table != nullptr);
+
+  const QString media_id = QStringLiteral("asset-online");
+  media_bin.setItems({{.id = media_id,
+                       .displayName = QStringLiteral("dialogue.wav"),
+                       .filePath = QStringLiteral("/media/dialogue.wav"),
+                       .durationText = QStringLiteral("00:00:05"),
+                       .formatText = QStringLiteral("WAV"),
+                       .offline = false}});
+  table->selectRow(0);
+  media_bin.show();
+  QCoreApplication::processEvents();
+
+  QSignalSpy insertRequested(&media_bin, &video_editor::desktop_ui::MediaBinWidget::insertRequested);
+  const QPoint menuPoint = table->visualRect(table->model()->index(0, 0)).center();
+
+  QMenu* menu = nullptr;
+  QTimer::singleShot(0, [&menu] {
+    menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
+    if (menu == nullptr) {
+      return;
+    }
+    for (auto* action : menu->actions()) {
+      if (action->text() == QStringLiteral("Insert at playhead")) {
+        menu->setActiveAction(action);
+        action->trigger();
+        break;
+      }
+    }
+    menu->close();
+  });
+  QVERIFY(QMetaObject::invokeMethod(table, "customContextMenuRequested", Qt::DirectConnection,
+                                    Q_ARG(QPoint, menuPoint)));
+  QTRY_COMPARE_WITH_TIMEOUT(insertRequested.count(), 1, 2'000);
+  QCOMPARE(insertRequested.at(0).at(0).toString(), media_id);
 }
 
 void EditorWindowTest::deliverPanelShowsCancelableProgress() {

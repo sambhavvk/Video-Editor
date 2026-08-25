@@ -5,7 +5,7 @@ include_guard(GLOBAL)
 # Versions accepted by the source contracts. Official distribution builds use
 # reproducible binary bundles of these versions; local developer builds may use
 # ABI-identical system packages and must run the dependency audit.
-set(VIDEO_EDITOR_QT_VERSION "6.11.1")
+set(VIDEO_EDITOR_QT_VERSION "6.11.2")
 set(VIDEO_EDITOR_FFMPEG_VERSION "9.0.1")
 set(VIDEO_EDITOR_AVFORMAT_VERSION "63.1.101")
 set(VIDEO_EDITOR_AVCODEC_VERSION "63.1.101")

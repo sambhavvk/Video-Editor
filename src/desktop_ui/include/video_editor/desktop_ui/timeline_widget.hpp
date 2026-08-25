@@ -180,6 +180,7 @@ signals:
   void markerRemoveRequested(const QString& markerId);
   void gapSelectionChanged(const QString& gapKey);
   void closeGapRequested(const QString& gapKey);
+  void insertAtPlayheadRequested();
   void trackAddRequested(TrackKind kind);
   void trackRenameRequested(const QString& trackId, const QString& displayName);
   void trackReorderRequested(const QString& trackId, int destinationIndex);

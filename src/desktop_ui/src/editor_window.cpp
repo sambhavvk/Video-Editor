@@ -802,6 +802,7 @@ void EditorWindow::createStatusBar() {
 
 void EditorWindow::connectControllerSurface() {
   connect(media_bin_, &MediaBinWidget::importRequested, this, &EditorWindow::importMediaRequested);
+  connect(media_bin_, &MediaBinWidget::insertRequested, this, &EditorWindow::mediaInsertRequested);
   connect(media_bin_, &MediaBinWidget::mediaActivated, this, &EditorWindow::mediaActivated);
   connect(media_bin_, &MediaBinWidget::mediaSelectionChanged, this,
           &EditorWindow::mediaSelectionChanged);

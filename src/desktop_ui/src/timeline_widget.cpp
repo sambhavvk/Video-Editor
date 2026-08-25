@@ -1036,6 +1036,31 @@ void TimelineWidget::mouseDoubleClickEvent(QMouseEvent* event) {
 }
 
 void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
+  const auto addTrackMenuItems = [this](QMenu& menu) {
+    auto* addVideo = menu.addAction(tr("Add Video Track"));
+    auto* addAudio = menu.addAction(tr("Add Audio Track"));
+    return std::make_pair(addVideo, addAudio);
+  };
+  const auto addInsertAtPlayhead = [this](QMenu& menu) {
+    auto* insertAtPlayhead = menu.addAction(tr("Insert at playhead"));
+    insertAtPlayhead->setToolTip(tr("Insert the loaded or selected source at the playhead"));
+    return insertAtPlayhead;
+  };
+  const auto wireTrackMenuActions = [this](const QAction* addVideo, const QAction* addAudio,
+                                            const QAction* insertAtPlayhead) {
+    connect(addVideo, &QAction::triggered, this,
+            [this] { emit trackAddRequested(TrackKind::Video); });
+    connect(addAudio, &QAction::triggered, this,
+            [this] { emit trackAddRequested(TrackKind::Audio); });
+    connect(insertAtPlayhead, &QAction::triggered, this, [this] { emit insertAtPlayheadRequested(); });
+  };
+  const auto gapHasLaterClip = [this](const TimelineGapView& gap) {
+    const qint64 gapEnd = gap.start + gap.duration;
+    return std::any_of(clips_.cbegin(), clips_.cend(), [&gap, gapEnd](const TimelineClipView& clip) {
+      return clip.trackIndex == gap.trackIndex && clip.start >= gapEnd;
+    });
+  };
+
   const auto transitionIndex = transitionAt(event->pos());
   if (transitionIndex >= 0) {
     const auto transition = transitions_.at(transitionIndex);
@@ -1083,11 +1108,21 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
   const auto gapIndex = gapAt(event->pos());
   if (gapIndex >= 0) {
     selectGap(gapIndex);
+    const auto& gap = gaps_.at(gapIndex);
     QMenu menu(this);
+    auto [addVideo, addAudio] = addTrackMenuItems(menu);
+    menu.addSeparator();
+    auto* insertAtPlayhead = addInsertAtPlayhead(menu);
     auto* close = menu.addAction(tr("Close Gap"));
     close->setToolTip(tr("Ripple material after this gap left"));
-    if (menu.exec(event->globalPos()) == close) {
-      emit closeGapRequested(gaps_.at(gapIndex).key);
+    if (!gapHasLaterClip(gap)) {
+      close->setEnabled(false);
+      close->setToolTip(tr("Nothing after this gap to ripple."));
+    }
+    wireTrackMenuActions(addVideo, addAudio, insertAtPlayhead);
+    const auto* chosen = menu.exec(event->globalPos());
+    if (chosen == close && close->isEnabled()) {
+      emit closeGapRequested(gap.key);
     }
     event->accept();
     return;
@@ -1096,8 +1131,8 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
   if (headerTrack >= 0) {
     const auto track = tracks_.at(headerTrack);
     QMenu menu(this);
-    auto* addVideo = menu.addAction(tr("Add Video Track"));
-    auto* addAudio = menu.addAction(tr("Add Audio Track"));
+    auto [addVideo, addAudio] = addTrackMenuItems(menu);
+    auto* insertAtPlayhead = addInsertAtPlayhead(menu);
     menu.addSeparator();
     auto* rename = menu.addAction(tr("Rename Track…"));
     auto* moveUp = menu.addAction(tr("Move Track Up"));
@@ -1107,12 +1142,9 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
     auto* target = menu.addAction(track.targeted ? tr("Untarget Track") : tr("Target Track"));
     menu.addSeparator();
     auto* remove = menu.addAction(tr("Remove Track"));
+    wireTrackMenuActions(addVideo, addAudio, insertAtPlayhead);
     const auto* chosen = menu.exec(event->globalPos());
-    if (chosen == addVideo) {
-      emit trackAddRequested(TrackKind::Video);
-    } else if (chosen == addAudio) {
-      emit trackAddRequested(TrackKind::Audio);
-    } else if (chosen == rename) {
+    if (chosen == rename) {
       bool accepted = false;
       const auto name = QInputDialog::getText(this, tr("Rename Track"), tr("Name:"),
                                               QLineEdit::Normal, track.displayName, &accepted);
@@ -1143,14 +1175,10 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
     return;
   }
   QMenu menu(this);
-  auto* addVideo = menu.addAction(tr("Add Video Track"));
-  auto* addAudio = menu.addAction(tr("Add Audio Track"));
-  const auto* chosen = menu.exec(event->globalPos());
-  if (chosen == addVideo) {
-    emit trackAddRequested(TrackKind::Video);
-  } else if (chosen == addAudio) {
-    emit trackAddRequested(TrackKind::Audio);
-  }
+  auto [addVideo, addAudio] = addTrackMenuItems(menu);
+  auto* insertAtPlayhead = addInsertAtPlayhead(menu);
+  wireTrackMenuActions(addVideo, addAudio, insertAtPlayhead);
+  menu.exec(event->globalPos());
   event->accept();
 }
 

@@ -27,6 +27,7 @@ target_link_libraries(
     video_editor::audio_render
     VideoEditor::CaptionService
     video_editor::job_service
+    video_editor::render_engine
   PRIVATE
     video_editor::project_warnings
     video_editor::project_store
@@ -34,7 +35,6 @@ target_link_libraries(
     video_editor::playback
     video_editor::proxy_service
     video_editor::media_cache
-    video_editor::render_engine
     VideoEditor::ExportService
     video_editor::transcription_service
     Qt6::Network
