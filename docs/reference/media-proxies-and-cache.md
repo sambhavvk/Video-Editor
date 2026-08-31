@@ -76,9 +76,10 @@ executable accepts unchanged V1 Protobuf fields and two preset IDs:
 
 A proxy worker request requires exactly one absolute input and one absolute output; its map defaults
 to `<output>.vepts`. Validation fails closed and events advance monotonically through the versioned
-accepted/running/terminal states. The current stdin/stdout loop is synchronous, so it cannot consume
-a `CancelJob` while transcode work is running and reports idle cancellation as unsupported. The
-desktop uses process kill rather than in-flight `CancelJob` for that reason. Named-pipe/Unix-socket
+accepted/running/terminal states. The stdin/stdout host reads `CancelJob` on a background thread
+while proxy work runs and cooperatively stops through the registry-backed stop-token path. Idle
+cancellation for an unknown job returns an explicit `job-not-found` failure. The desktop sends
+`CancelJob` first and falls back to process kill only on write failure or timeout. Named-pipe/Unix-socket
 supervision is not connected. `.vepts`-driven VFR seek remains a later playback gate.
 
 ## Playback selection
@@ -144,6 +145,14 @@ application-local data, not the cache.
 `File > Manage Media Cache…` inspects the store, changes the persisted budget (10–200 GB, default
 100 GB), and can remove or clear rebuildable artifacts. `CacheErrorCode::Full` stops remaining
 thumbnail/waveform jobs and is reported to the user.
+
+Thumbnail and waveform generation use one serial queue in the desktop. When
+`video_editor_worker_host` is present, each job launches a fresh host with
+`JOB_KIND_THUMBNAIL` or `JOB_KIND_WAVEFORM`; the worker writes a temp JPEG or
+`VEWAVE01` blob and the desktop adopts it with `put_file`. Project close or
+generation bumps send `CancelJob` (with kill timeout fallback); cancelled jobs
+do not commit partial cache index entries. When the worker binary is missing,
+the desktop falls back to in-process `QtConcurrent` generation.
 
 Current limitations:
 

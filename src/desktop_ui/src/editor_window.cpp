@@ -6,7 +6,9 @@
 
 #include "video_editor/desktop_ui/cache_browser_dialog.hpp"
 #include "video_editor/desktop_ui/command_palette.hpp"
+#include "video_editor/desktop_ui/keyboard_shortcuts_dialog.hpp"
 #include "video_editor/desktop_ui/panel_widgets.hpp"
+#include "video_editor/desktop_ui/shortcut_bindings.hpp"
 #include "video_editor/desktop_ui/program_viewer.hpp"
 #include "video_editor/desktop_ui/timeline_widget.hpp"
 
@@ -134,6 +136,7 @@ EditorWindow::EditorWindow(QSettings* settings, QWidget* parent) : QMainWindow(p
   }
 
   createActions();
+  loadShortcutOverrides();
   createCentralArea();
   createPanels();
   createMenus();
@@ -160,6 +163,27 @@ EditorWindow::~EditorWindow() {
 
 QAction* EditorWindow::action(const QString& id) const {
   return actions_.value(id, nullptr);
+}
+
+QKeySequence EditorWindow::shortcutDefault(const QString& commandId) const {
+  return shortcut_defaults_.value(commandId);
+}
+
+QString EditorWindow::applyShortcutBinding(const QString& commandId, const QKeySequence& shortcut,
+                                           bool replaceConflicts) {
+  const auto error = ShortcutBindings::applyBinding(settings_, actions_, shortcut_defaults_,
+                                                    commandId, shortcut, replaceConflicts, this);
+  if (error.isEmpty() && command_palette_ != nullptr) {
+    command_palette_->setActions(actions_.values());
+  }
+  return error;
+}
+
+void EditorWindow::resetShortcutBinding(const QString& commandId) {
+  ShortcutBindings::resetBinding(settings_, actions_, shortcut_defaults_, commandId);
+  if (command_palette_ != nullptr) {
+    command_palette_->setActions(actions_.values());
+  }
 }
 
 void EditorWindow::setProjectDisplayName(const QString& displayName) {
@@ -385,14 +409,36 @@ void EditorWindow::createCentralArea() {
   trimLabel->setFont(trimFont);
   trimLayout->addWidget(trimLabel);
   trimLayout->addSpacing(12);
-  for (const auto* id : {"tool.rippleTrim", "tool.roll", "tool.slip", "tool.slide"}) {
+  for (const auto* id : {"tool.select", "tool.rippleTrim", "tool.overwriteTrim", "tool.roll",
+                         "tool.slip", "tool.slide"}) {
     auto* mode = makeActionButton(action(QString::fromLatin1(id)), precision_trim_);
     mode->setObjectName(QStringLiteral("precision.%1").arg(QString::fromLatin1(id)));
     mode->setToolButtonStyle(Qt::ToolButtonTextOnly);
     trimLayout->addWidget(mode);
   }
+  trimLayout->addSpacing(8);
+  const auto addNudgeButton = [trimLayout, this](const char* suffix, const QString& label,
+                                                const QString& accessibleName) {
+    auto* button = new QToolButton(precision_trim_);
+    button->setObjectName(QStringLiteral("precision.nudge.%1").arg(QString::fromLatin1(suffix)));
+    button->setText(label);
+    button->setAccessibleName(accessibleName);
+    button->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    button->setAutoRaise(true);
+    trimLayout->addWidget(button);
+  };
+  addNudgeButton("minus10", tr("−10"), tr("Nudge selected clip earlier by ten frames"));
+  addNudgeButton("minus1", tr("−1"), tr("Nudge selected clip earlier by one frame"));
+  addNudgeButton("plus1", tr("+1"), tr("Nudge selected clip later by one frame"));
+  addNudgeButton("plus10", tr("+10"), tr("Nudge selected clip later by ten frames"));
+  trimLayout->addSpacing(8);
+  auto* split = makeActionButton(action(QStringLiteral("splitClip")), precision_trim_);
+  split->setObjectName(QStringLiteral("precision.splitClip"));
+  split->setToolButtonStyle(Qt::ToolButtonTextOnly);
+  trimLayout->addWidget(split);
   trimLayout->addStretch();
-  auto* hint = new QLabel(tr("Alt + Arrow for fine trim"), precision_trim_);
+  auto* hint = new QLabel(
+      tr("Alt+←/→ nudge · Shift=10 frames · Ctrl=ripple · V/W/R/N/Y/U tools"), precision_trim_);
   hint->setProperty("muted", true);
   trimLayout->addWidget(hint);
   precision_trim_->hide();
@@ -455,6 +501,7 @@ void EditorWindow::createActions() {
     auto* created = new QAction(text, this);
     created->setToolTip(toolTip);
     created->setStatusTip(toolTip);
+    shortcut_defaults_.insert(id, shortcut);
     if (!shortcut.isEmpty()) {
       created->setShortcut(shortcut);
       created->setShortcutContext(Qt::WindowShortcut);
@@ -645,6 +692,20 @@ void EditorWindow::createActions() {
           &EditorWindow::overwriteInsertFromSource);
 }
 
+void EditorWindow::loadShortcutOverrides() {
+  ShortcutBindings::loadOverrides(settings_, actions_);
+}
+
+void EditorWindow::showKeyboardShortcutsPreferences() {
+  KeyboardShortcutsDialog dialog(settings_, actions_, shortcut_defaults_, this);
+  connect(&dialog, &KeyboardShortcutsDialog::shortcutsChanged, this, [this] {
+    if (command_palette_ != nullptr) {
+      command_palette_->setActions(actions_.values());
+    }
+  });
+  dialog.exec();
+}
+
 void EditorWindow::createMenus() {
   menuBar()->setAccessibleName(tr("Application menu"));
   auto* file = menuBar()->addMenu(tr("&File"));
@@ -720,6 +781,14 @@ void EditorWindow::createMenus() {
     panels->addAction(dock->toggleViewAction());
   }
 
+  auto* preferences = menuBar()->addMenu(tr("&Preferences"));
+  preferences->setObjectName(QStringLiteral("preferencesMenu"));
+  preferences->setAccessibleName(tr("Preferences"));
+  auto* keyboardPreferences = preferences->addAction(tr("Keyboard Shortcuts…"));
+  keyboardPreferences->setObjectName(QStringLiteral("action.keyboardShortcutsPreferences"));
+  connect(keyboardPreferences, &QAction::triggered, this,
+          &EditorWindow::showKeyboardShortcutsPreferences);
+
   auto* help = menuBar()->addMenu(tr("&Help"));
   help->setObjectName(QStringLiteral("helpMenu"));
   help->setAccessibleName(tr("Help"));
@@ -734,14 +803,7 @@ void EditorWindow::createMenus() {
   shortcuts->setObjectName(QStringLiteral("action.keyboardShortcuts"));
   connect(shortcuts, &QAction::triggered, this, [this] {
     QMessageBox::information(this, tr("Keyboard Shortcuts"),
-                             tr("J / K / L — reverse, stop, forward (program)\n"
-                                "Space — play or pause\n"
-                                "Comma / Period — previous or next frame (program)\n"
-                                "I / O — source mark in / out\n"
-                                "L / Comma — ripple insert / overwrite when the source monitor "
-                                "has focus\n"
-                                "Ctrl+1…4 — switch workspace\n"
-                                "Ctrl+Shift+P — command palette"));
+                             ShortcutBindings::formatShortcutHelp(actions_));
   });
 }
 
@@ -877,6 +939,17 @@ void EditorWindow::connectControllerSurface() {
   bindTool("tool.roll", TimelineWidget::ToolMode::Roll);
   bindTool("tool.slip", TimelineWidget::ToolMode::Slip);
   bindTool("tool.slide", TimelineWidget::ToolMode::Slide);
+  const auto bindNudge = [this](const char* objectName, int frames) {
+    if (auto* button = precision_trim_->findChild<QToolButton*>(QString::fromLatin1(objectName))) {
+      connect(button, &QToolButton::clicked, this, [this, frames] {
+        timeline_->nudgeActiveClipByFrames(frames, TimelineWidget::EditIntent::Normal);
+      });
+    }
+  };
+  bindNudge("precision.nudge.minus10", -10);
+  bindNudge("precision.nudge.minus1", -1);
+  bindNudge("precision.nudge.plus1", 1);
+  bindNudge("precision.nudge.plus10", 10);
   connect(action(QStringLiteral("previousFrame")), &QAction::triggered, this, [this] {
     if (sourceMonitorHasFocus()) {
       overwriteInsertFromSource();

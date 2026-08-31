@@ -79,13 +79,36 @@ public:
                                  static_cast<std::size_t>(frame_count));
   }
 
+  static void notification(const ma_device_notification* notification) noexcept {
+    if (notification == nullptr || notification->pDevice == nullptr) {
+      return;
+    }
+    auto* self = static_cast<Impl*>(notification->pDevice->pUserData);
+    if (self == nullptr || self->device_notification_callback == nullptr) {
+      return;
+    }
+    switch (notification->type) {
+    case ma_device_notification_type_stopped:
+    case ma_device_notification_type_rerouted:
+    case ma_device_notification_type_interruption_began:
+    case ma_device_notification_type_interruption_ended:
+      self->device_notification_callback(self->device_notification_user_data);
+      break;
+    default:
+      break;
+    }
+  }
+
   ma_device native_device{};
   ma_context native_context{};
   bool context_initialized{false};
 #endif
   AudioDeviceConfiguration configuration{};
+  MiniaudioDeviceNotificationCallback device_notification_callback{nullptr};
+  void* device_notification_user_data{nullptr};
   std::atomic<bool> open{false};
   std::atomic<bool> running{false};
+  std::atomic<bool> notifications_active{false};
   std::atomic<std::uint64_t> estimated_latency_frames{0};
 };
 
@@ -110,6 +133,27 @@ bool MiniaudioOutputDevice::available() noexcept {
 #else
   return false;
 #endif
+}
+
+void MiniaudioOutputDevice::set_device_notification_callback(
+    const MiniaudioDeviceNotificationCallback callback, void* const user_data) noexcept {
+  if (impl_ == nullptr) {
+    return;
+  }
+  impl_->device_notification_callback = callback;
+  impl_->device_notification_user_data = user_data;
+}
+
+bool MiniaudioOutputDevice::device_notifications_active() const noexcept {
+  return impl_ != nullptr &&
+         impl_->notifications_active.load(std::memory_order_acquire);
+}
+
+void MiniaudioOutputDevice::test_deliver_device_notification() noexcept {
+  if (impl_ == nullptr || impl_->device_notification_callback == nullptr) {
+    return;
+  }
+  impl_->device_notification_callback(impl_->device_notification_user_data);
 }
 
 std::vector<AudioDeviceInfo> MiniaudioDeviceEnumerator::enumerate() {
@@ -190,6 +234,8 @@ AudioDeviceResult MiniaudioOutputDevice::open(const AudioDeviceConfiguration& co
   native_configuration.playback.pDeviceID = selected_id_ptr;
   native_configuration.sampleRate = kPlaybackAudioFormat.sample_rate;
   native_configuration.dataCallback = &Impl::callback;
+  native_configuration.notificationCallback =
+      impl_->device_notification_callback != nullptr ? &Impl::notification : nullptr;
   native_configuration.pUserData = impl_.get();
   const ma_result result =
       ma_device_init(&impl_->native_context, &native_configuration, &impl_->native_device);
@@ -201,6 +247,8 @@ AudioDeviceResult MiniaudioOutputDevice::open(const AudioDeviceConfiguration& co
                                       std::string{"could not open the default audio output: "} +
                                           ma_result_description(result));
   }
+  impl_->notifications_active.store(native_configuration.notificationCallback != nullptr,
+                                    std::memory_order_release);
   impl_->open.store(true, std::memory_order_release);
   impl_->estimated_latency_frames.store(
       static_cast<std::uint64_t>(impl_->native_device.playback.internalPeriodSizeInFrames) *
@@ -264,6 +312,7 @@ void MiniaudioOutputDevice::close() noexcept {
 #endif
   impl_->open.store(false, std::memory_order_release);
   impl_->running.store(false, std::memory_order_release);
+  impl_->notifications_active.store(false, std::memory_order_release);
   impl_->estimated_latency_frames.store(0U, std::memory_order_release);
   impl_->configuration = {};
 }

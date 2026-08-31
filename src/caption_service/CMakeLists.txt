@@ -22,6 +22,9 @@ add_library(video_editor_caption_service STATIC
   src/reflow.cpp
   src/search.cpp
   src/serializer.cpp)
+if(NOT _caption_service_standalone)
+  target_sources(video_editor_caption_service PRIVATE src/embedded_extract.cpp)
+endif()
 add_library(VideoEditor::CaptionService ALIAS video_editor_caption_service)
 
 target_compile_features(video_editor_caption_service PUBLIC cxx_std_20)
@@ -30,6 +33,9 @@ target_include_directories(video_editor_caption_service
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>)
 target_link_libraries(video_editor_caption_service PUBLIC VideoEditor::EditModel)
+if(NOT _caption_service_standalone)
+  target_link_libraries(video_editor_caption_service PUBLIC video_editor::media_codec)
+endif()
 set_target_properties(video_editor_caption_service PROPERTIES
   CXX_EXTENSIONS OFF
   POSITION_INDEPENDENT_CODE ON)

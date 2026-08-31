@@ -7,52 +7,54 @@
 #include <QLineEdit>
 #include <QProgressBar>
 #include <QToolButton>
-
-#include <gtest/gtest.h>
-
-namespace {
-
-int argc = 1;
-char applicationName[] = "deliver_panel_test";
-char* argv[] = {applicationName, nullptr};
-QApplication application(argc, argv);
+#include <QTest>
 
 using video_editor::desktop_ui::DeliverPanelWidget;
 
-TEST(DeliverPanelWidgetTest, LoadsAllPlatformPresets) {
+class DeliverPanelWidgetTest final : public QObject {
+  Q_OBJECT
+
+private slots:
+  void loadsAllPlatformPresets();
+  void updatesPresetNotesWhenPresetChanges();
+  void usesCreatorReadyDefaults();
+  void exposesRunningStateAndSummaries();
+};
+
+void DeliverPanelWidgetTest::loadsAllPlatformPresets() {
   DeliverPanelWidget panel;
   panel.loadPlatformPresets();
 
   const auto* preset = panel.findChild<QComboBox*>(QStringLiteral("exportPreset"));
-  ASSERT_NE(preset, nullptr);
-  EXPECT_EQ(preset->count(), 8);
-  EXPECT_FALSE(panel.selectedPresetId().isEmpty());
+  QVERIFY(preset != nullptr);
+  QCOMPARE(preset->count(), 8);
+  QVERIFY(!panel.selectedPresetId().isEmpty());
 }
 
-TEST(DeliverPanelWidgetTest, UpdatesPresetNotesWhenPresetChanges) {
+void DeliverPanelWidgetTest::updatesPresetNotesWhenPresetChanges() {
   DeliverPanelWidget panel;
   auto* preset = panel.findChild<QComboBox*>(QStringLiteral("exportPreset"));
   auto* notes = panel.findChild<QLabel*>(QStringLiteral("presetNotes"));
-  ASSERT_NE(preset, nullptr);
-  ASSERT_NE(notes, nullptr);
+  QVERIFY(preset != nullptr);
+  QVERIFY(notes != nullptr);
 
   preset->setCurrentIndex(1);
-  EXPECT_FALSE(notes->text().isEmpty());
+  QVERIFY(!notes->text().isEmpty());
 }
 
-TEST(DeliverPanelWidgetTest, UsesCreatorReadyDefaults) {
+void DeliverPanelWidgetTest::usesCreatorReadyDefaults() {
   DeliverPanelWidget panel;
 
-  EXPECT_EQ(panel.captionModeKey(), QStringLiteral("none"));
-  EXPECT_EQ(panel.sidecarFormatKey(), QStringLiteral("srt"));
-  EXPECT_EQ(panel.overrideWidth(), 0);
-  EXPECT_EQ(panel.overrideHeight(), 0);
-  EXPECT_EQ(panel.overrideFrameRateNum(), 0u);
-  EXPECT_EQ(panel.overrideFrameRateDen(), 0u);
-  EXPECT_EQ(panel.overrideAudioBitrate(), 0u);
+  QCOMPARE(panel.captionModeKey(), QStringLiteral("none"));
+  QCOMPARE(panel.sidecarFormatKey(), QStringLiteral("srt"));
+  QCOMPARE(panel.overrideWidth(), 0);
+  QCOMPARE(panel.overrideHeight(), 0);
+  QCOMPARE(panel.overrideFrameRateNum(), 0u);
+  QCOMPARE(panel.overrideFrameRateDen(), 0u);
+  QCOMPARE(panel.overrideAudioBitrate(), 0u);
 }
 
-TEST(DeliverPanelWidgetTest, ExposesRunningStateAndSummaries) {
+void DeliverPanelWidgetTest::exposesRunningStateAndSummaries() {
   DeliverPanelWidget panel;
   panel.show();
   QApplication::processEvents();
@@ -60,20 +62,22 @@ TEST(DeliverPanelWidgetTest, ExposesRunningStateAndSummaries) {
   auto* button = panel.findChild<QToolButton*>(QStringLiteral("exportButton"));
   auto* encoder = panel.findChild<QLabel*>(QStringLiteral("encoderSummary"));
   auto* destination = panel.findChild<QLineEdit*>(QStringLiteral("destinationField"));
-  ASSERT_NE(progress, nullptr);
-  ASSERT_NE(button, nullptr);
-  ASSERT_NE(encoder, nullptr);
-  ASSERT_NE(destination, nullptr);
+  QVERIFY(progress != nullptr);
+  QVERIFY(button != nullptr);
+  QVERIFY(encoder != nullptr);
+  QVERIFY(destination != nullptr);
 
   panel.setEncoderCapabilities(QStringLiteral("test summary"));
   panel.setDestinationPath(QStringLiteral("/tmp/test.mp4"));
   panel.setExportRunning(true, 50);
 
-  EXPECT_EQ(encoder->text(), QStringLiteral("test summary"));
-  EXPECT_EQ(destination->text(), QStringLiteral("/tmp/test.mp4"));
-  EXPECT_TRUE(progress->isVisible());
-  EXPECT_EQ(progress->value(), 50);
-  EXPECT_EQ(button->text(), QStringLiteral("Cancel export"));
+  QCOMPARE(encoder->text(), QStringLiteral("test summary"));
+  QCOMPARE(destination->text(), QStringLiteral("/tmp/test.mp4"));
+  QVERIFY(progress->isVisible());
+  QCOMPARE(progress->value(), 50);
+  QCOMPARE(button->text(), QStringLiteral("Cancel export"));
 }
 
-} // namespace
+QTEST_MAIN(DeliverPanelWidgetTest)
+
+#include "deliver_panel_test.moc"

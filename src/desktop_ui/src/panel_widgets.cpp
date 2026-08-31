@@ -1840,18 +1840,24 @@ CaptionsPanelWidget::CaptionsPanelWidget(QWidget* parent) : QWidget(parent) {
   heading->setFont(font);
   emptyLayout->addWidget(heading);
   emptyLayout->addWidget(
-      makeMutedLabel(tr("Transcribe locally, or import an SRT or WebVTT file."), empty));
+      makeMutedLabel(tr("Transcribe locally, import sidecar captions, or extract embedded text "
+                        "subtitle streams."),
+                     empty));
   auto* transcribe = new QPushButton(tr("Transcribe selected audio"), empty);
   transcribe->setObjectName(QStringLiteral("emptyTranscribeButton"));
   transcribe->setAccessibleName(tr("Transcribe the selected audio clip locally"));
   auto* import = new QPushButton(tr("Import captions…"), empty);
   import->setObjectName(QStringLiteral("importCaptionsButton"));
   import->setAccessibleName(tr("Import SRT or WebVTT captions"));
+  auto* extractEmbeddedEmpty = new QPushButton(tr("Extract embedded captions…"), empty);
+  extractEmbeddedEmpty->setObjectName(QStringLiteral("extractEmbeddedCaptionsButton"));
+  extractEmbeddedEmpty->setAccessibleName(tr("Extract text subtitle streams from imported media"));
   auto* emptyAdd = new QPushButton(tr("Add caption at playhead"), empty);
   emptyAdd->setObjectName(QStringLiteral("emptyAddCaptionButton"));
   emptyAdd->setAccessibleName(tr("Add a caption at the playhead"));
   emptyLayout->addWidget(transcribe, 0, Qt::AlignHCenter);
   emptyLayout->addWidget(import, 0, Qt::AlignHCenter);
+  emptyLayout->addWidget(extractEmbeddedEmpty, 0, Qt::AlignHCenter);
   emptyLayout->addWidget(emptyAdd, 0, Qt::AlignHCenter);
   emptyLayout->addStretch();
   content_->addWidget(empty);
@@ -1893,8 +1899,12 @@ CaptionsPanelWidget::CaptionsPanelWidget(QWidget* parent) : QWidget(parent) {
   auto* exportCaptions = new QPushButton(tr("Export SRT or WebVTT…"), tablePage);
   exportCaptions->setObjectName(QStringLiteral("exportCaptionsButton"));
   exportCaptions->setAccessibleName(tr("Export sequence captions"));
+  auto* extractEmbeddedTable = new QPushButton(tr("Extract embedded captions…"), tablePage);
+  extractEmbeddedTable->setObjectName(QStringLiteral("extractEmbeddedCaptionsButton"));
+  extractEmbeddedTable->setAccessibleName(tr("Extract text subtitle streams from imported media"));
   captionActions->addWidget(addCaption);
   captionActions->addWidget(removeCaption);
+  captionActions->addWidget(extractEmbeddedTable);
   captionActions->addStretch();
   captionActions->addWidget(exportCaptions);
   tableLayout->addLayout(captionActions);
@@ -2016,10 +2026,14 @@ CaptionsPanelWidget::CaptionsPanelWidget(QWidget* parent) : QWidget(parent) {
   connect(transcribe, &QPushButton::clicked, this,
           [this] { emit transcribeWithOptionsRequested(optionsFromControls()); });
   connect(import, &QPushButton::clicked, this, &CaptionsPanelWidget::importCaptionsRequested);
+  connect(extractEmbeddedEmpty, &QPushButton::clicked, this,
+          &CaptionsPanelWidget::extractEmbeddedCaptionsRequested);
   connect(emptyAdd, &QPushButton::clicked, this, &CaptionsPanelWidget::addCaptionRequested);
   connect(exportCaptions, &QPushButton::clicked, this,
           &CaptionsPanelWidget::exportCaptionsRequested);
   connect(addCaption, &QPushButton::clicked, this, &CaptionsPanelWidget::addCaptionRequested);
+  connect(extractEmbeddedTable, &QPushButton::clicked, this,
+          &CaptionsPanelWidget::extractEmbeddedCaptionsRequested);
   connect(removeCaption, &QPushButton::clicked, this, [this] {
     if (table_->currentRow() >= 0) {
       emit removeCaptionRequested(table_->currentRow());

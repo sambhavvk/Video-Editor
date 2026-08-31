@@ -8,6 +8,7 @@
 #include "video_editor/desktop_ui/ui_types.hpp"
 
 #include <QHash>
+#include <QKeySequence>
 #include <QMainWindow>
 #include <memory>
 
@@ -46,6 +47,11 @@ public:
     return workspace_;
   }
   [[nodiscard]] QAction* action(const QString& id) const;
+  [[nodiscard]] QKeySequence shortcutDefault(const QString& commandId) const;
+  [[nodiscard]] QString applyShortcutBinding(const QString& commandId,
+                                             const QKeySequence& shortcut,
+                                             bool replaceConflicts = false);
+  void resetShortcutBinding(const QString& commandId);
   [[nodiscard]] ProgramViewer* programViewer() const noexcept {
     return program_viewer_;
   }
@@ -158,6 +164,8 @@ private:
   void createCentralArea();
   void createPanels();
   void createActions();
+  void loadShortcutOverrides();
+  void showKeyboardShortcutsPreferences();
   void createMenus();
   void createToolBars();
   void createStatusBar();
@@ -183,6 +191,7 @@ private:
   double shuttle_rate_{0.0};
 
   QHash<QString, QAction*> actions_;
+  QHash<QString, QKeySequence> shortcut_defaults_;
   QHash<Workspace, QAction*> workspace_actions_;
   QHash<Workspace, QByteArray> session_layouts_;
 

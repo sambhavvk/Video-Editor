@@ -23,8 +23,9 @@ namespace video_editor::app {
                                                      const QString& configured_path);
 
 // One fresh video_editor_worker_host process, one framed StartJob, then framed
-// WorkerEvents until the process exits. kill() is the cancellation/crash
-// boundary. The QProcess is a QObject child and is never leaked.
+// WorkerEvents until the process exits. cancel() sends CancelJob over stdin
+// and falls back to kill() on write failure or timeout. The QProcess is a
+// QObject child and is never leaked.
 class WorkerHostSession final : public QObject {
 public:
   using EventHandler = std::function<void(const jobs::v1::WorkerEvent&)>;
@@ -62,6 +63,7 @@ private:
   void onFinished(int exit_code, QProcess::ExitStatus exit_status);
   void onErrorOccurred(QProcess::ProcessError error);
   void emitFinished(bool abnormal, int exit_code, QProcess::ExitStatus exit_status);
+  void closeWriteChannelIfOpen();
   void resetProcess();
 
   QProcess* process_{nullptr};
@@ -73,6 +75,7 @@ private:
   FailedHandler start_failed_handler_;
   bool finished_emitted_{false};
   bool start_failed_{false};
+  bool cancel_pending_{false};
 };
 
 } // namespace video_editor::app

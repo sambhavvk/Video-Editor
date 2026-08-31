@@ -101,10 +101,13 @@ typed Unavailable error and the core/fake-device tests remain fully usable.
 `MiniaudioDeviceEnumerator` reports connected playback endpoints with stable opaque IDs and a
 default marker. `AudioDeviceRecovery` is a non-callback state machine that can stop a disconnected
 endpoint and reopen the selected endpoint when a refreshed list reports it again. The desktop
-enumerates asynchronously once per second, persists the selected ID, and passes it into realtime
-playback startup. Loss pauses the audio master; return retries after serialized stop completes while
-the original playback intent remains active. Selecting **System default** stores the empty stable ID.
-Native event-driven hot-plug notifications are not used, so detection can lag by one poll interval.
+enumerates asynchronously, persists the selected ID, and passes it into realtime playback startup.
+While a miniaudio output device is open, `MiniaudioOutputDevice` registers
+`notificationCallback` for stop/reroute/interruption events and marshals them to a host callback;
+the desktop queues an immediate refresh from that path and slows backup polling to 7.5 s. Idle or
+unavailable backends keep the one-second poll. Loss pauses the audio master; return retries after
+serialized stop completes while the original playback intent remains active. Selecting **System
+default** stores the empty stable ID. Pulse/PipeWire idle subscription is not implemented.
 
 Realtime telemetry publishes callback-safe sample peak/RMS. The callback also copies into a
 preallocated, bounded, single-producer queue; `RealtimeLoudnessAnalyzer` consumes it on a dedicated
@@ -125,7 +128,7 @@ newest command result/error.
 
 The current worker uses independent provider pulls rather than a persistent
 FFmpeg decode lane. The application should therefore use larger decode-ahead
-blocks until the sequential decoder exists. Native hot-plug callbacks,
+blocks until the sequential decoder exists. Idle Pulse/PipeWire hot-plug subscription,
 latency calibration/hardware timestamps, time-stretch, and arbitrary buses remain future work.
 Accelerated one-hour zero-xrun and two-hour drift simulations cover the bounded core; physical
 device/driver/OS matrix endurance remains a release gate.

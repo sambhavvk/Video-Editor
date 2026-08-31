@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "video_editor/workers/job_dispatch.h"
 
+#include "video_editor/job_service/cancellation_registry.h"
 #include "video_editor/audio_render/original_audio_registry.h"
 #include "video_editor/audio_render/timeline_audio_renderer.h"
 #include "video_editor/edit_model/model.h"
 #include "video_editor/edit_model/timeline_editor.h"
 #include "video_editor/export_service/export_service.h"
 #include "video_editor/job_service/job_id.h"
+#include "video_editor/media_cache/cache_store.h"
+#include "video_editor/media_cache/thumbnail_service.h"
+#include "video_editor/media_cache/waveform_service.h"
 #include "video_editor/media_codec/probe.h"
 #include "video_editor/playback/asset_registry.h"
 #include "video_editor/playback/ffmpeg_frame_provider.h"
@@ -16,6 +20,7 @@
 #include "video_editor/transcription_service/transcription_service.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -25,6 +30,7 @@
 #include <stop_token>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace video_editor::workers {
@@ -40,7 +46,44 @@ constexpr std::string_view kProResHalfPreset{"video-editor.proxy.prores-half.v1"
 constexpr std::string_view kFfv1HalfPreset{"video-editor.proxy.ffv1-half.v1"};
 constexpr std::string_view kTranscribePreset{"video-editor.transcribe.whisper-base.v1"};
 constexpr std::string_view kExportPreset{"video-editor.export.creator.v1"};
+constexpr std::string_view kThumbnailPreset{"video-editor.thumbnail.v1"};
+constexpr std::string_view kWaveformPreset{"video-editor.waveform.v1"};
 constexpr std::uint32_t kExportSchemaVersion = 1;
+constexpr std::uint32_t kThumbnailJobSchemaVersion = 1;
+constexpr std::uint32_t kWaveformJobSchemaVersion = 1;
+
+class RegistryCancelWatcher final {
+public:
+  RegistryCancelWatcher(const jobs::CancellationRegistry::Token& token,
+                        std::stop_source& internal_stop)
+      : token_(token), internal_stop_(&internal_stop),
+        thread_([this](const std::stop_token stop) { watch(stop); }) {}
+
+  ~RegistryCancelWatcher() {
+    thread_.request_stop();
+    if (thread_.joinable()) {
+      thread_.join();
+    }
+  }
+
+  RegistryCancelWatcher(const RegistryCancelWatcher&) = delete;
+  RegistryCancelWatcher& operator=(const RegistryCancelWatcher&) = delete;
+
+private:
+  void watch(const std::stop_token stop) {
+    while (!stop.stop_requested()) {
+      if (token_->load(std::memory_order_acquire)) {
+        internal_stop_->request_stop();
+        return;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+  }
+
+  jobs::CancellationRegistry::Token token_;
+  std::stop_source* internal_stop_;
+  std::jthread thread_;
+};
 
 protocol::WorkerEvent event_for(const protocol::JobSpec& spec, const protocol::JobState state,
                                 const double progress, const std::string_view phase) {
@@ -314,7 +357,8 @@ struct ProxyErrorDescription {
   return {"internal", "Proxy generation failed unexpectedly."};
 }
 
-[[nodiscard]] bool run_proxy(const protocol::JobSpec& spec, const EventSink& sink) {
+[[nodiscard]] bool run_proxy(const protocol::JobSpec& spec, const EventSink& sink,
+                             const jobs::CancellationRegistry::Token& cancel_token) {
   ParsedProxyRequest parsed;
   std::string validation_error;
   if (!parse_proxy_request(spec, parsed, validation_error)) {
@@ -322,11 +366,15 @@ struct ProxyErrorDescription {
   }
 
   std::stop_source internal_stop;
+  RegistryCancelWatcher cancel_watcher(cancel_token, internal_stop);
   double last_progress = 0.0;
   bool sink_available = true;
   const auto progress = [&](const proxy::Progress& update) {
     if (!sink_available) {
       return;
+    }
+    if (cancel_token->load(std::memory_order_acquire)) {
+      internal_stop.request_stop();
     }
     const double next = std::max(last_progress, protocol_progress(update));
     auto event = event_for(spec, protocol::JOB_STATE_RUNNING, next, progress_phase(update.stage));
@@ -424,7 +472,8 @@ struct ParsedTranscribeRequest final {
 }
 
 [[nodiscard]] bool run_transcribe(const protocol::JobSpec& spec, const EventSink& sink,
-                                  DispatchDependencies& dependencies) {
+                                  DispatchDependencies& dependencies,
+                                  const jobs::CancellationRegistry::Token& cancel_token) {
   ParsedTranscribeRequest parsed;
   std::string validation_error;
   if (!parse_transcribe_request(spec, parsed, validation_error)) {
@@ -447,11 +496,15 @@ struct ParsedTranscribeRequest final {
   }
 
   std::stop_source stop;
+  RegistryCancelWatcher cancel_watcher(cancel_token, stop);
   double last_progress = 0.0;
   bool sink_available = true;
   const auto progress = [&](const double value, const std::string_view phase) {
     if (!sink_available)
       return;
+    if (cancel_token->load(std::memory_order_acquire)) {
+      stop.request_stop();
+    }
     const double next = std::max(last_progress, std::clamp(value, 0.0, 1.0));
     auto event = event_for(spec, protocol::JOB_STATE_RUNNING, next, phase);
     sink_available = sink(event);
@@ -773,7 +826,8 @@ struct ExportErrorDescription {
   return true;
 }
 
-[[nodiscard]] bool run_export(const protocol::JobSpec& spec, const EventSink& sink) {
+[[nodiscard]] bool run_export(const protocol::JobSpec& spec, const EventSink& sink,
+                              const jobs::CancellationRegistry::Token& cancel_token) {
   ParsedExportRequest parsed;
   std::string validation_error;
   if (!parse_export_request(spec, parsed, validation_error)) {
@@ -830,11 +884,15 @@ struct ExportErrorDescription {
   const auto captions = snapshot.sequence().captions;
 
   std::stop_source internal_stop;
+  RegistryCancelWatcher cancel_watcher(cancel_token, internal_stop);
   double last_progress = 0.0;
   bool sink_available = true;
   const auto progress = [&](const export_service::ExportProgress& update) {
     if (!sink_available) {
       return;
+    }
+    if (cancel_token->load(std::memory_order_acquire)) {
+      internal_stop.request_stop();
     }
     if (update.restarted_after_hardware_fallback) {
       last_progress = 0.0;
@@ -911,18 +969,459 @@ struct ExportErrorDescription {
   return sink(event);
 }
 
+[[nodiscard]] bool write_bytes_atomically(const std::filesystem::path& destination,
+                                          const std::span<const std::byte> bytes,
+                                          std::string& error) {
+  if (destination.empty() || bytes.empty()) {
+    error = "destination and bytes must not be empty";
+    return false;
+  }
+  const std::filesystem::path parent = destination.parent_path();
+  std::error_code filesystem_error;
+  if (!parent.empty() && !std::filesystem::exists(parent, filesystem_error)) {
+    if (!std::filesystem::create_directories(parent, filesystem_error) || filesystem_error) {
+      error = filesystem_error ? "could not create output parent directory: " +
+                                     filesystem_error.message()
+                               : "could not create output parent directory";
+      return false;
+    }
+  }
+  const std::filesystem::path temp_path =
+      parent / (destination.filename().string() + ".veworker.tmp");
+  {
+    std::ofstream output(temp_path, std::ios::binary | std::ios::trunc);
+    if (!output) {
+      error = "could not open temporary output file";
+      return false;
+    }
+    output.write(reinterpret_cast<const char*>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+    if (!output) {
+      std::error_code ignored;
+      std::filesystem::remove(temp_path, ignored);
+      error = "could not write temporary output file";
+      return false;
+    }
+  }
+  std::error_code rename_error;
+  std::filesystem::rename(temp_path, destination, rename_error);
+  if (rename_error) {
+    std::error_code ignored;
+    std::filesystem::remove(temp_path, ignored);
+    error = "could not install output file: " + rename_error.message();
+    return false;
+  }
+  return true;
+}
+
+struct ParsedThumbnailRequest final {
+  std::filesystem::path input;
+  std::filesystem::path output;
+  media_cache::ThumbnailOptions options;
+  std::string asset_id;
+  int stream_index{-1};
+};
+
+[[nodiscard]] bool thumbnail_strategy_from_int(const int value,
+                                               media_cache::ThumbnailOptions::Strategy& strategy,
+                                               std::string& error) {
+  switch (value) {
+  case 0:
+    strategy = media_cache::ThumbnailOptions::Strategy::First;
+    return true;
+  case 1:
+    strategy = media_cache::ThumbnailOptions::Strategy::Middle;
+    return true;
+  case 2:
+    strategy = media_cache::ThumbnailOptions::Strategy::Last;
+    return true;
+  default:
+    error = "strategy must be 0 (First), 1 (Middle), or 2 (Last)";
+    return false;
+  }
+}
+
+[[nodiscard]] bool parse_thumbnail_request(const protocol::JobSpec& spec,
+                                         ParsedThumbnailRequest& parsed, std::string& error) {
+  if (!jobs::valid_job_id(spec.job_id())) {
+    error = "job_id must be a canonical UUID job identifier";
+    return false;
+  }
+  if (spec.input_uris_size() != 1 || spec.input_uris(0).empty() || spec.output_uri().empty()) {
+    error = "input_uris must contain exactly one source path and output_uri must not be empty";
+    return false;
+  }
+  if (!spec.project_checkpoint().empty()) {
+    error = "project_checkpoint must be empty for thumbnail jobs";
+    return false;
+  }
+  if (spec.preset_id() != kThumbnailPreset) {
+    error = "preset_id must be video-editor.thumbnail.v1";
+    return false;
+  }
+  if (has_embedded_nul(spec.input_uris(0)) || has_embedded_nul(spec.output_uri()) ||
+      !valid_utf8(spec.input_uris(0)) || !valid_utf8(spec.output_uri())) {
+    error = "source and output paths must be well-formed UTF-8 without NUL bytes";
+    return false;
+  }
+  parsed.input = utf8_path(spec.input_uris(0));
+  parsed.output = utf8_path(spec.output_uri());
+  if (!parsed.input.is_absolute() || !parsed.output.is_absolute()) {
+    error = "source and output must be absolute local filesystem paths";
+    return false;
+  }
+  std::error_code filesystem_error;
+  if (!std::filesystem::is_regular_file(parsed.input, filesystem_error)) {
+    error = filesystem_error ? "source path could not be inspected: " + filesystem_error.message()
+                             : "source path is not a regular file";
+    return false;
+  }
+  filesystem_error.clear();
+  if (std::filesystem::exists(parsed.output, filesystem_error) &&
+      std::filesystem::is_directory(parsed.output, filesystem_error)) {
+    error = "output path refers to a directory";
+    return false;
+  }
+  if (filesystem_error) {
+    error = "output path could not be inspected: " + filesystem_error.message();
+    return false;
+  }
+
+  protocol::ThumbnailJobOptions options;
+  if (!options.ParseFromString(spec.options())) {
+    error = "options is not a valid ThumbnailJobOptions protobuf";
+    return false;
+  }
+  if (options.GetReflection()->GetUnknownFields(options).field_count() != 0) {
+    error = "options contains unknown fields";
+    return false;
+  }
+  if (options.schema_version() != kThumbnailJobSchemaVersion) {
+    error = "schema_version must be 1";
+    return false;
+  }
+  if (options.asset_id().empty() || has_embedded_nul(options.asset_id()) ||
+      !valid_utf8(options.asset_id())) {
+    error = "asset_id must be well-formed UTF-8 without NUL bytes";
+    return false;
+  }
+  parsed.asset_id = options.asset_id();
+  parsed.stream_index = options.stream_index();
+  parsed.options.maximum_width = options.maximum_width() == 0 ? 320 : options.maximum_width();
+  parsed.options.quality = options.quality() == 0 ? 85 : options.quality();
+  if (!thumbnail_strategy_from_int(options.strategy(), parsed.options.strategy, error)) {
+    return false;
+  }
+  return true;
+}
+
+struct ThumbnailErrorDescription {
+  std::string_view category;
+  std::string_view user_message;
+  bool retryable{false};
+};
+
+[[nodiscard]] ThumbnailErrorDescription describe(const media_cache::ThumbnailErrorCode code) {
+  using media_cache::ThumbnailErrorCode;
+  switch (code) {
+  case ThumbnailErrorCode::InvalidArgument:
+    return {"invalid-argument", "The thumbnail settings are not valid."};
+  case ThumbnailErrorCode::SourceNotFound:
+  case ThumbnailErrorCode::NotFound:
+    return {"source-not-found", "The source media is missing or unreadable."};
+  case ThumbnailErrorCode::NoVideoStream:
+    return {"no-video-stream", "The source media has no video stream."};
+  case ThumbnailErrorCode::OpenFailed:
+    return {"media-open", "The source media could not be opened."};
+  case ThumbnailErrorCode::DecodeFailed:
+    return {"media-decode", "The source media could not be decoded."};
+  case ThumbnailErrorCode::ScaleFailed:
+    return {"media-scale", "The thumbnail could not be scaled."};
+  case ThumbnailErrorCode::EncodeFailed:
+    return {"media-encode", "The thumbnail could not be encoded."};
+  case ThumbnailErrorCode::StoreFailed:
+    return {"io-write", "The thumbnail could not be saved.", true};
+  case ThumbnailErrorCode::Cancelled:
+    return {"cancelled", "Thumbnail generation was cancelled."};
+  case ThumbnailErrorCode::Internal:
+  case ThumbnailErrorCode::None:
+    return {"internal", "Thumbnail generation failed unexpectedly."};
+  }
+  return {"internal", "Thumbnail generation failed unexpectedly."};
+}
+
+[[nodiscard]] bool run_thumbnail(const protocol::JobSpec& spec, const EventSink& sink,
+                                 const jobs::CancellationRegistry::Token& cancel_token) {
+  ParsedThumbnailRequest parsed;
+  std::string validation_error;
+  if (!parse_thumbnail_request(spec, parsed, validation_error)) {
+    auto event = event_for(spec, protocol::JOB_STATE_FAILED, 0.0, "validating");
+    fail(event, "invalid-argument", 0, "The thumbnail settings are not valid.", validation_error);
+    return sink(event);
+  }
+
+  const std::filesystem::path staging_root =
+      parsed.output.parent_path() / (".veworker-thumb-" + spec.job_id());
+  std::error_code cleanup_error;
+  std::filesystem::remove_all(staging_root, cleanup_error);
+
+  std::stop_source internal_stop;
+  RegistryCancelWatcher cancel_watcher(cancel_token, internal_stop);
+  if (!sink(event_for(spec, protocol::JOB_STATE_RUNNING, 0.1, "decoding"))) {
+    return false;
+  }
+  media_cache::CacheStore staging_store(staging_root,
+                                        media_cache::CacheStoreOptions{.integrity_check = false});
+  const auto generated = media_cache::generate_thumbnail(
+      parsed.input, parsed.stream_index, parsed.options, parsed.asset_id, staging_store,
+      internal_stop.get_token());
+  std::filesystem::remove_all(staging_root, cleanup_error);
+  if (!generated) {
+    std::error_code ignored;
+    std::filesystem::remove(parsed.output, ignored);
+    const ThumbnailErrorDescription description = describe(generated.error().code);
+    auto event = event_for(spec, protocol::JOB_STATE_FAILED, 0.0, "failed");
+    fail(event, description.category, generated.error().native_code, description.user_message,
+         generated.error().message, description.retryable);
+    if (generated.error().code == media_cache::ThumbnailErrorCode::Cancelled) {
+      event.mutable_event()->set_state(protocol::JOB_STATE_CANCELLED);
+      event.mutable_event()->set_phase("cancelled");
+    }
+    return sink(event);
+  }
+
+  std::string write_error;
+  if (!write_bytes_atomically(parsed.output,
+                              std::span<const std::byte>(generated.value().jpeg_bytes.data(),
+                                                         generated.value().jpeg_bytes.size()),
+                              write_error)) {
+    std::error_code ignored;
+    std::filesystem::remove(parsed.output, ignored);
+    auto event = event_for(spec, protocol::JOB_STATE_FAILED, 0.0, "failed");
+    fail(event, "io-write", 0, "The thumbnail could not be saved.", write_error, true);
+    return sink(event);
+  }
+
+  const media_cache::Thumbnail& thumbnail = generated.value();
+  auto event = event_for(spec, protocol::JOB_STATE_SUCCEEDED, 1.0, "complete");
+  protocol::JobEvent* job_event = event.mutable_event();
+  job_event->set_result_uri(utf8_string(parsed.output));
+  auto* metadata = job_event->mutable_metadata();
+  (*metadata)["contract_version"] = "1";
+  (*metadata)["preset_id"] = std::string(kThumbnailPreset);
+  (*metadata)["asset_id"] = parsed.asset_id;
+  (*metadata)["parameter_hash"] = media_cache::thumbnail_parameter_hash(parsed.options);
+  (*metadata)["width"] = std::to_string(thumbnail.width);
+  (*metadata)["height"] = std::to_string(thumbnail.height);
+  (*metadata)["source_pts_us"] = std::to_string(thumbnail.source_pts_microseconds);
+  return sink(event);
+}
+
+struct ParsedWaveformRequest final {
+  std::filesystem::path input;
+  std::filesystem::path output;
+  media_cache::WaveformOptions options;
+  std::string asset_id;
+  int stream_index{-1};
+};
+
+[[nodiscard]] bool parse_waveform_request(const protocol::JobSpec& spec, ParsedWaveformRequest& parsed,
+                                          std::string& error) {
+  if (!jobs::valid_job_id(spec.job_id())) {
+    error = "job_id must be a canonical UUID job identifier";
+    return false;
+  }
+  if (spec.input_uris_size() != 1 || spec.input_uris(0).empty() || spec.output_uri().empty()) {
+    error = "input_uris must contain exactly one source path and output_uri must not be empty";
+    return false;
+  }
+  if (!spec.project_checkpoint().empty()) {
+    error = "project_checkpoint must be empty for waveform jobs";
+    return false;
+  }
+  if (spec.preset_id() != kWaveformPreset) {
+    error = "preset_id must be video-editor.waveform.v1";
+    return false;
+  }
+  if (has_embedded_nul(spec.input_uris(0)) || has_embedded_nul(spec.output_uri()) ||
+      !valid_utf8(spec.input_uris(0)) || !valid_utf8(spec.output_uri())) {
+    error = "source and output paths must be well-formed UTF-8 without NUL bytes";
+    return false;
+  }
+  parsed.input = utf8_path(spec.input_uris(0));
+  parsed.output = utf8_path(spec.output_uri());
+  if (!parsed.input.is_absolute() || !parsed.output.is_absolute()) {
+    error = "source and output must be absolute local filesystem paths";
+    return false;
+  }
+  std::error_code filesystem_error;
+  if (!std::filesystem::is_regular_file(parsed.input, filesystem_error)) {
+    error = filesystem_error ? "source path could not be inspected: " + filesystem_error.message()
+                             : "source path is not a regular file";
+    return false;
+  }
+  filesystem_error.clear();
+  if (std::filesystem::exists(parsed.output, filesystem_error) &&
+      std::filesystem::is_directory(parsed.output, filesystem_error)) {
+    error = "output path refers to a directory";
+    return false;
+  }
+  if (filesystem_error) {
+    error = "output path could not be inspected: " + filesystem_error.message();
+    return false;
+  }
+
+  protocol::WaveformJobOptions options;
+  if (!options.ParseFromString(spec.options())) {
+    error = "options is not a valid WaveformJobOptions protobuf";
+    return false;
+  }
+  if (options.GetReflection()->GetUnknownFields(options).field_count() != 0) {
+    error = "options contains unknown fields";
+    return false;
+  }
+  if (options.schema_version() != kWaveformJobSchemaVersion) {
+    error = "schema_version must be 1";
+    return false;
+  }
+  if (options.asset_id().empty() || has_embedded_nul(options.asset_id()) ||
+      !valid_utf8(options.asset_id())) {
+    error = "asset_id must be well-formed UTF-8 without NUL bytes";
+    return false;
+  }
+  parsed.asset_id = options.asset_id();
+  parsed.stream_index = options.stream_index();
+  parsed.options.finest_level_buckets =
+      options.finest_level_buckets() == 0 ? 2000 : options.finest_level_buckets();
+  parsed.options.level_count = options.level_count() == 0 ? 8 : options.level_count();
+  parsed.options.sample_rate = options.sample_rate() == 0 ? 48'000 : options.sample_rate();
+  parsed.options.channel_count = options.channel_count() == 0 ? 1 : options.channel_count();
+  return true;
+}
+
+struct WaveformErrorDescription {
+  std::string_view category;
+  std::string_view user_message;
+  bool retryable{false};
+};
+
+[[nodiscard]] WaveformErrorDescription describe(const media_cache::WaveformErrorCode code) {
+  using media_cache::WaveformErrorCode;
+  switch (code) {
+  case WaveformErrorCode::InvalidArgument:
+    return {"invalid-argument", "The waveform settings are not valid."};
+  case WaveformErrorCode::SourceNotFound:
+  case WaveformErrorCode::NotFound:
+    return {"source-not-found", "The source media is missing or unreadable."};
+  case WaveformErrorCode::NoAudioStream:
+    return {"no-audio-stream", "The source media has no audio stream."};
+  case WaveformErrorCode::OpenFailed:
+    return {"media-open", "The source media could not be opened."};
+  case WaveformErrorCode::DecodeFailed:
+    return {"media-decode", "The source media could not be decoded."};
+  case WaveformErrorCode::ResampleFailed:
+    return {"media-resample", "The waveform could not be resampled."};
+  case WaveformErrorCode::StoreFailed:
+    return {"io-write", "The waveform could not be saved.", true};
+  case WaveformErrorCode::Cancelled:
+    return {"cancelled", "Waveform generation was cancelled."};
+  case WaveformErrorCode::Internal:
+  case WaveformErrorCode::None:
+    return {"internal", "Waveform generation failed unexpectedly."};
+  }
+  return {"internal", "Waveform generation failed unexpectedly."};
+}
+
+[[nodiscard]] bool run_waveform(const protocol::JobSpec& spec, const EventSink& sink,
+                                const jobs::CancellationRegistry::Token& cancel_token) {
+  ParsedWaveformRequest parsed;
+  std::string validation_error;
+  if (!parse_waveform_request(spec, parsed, validation_error)) {
+    auto event = event_for(spec, protocol::JOB_STATE_FAILED, 0.0, "validating");
+    fail(event, "invalid-argument", 0, "The waveform settings are not valid.", validation_error);
+    return sink(event);
+  }
+
+  const std::filesystem::path staging_root =
+      parsed.output.parent_path() / (".veworker-wave-" + spec.job_id());
+  std::error_code cleanup_error;
+  std::filesystem::remove_all(staging_root, cleanup_error);
+
+  std::stop_source internal_stop;
+  RegistryCancelWatcher cancel_watcher(cancel_token, internal_stop);
+  if (!sink(event_for(spec, protocol::JOB_STATE_RUNNING, 0.1, "decoding"))) {
+    return false;
+  }
+  media_cache::CacheStore staging_store(staging_root,
+                                        media_cache::CacheStoreOptions{.integrity_check = false});
+  const auto generated = media_cache::generate_waveform(
+      parsed.input, parsed.stream_index, parsed.options, parsed.asset_id, staging_store,
+      internal_stop.get_token());
+  std::filesystem::remove_all(staging_root, cleanup_error);
+  if (!generated) {
+    std::error_code ignored;
+    std::filesystem::remove(parsed.output, ignored);
+    const WaveformErrorDescription description = describe(generated.error().code);
+    auto event = event_for(spec, protocol::JOB_STATE_FAILED, 0.0, "failed");
+    fail(event, description.category, generated.error().native_code, description.user_message,
+         generated.error().message, description.retryable);
+    if (generated.error().code == media_cache::WaveformErrorCode::Cancelled) {
+      event.mutable_event()->set_state(protocol::JOB_STATE_CANCELLED);
+      event.mutable_event()->set_phase("cancelled");
+    }
+    return sink(event);
+  }
+
+  const std::vector<std::byte> blob = media_cache::serialize_waveform(generated.value());
+  std::string write_error;
+  if (!write_bytes_atomically(parsed.output, blob, write_error)) {
+    std::error_code ignored;
+    std::filesystem::remove(parsed.output, ignored);
+    auto event = event_for(spec, protocol::JOB_STATE_FAILED, 0.0, "failed");
+    fail(event, "io-write", 0, "The waveform could not be saved.", write_error, true);
+    return sink(event);
+  }
+
+  auto event = event_for(spec, protocol::JOB_STATE_SUCCEEDED, 1.0, "complete");
+  protocol::JobEvent* job_event = event.mutable_event();
+  job_event->set_result_uri(utf8_string(parsed.output));
+  auto* metadata = job_event->mutable_metadata();
+  (*metadata)["contract_version"] = "1";
+  (*metadata)["preset_id"] = std::string(kWaveformPreset);
+  (*metadata)["asset_id"] = parsed.asset_id;
+  (*metadata)["parameter_hash"] = media_cache::waveform_parameter_hash(parsed.options);
+  (*metadata)["level_count"] = std::to_string(generated.value().levels.size());
+  (*metadata)["total_samples"] = std::to_string(generated.value().total_samples);
+  return sink(event);
+}
+
 } // namespace
 
 bool dispatch_job(const protocol::JobSpec& spec, const EventSink& sink) {
   DispatchDependencies dependencies;
-  return dispatch_job(spec, sink, dependencies);
+  jobs::CancellationRegistry registry;
+  return dispatch_job(spec, sink, dependencies, registry);
 }
 
 bool dispatch_job(const protocol::JobSpec& spec, const EventSink& sink,
                   DispatchDependencies& dependencies) {
+  jobs::CancellationRegistry registry;
+  return dispatch_job(spec, sink, dependencies, registry);
+}
+
+bool dispatch_job(const protocol::JobSpec& spec, const EventSink& sink,
+                  DispatchDependencies& dependencies, jobs::CancellationRegistry& registry) {
   if (!sink) {
     return false;
   }
+  const jobs::CancellationRegistry::Token cancel_token = registry.begin(spec.job_id());
+  struct FinishGuard final {
+    jobs::CancellationRegistry& registry;
+    std::string job_id;
+    ~FinishGuard() {
+      registry.finish(job_id);
+    }
+  } finish_guard{registry, spec.job_id()};
   if (!sink(event_for(spec, protocol::JOB_STATE_ACCEPTED, 0.0, "accepted"))) {
     return false;
   }
@@ -930,32 +1429,40 @@ bool dispatch_job(const protocol::JobSpec& spec, const EventSink& sink,
     return run_probe(spec, sink);
   }
   if (spec.kind() == protocol::JOB_KIND_PROXY) {
-    return run_proxy(spec, sink);
+    return run_proxy(spec, sink, cancel_token);
   }
   if (spec.kind() == protocol::JOB_KIND_TRANSCRIBE) {
-    return run_transcribe(spec, sink, dependencies);
+    return run_transcribe(spec, sink, dependencies, cancel_token);
   }
   if (spec.kind() == protocol::JOB_KIND_EXPORT) {
-    return run_export(spec, sink);
+    return run_export(spec, sink, cancel_token);
+  }
+  if (spec.kind() == protocol::JOB_KIND_THUMBNAIL) {
+    return run_thumbnail(spec, sink, cancel_token);
+  }
+  if (spec.kind() == protocol::JOB_KIND_WAVEFORM) {
+    return run_waveform(spec, sink, cancel_token);
   }
   auto event = event_for(spec, protocol::JOB_STATE_FAILED, 0.0, "unsupported");
   fail(event, "unsupported-job", 0, "This worker does not implement that job yet.",
-       "only JOB_KIND_PROBE, JOB_KIND_PROXY, JOB_KIND_TRANSCRIBE, and JOB_KIND_EXPORT are enabled "
-       "in this worker");
+       "only JOB_KIND_PROBE, JOB_KIND_PROXY, JOB_KIND_TRANSCRIBE, JOB_KIND_EXPORT, "
+       "JOB_KIND_THUMBNAIL, and JOB_KIND_WAVEFORM are enabled in this worker");
   return sink(event);
 }
 
-bool reject_unavailable_cancellation(const protocol::CancelJob& request, const EventSink& sink) {
+bool handle_cancel_job(const protocol::CancelJob& request, jobs::CancellationRegistry& registry,
+                       const EventSink& sink) {
+  if (registry.cancel(request.job_id())) {
+    return true;
+  }
   if (!sink) {
     return false;
   }
   protocol::JobSpec spec;
   spec.set_job_id(request.job_id());
-  auto event = event_for(spec, protocol::JOB_STATE_FAILED, 0.0, "cancellation-unavailable");
-  fail(event, "unsupported-cancellation", 0,
-       "This worker cannot cancel a job after it has started.",
-       "the stdin/stdout framing loop dispatches jobs synchronously and cannot read CancelJob "
-       "until the active job has finished");
+  auto event = event_for(spec, protocol::JOB_STATE_FAILED, 0.0, "cancellation-rejected");
+  fail(event, "job-not-found", 0, "No running job matches that identifier.",
+       "CancelJob referenced a job that is not active in this worker");
   return sink(event);
 }
 

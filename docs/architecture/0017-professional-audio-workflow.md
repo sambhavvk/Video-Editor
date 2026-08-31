@@ -51,12 +51,18 @@ the device callback.
 
 - Device enumeration produces stable opaque IDs and human-readable names off the Qt thread. The
   persisted selected ID is passed into miniaudio when realtime playback opens.
-- The desktop polls endpoints once per second off the UI thread. Loss of the selected endpoint or
-  current system default pauses the audio master safely; return records a persistent recovery
-  intent and retries reopen only after the serialized stop settles. A later pause/stop cancels that
-  intent, preventing stale playback from restarting. The empty stable ID selects **System default**.
-- `AudioDeviceRecovery` remains the dependency-free backend coordinator. Native OS hot-plug
-  callbacks are not required for correctness; polling means notification can lag by one interval.
+- On Linux builds with miniaudio, an open realtime output device registers miniaudio
+  `notificationCallback` handlers for stop, reroute, and interruption events. Notifications are
+  marshaled off the backend thread onto the Qt main thread and trigger an immediate off-UI-thread
+  device refresh. A 7.5 s backup poll remains while notifications are live; idle or unavailable
+  backends keep the one-second poll.
+- Loss of the selected endpoint or current system default pauses the audio master safely; return
+  records a persistent recovery intent and retries reopen only after the serialized stop settles. A
+  later pause/stop cancels that intent, preventing stale playback from restarting. The empty stable
+  ID selects **System default**.
+- `AudioDeviceRecovery` remains the dependency-free backend coordinator. Polling and miniaudio
+  notifications together bound hot-plug detection latency; neither path opens or closes devices from
+  realtime callbacks.
 - An unavailable or failed selected device retains the existing explicit silent timer fallback;
   it never changes the project revision.
 
@@ -65,7 +71,7 @@ the device callback.
 The same track controls and processing are heard in realtime pre-render and deterministic export,
 and loudness adjustment remains a visible ordinary edit. The device callback still performs no
 allocation, locking, decoding, filesystem access, Qt work, libebur128 analysis, or stateful DSP.
-Arbitrary buses, time-stretch, native event-driven hot-plug notification, and the supported
+Arbitrary buses, time-stretch, Pulse/PipeWire idle hot-plug subscription, and the supported
 physical-device endurance matrix remain explicit follow-up work. Per-device output latency
 calibration is stored in QSettings and applied on playback start; residual uncertainty remains.
 

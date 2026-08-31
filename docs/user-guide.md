@@ -269,6 +269,7 @@ a build capability, not an audio-mixer or operating-system volume setting.
 Open **Audio & Captions** to:
 
 - import UTF-8 SRT or WebVTT;
+- extract text subtitle streams (SubRip, WebVTT, mov_text) from imported media;
 - add a two-second `New caption` cue at the playhead;
 - edit caption text directly in the table;
 - delete the selected caption;
@@ -280,11 +281,13 @@ Open **Audio & Captions** to:
 - export the sequence captions as SRT or WebVTT.
 
 Import validates timing, order, overlap, cue text, and UTF-8. All cues from one import form a single
-undoable edit batch. Export writes atomically and rounds timing to the nearest millisecond because
+undoable edit batch. **Extract embedded captions…** reads supported text subtitle streams from media
+already in the bin (PGS, ASS, and other bitmap or styled streams are rejected). Export writes
+atomically and rounds timing to the nearest millisecond because
 SRT and WebVTT timestamps are millisecond-based. The Deliver panel can burn the canonical caption
 style into video or create an SRT/WebVTT sidecar. Caption burn-in uses the same shaping policy as
 titles: mapped Noto requests are shaped with the bundled TTF; unknown families use the 5×7 bitmap
-fallback. Embedded subtitle streams are not implemented.
+fallback. Re-muxing captions into exported media is not implemented.
 
 Model download is always explicit. The editor rejects a declared size mismatch and stops an
 unknown-length stream before it can exceed the pin. Bytes are staged, checked against the pinned
@@ -374,7 +377,7 @@ Qt maps standard shortcuts to the platform convention; the table uses the Window
 | Nudge active clip ten frames | `Alt+Shift+Left` / `Alt+Shift+Right` |
 | Timeline zoom in / out / fit | standard zoom shortcuts / `Shift+Z` |
 | Source monitor | `Shift+2` |
-| Precision-trim placeholder | `T` |
+| Precision trim panel | `T` |
 | Import / Edit / Audio & Captions / Deliver | `Ctrl+1` / `Ctrl+2` / `Ctrl+3` / `Ctrl+4` |
 | Command palette | `Ctrl+Shift+P` |
 

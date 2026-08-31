@@ -9,8 +9,9 @@ Namespace: `video_editor::jobs`
 `WorkerRequest` and `WorkerEvent` use protocol major/minor values checked by `compatible`. Each
 serialized message is framed by a four-byte little-endian payload length and is rejected before
 allocation above `kMaximumFrameBytes`. Job IDs are canonical UUID identifiers. The cancellation
-registry shares stop state for an active in-process dispatcher, but a synchronously reading worker
-cannot consume a second cancel frame until its current dispatch returns.
+registry shares stop state for an active job; the worker host reads `CancelJob` on stdin while
+dispatch runs on a worker thread and combines the registry token with internal stop sources.
+Unknown idle cancellations return an explicit `job-not-found` failure.
 
 `JobSpec.options` remains opaque at the generic boundary. A `JOB_KIND_TRANSCRIBE` dispatcher parses
 it as schema-v2 `TranscribeOptions`, rejects unknown fields, and returns a serialized

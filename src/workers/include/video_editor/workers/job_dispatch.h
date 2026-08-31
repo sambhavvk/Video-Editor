@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 #pragma once
 
+#include "video_editor/job_service/cancellation_registry.h"
 #include "video_editor/job_service/protocol.h"
 
 #include <functional>
@@ -25,11 +26,13 @@ struct DispatchDependencies final {
 [[nodiscard]] bool dispatch_job(const jobs::v1::JobSpec& spec, const EventSink& sink);
 [[nodiscard]] bool dispatch_job(const jobs::v1::JobSpec& spec, const EventSink& sink,
                                 DispatchDependencies& dependencies);
+[[nodiscard]] bool dispatch_job(const jobs::v1::JobSpec& spec, const EventSink& sink,
+                                DispatchDependencies& dependencies,
+                                jobs::CancellationRegistry& registry);
 
-// The current worker framing loop is synchronous, so it cannot read CancelJob
-// while dispatch_job is running. This response makes a cancellation request
-// that reaches an idle worker fail explicitly instead of pretending it acted.
-[[nodiscard]] bool reject_unavailable_cancellation(const jobs::v1::CancelJob& request,
-                                                   const EventSink& sink);
+// Applies CancelJob to the active registry entry. Returns true when the job
+// was running and cancellation was shared. Unknown jobs emit a typed failure.
+[[nodiscard]] bool handle_cancel_job(const jobs::v1::CancelJob& request,
+                                     jobs::CancellationRegistry& registry, const EventSink& sink);
 
 } // namespace video_editor::workers

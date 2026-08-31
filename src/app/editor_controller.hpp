@@ -82,6 +82,17 @@ struct AudioDevicePollDecision final {
   bool default_recovered{false};
 };
 
+inline constexpr int kAudioDevicePollIntervalMs = 1'000;
+inline constexpr int kAudioDeviceBackupPollIntervalMs = 7'500;
+
+[[nodiscard]] constexpr int audioDevicePollIntervalMs(const bool backend_available,
+                                                      const bool notifications_active) noexcept {
+  if (backend_available && notifications_active) {
+    return kAudioDeviceBackupPollIntervalMs;
+  }
+  return kAudioDevicePollIntervalMs;
+}
+
 [[nodiscard]] AudioDevicePollDecision
 evaluateAudioDevicePoll(std::span<const audio::AudioDeviceInfo> previous,
                         std::span<const audio::AudioDeviceInfo> current,
@@ -174,6 +185,7 @@ public:
   [[nodiscard]] bool openProjectFile(const std::filesystem::path& checkpoint);
   [[nodiscard]] bool saveProjectFile(const std::filesystem::path& destination);
   [[nodiscard]] bool importCaptionFile(const std::filesystem::path& source);
+  [[nodiscard]] bool extractEmbeddedCaptions(const std::string& asset_id, int stream_index);
   [[nodiscard]] bool exportCaptionFile(const std::filesystem::path& destination);
   [[nodiscard]] bool startVideoExport(const std::filesystem::path& destination,
                                       const QString& presetId, bool overwriteExisting = false);
@@ -191,6 +203,7 @@ private slots:
   void saveProjectAs();
   void chooseMedia();
   void chooseCaptionFile();
+  void chooseEmbeddedCaptionExtraction();
   void chooseCaptionExport();
   void insertAsset(const QString& assetId);
   void loadSourceAsset(const QString& assetId);
@@ -347,6 +360,9 @@ private:
   [[nodiscard]] bool reconstructMediaState();
   void enqueueMediaCacheJobs(const assets::AssetRecord& asset);
   void pumpCacheJobs();
+  void finishCacheJob(const CacheJobOutcome& outcome);
+  void runCacheJobWithQtConcurrent(const std::string& asset_id, const std::filesystem::path& uri,
+                                   int kind, std::uint64_t generation);
   void scheduleRecommendedProxies();
   void pumpProxyQueue();
   void relinkMedia(const QString& assetId);
@@ -435,6 +451,9 @@ private:
   void showError(const QString& title, const QString& message);
   void refreshAudioDevices();
   void refreshCalibratedLatencyPresentation();
+  void onAudioDeviceHotplugNotification();
+  void updateAudioDevicePollInterval();
+  static void audioDeviceNotificationThunk(void* user_data) noexcept;
 
   desktop_ui::EditorWindow& window_;
   std::unique_ptr<edit::TimelineEditor> editor_;
@@ -466,6 +485,9 @@ private:
   std::stop_source cache_job_stop_source_;
   QFuture<CacheJobOutcome> cache_job_future_;
   std::uint64_t cache_job_generation_{0};
+  WorkerHostSession* cache_session_{nullptr};
+  std::filesystem::path cache_temp_result_;
+  bool cache_cancel_requested_{false};
   struct ProxyJob {
     WorkerHostSession* session{nullptr};
     std::filesystem::path destination;
@@ -533,6 +555,7 @@ private:
   double normalization_target_lufs_{-14.0};
   std::vector<audio::AudioDeviceInfo> known_audio_devices_;
   QTimer audio_device_poll_timer_;
+  bool audio_device_notifications_tracked_{false};
   bool audio_recovery_pending_{false};
   NormalizationCompletionGate normalization_completion_gate_;
   std::uint64_t active_normalization_generation_{0};

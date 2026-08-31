@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MPL-2.0
+#include "video_editor/job_service/cancellation_registry.h"
 #include "video_editor/workers/job_dispatch.h"
 
 #include "video_editor/edit_model/model.h"
@@ -6,20 +7,26 @@
 #include "video_editor/export_service/export_service.h"
 #include "video_editor/job_service/framing.h"
 #include "video_editor/job_service/job_id.h"
+#include "video_editor/media_cache/cache_store.h"
+#include "video_editor/media_cache/thumbnail_service.h"
+#include "video_editor/media_cache/waveform_service.h"
 #include "video_editor/project_codec/project_codec.h"
 #include "video_editor/proxy_service/proxy_service.h"
 #include "video_editor/transcription_service/transcription_service.h"
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <mutex>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace video_editor::workers {
@@ -261,18 +268,122 @@ TEST(WorkerProxyDispatch, ReportsMediaFailureAsTerminalEvent) {
   EXPECT_FALSE(std::filesystem::exists(destination));
 }
 
-TEST(WorkerProxyDispatch, MakesSynchronousCancellationLimitationExplicit) {
+[[nodiscard]] bool create_long_proxy_fixture(const std::filesystem::path& path) {
+#ifndef VIDEO_EDITOR_WORKER_TEST_FFMPEG
+  static_cast<void>(path);
+  return false;
+#else
+  const std::vector<std::string> arguments{
+      VIDEO_EDITOR_WORKER_TEST_FFMPEG,
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-nostdin",
+      "-y",
+      "-f",
+      "lavfi",
+      "-i",
+      "testsrc2=size=320x180:rate=24:duration=8",
+      "-f",
+      "lavfi",
+      "-i",
+      "sine=frequency=440:sample_rate=48000:duration=8",
+      "-map",
+      "0:v",
+      "-map",
+      "1:a",
+      "-c:v",
+      "mpeg4",
+      "-q:v",
+      "4",
+      "-c:a",
+      "pcm_s16le",
+      path.string(),
+  };
+  std::ostringstream command;
+  for (const std::string& argument : arguments) {
+    if (command.tellp() > 0) {
+      command << ' ';
+    }
+    command << shell_quote(argument);
+  }
+  return std::system(command.str().c_str()) == 0;
+#endif
+}
+
+TEST(WorkerProxyDispatch, MidJobCancelJobEmitsCancelledWithoutCompleteProxy) {
+  TemporaryDirectory directory;
+  const auto source = directory.path() / "source.mkv";
+  if (!create_long_proxy_fixture(source)) {
+    GTEST_SKIP() << "ffmpeg fixture generator is unavailable";
+  }
+  const auto destination = directory.path() / "proxy.mkv";
+  const protocol::JobSpec spec = valid_proxy_spec(source, destination);
+
+  jobs::CancellationRegistry registry;
+  std::vector<protocol::WorkerEvent> events;
+  std::mutex events_mutex;
+  std::atomic<bool> saw_running{false};
+  DispatchDependencies dependencies;
+  std::thread job_thread([&] {
+    ASSERT_TRUE(dispatch_job(spec,
+                             [&](const protocol::WorkerEvent& event) {
+                               {
+                                 std::scoped_lock lock(events_mutex);
+                                 events.push_back(event);
+                               }
+                               if (event.event().state() == protocol::JOB_STATE_RUNNING) {
+                                 saw_running.store(true, std::memory_order_release);
+                               }
+                               return true;
+                             },
+                             dependencies, registry));
+  });
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (!saw_running.load(std::memory_order_acquire) &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  ASSERT_TRUE(saw_running.load(std::memory_order_acquire));
+  EXPECT_TRUE(registry.cancel(spec.job_id()));
+  job_thread.join();
+
+  protocol::WorkerEvent terminal;
+  bool found_terminal = false;
+  {
+    std::scoped_lock lock(events_mutex);
+    for (const auto& event : events) {
+      if (event.event().state() == protocol::JOB_STATE_SUCCEEDED) {
+        ADD_FAILURE() << "cancelled proxy job must not succeed";
+      }
+      if (event.event().state() == protocol::JOB_STATE_CANCELLED) {
+        terminal = event;
+        found_terminal = true;
+      }
+    }
+  }
+  ASSERT_TRUE(found_terminal);
+  EXPECT_EQ(terminal.event().phase(), "cancelled");
+  EXPECT_EQ(terminal.event().error().category(), "cancelled");
+  const auto pts_map = proxy::default_pts_map_path(destination);
+  const bool complete_proxy =
+      std::filesystem::is_regular_file(destination) && proxy::load_pts_map(pts_map).has_value();
+  EXPECT_FALSE(complete_proxy);
+}
+
+TEST(WorkerProxyDispatch, IdleCancelJobForUnknownJobFailsExplicitly) {
+  jobs::CancellationRegistry registry;
   protocol::CancelJob request;
   request.set_job_id(jobs::make_job_id());
   std::vector<protocol::WorkerEvent> events;
-  ASSERT_TRUE(
-      reject_unavailable_cancellation(request, [&events](const protocol::WorkerEvent& event) {
-        events.push_back(event);
-        return true;
-      }));
+  ASSERT_TRUE(handle_cancel_job(request, registry, [&events](const protocol::WorkerEvent& event) {
+    events.push_back(event);
+    return true;
+  }));
   ASSERT_EQ(events.size(), 1U);
   EXPECT_EQ(events.front().event().state(), protocol::JOB_STATE_FAILED);
-  EXPECT_EQ(events.front().event().error().category(), "unsupported-cancellation");
+  EXPECT_EQ(events.front().event().error().category(), "job-not-found");
 }
 
 TEST(WorkerTranscriptionDispatch, ReportsTypedBackendUnavailableWithoutBackend) {
@@ -522,6 +633,208 @@ TEST(WorkerHost, FramedProxyRequestGeneratesProxy) {
   EXPECT_EQ(events.back().event().state(), protocol::JOB_STATE_SUCCEEDED);
   EXPECT_TRUE(std::filesystem::is_regular_file(destination));
 #endif
+}
+
+[[nodiscard]] protocol::JobSpec valid_thumbnail_spec(const std::filesystem::path& source,
+                                                     const std::filesystem::path& destination,
+                                                     const std::string& asset_id) {
+  protocol::JobSpec spec;
+  spec.set_job_id(jobs::make_job_id());
+  spec.set_kind(protocol::JOB_KIND_THUMBNAIL);
+  spec.add_input_uris(utf8_string(source));
+  spec.set_output_uri(utf8_string(destination));
+  spec.set_preset_id("video-editor.thumbnail.v1");
+  protocol::ThumbnailJobOptions options;
+  options.set_schema_version(1);
+  options.set_asset_id(asset_id);
+  options.set_stream_index(-1);
+  options.set_strategy(1);
+  EXPECT_TRUE(options.SerializeToString(spec.mutable_options()));
+  return spec;
+}
+
+[[nodiscard]] protocol::JobSpec valid_waveform_spec(const std::filesystem::path& source,
+                                                    const std::filesystem::path& destination,
+                                                    const std::string& asset_id) {
+  protocol::JobSpec spec;
+  spec.set_job_id(jobs::make_job_id());
+  spec.set_kind(protocol::JOB_KIND_WAVEFORM);
+  spec.add_input_uris(utf8_string(source));
+  spec.set_output_uri(utf8_string(destination));
+  spec.set_preset_id("video-editor.waveform.v1");
+  protocol::WaveformJobOptions options;
+  options.set_schema_version(1);
+  options.set_asset_id(asset_id);
+  options.set_stream_index(-1);
+  EXPECT_TRUE(options.SerializeToString(spec.mutable_options()));
+  return spec;
+}
+
+[[nodiscard]] bool create_long_fixture(const std::filesystem::path& path) {
+#ifndef VIDEO_EDITOR_WORKER_TEST_FFMPEG
+  static_cast<void>(path);
+  return false;
+#else
+  const std::vector<std::string> arguments{
+      VIDEO_EDITOR_WORKER_TEST_FFMPEG,
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-nostdin",
+      "-y",
+      "-f",
+      "lavfi",
+      "-i",
+      "testsrc2=size=640x360:rate=30:duration=30",
+      "-f",
+      "lavfi",
+      "-i",
+      "sine=frequency=440:sample_rate=48000:duration=30",
+      "-map",
+      "0:v",
+      "-map",
+      "1:a",
+      "-c:v",
+      "mpeg4",
+      "-q:v",
+      "4",
+      "-c:a",
+      "pcm_s16le",
+      path.string(),
+  };
+  std::ostringstream command;
+  for (const std::string& argument : arguments) {
+    if (command.tellp() > 0) {
+      command << ' ';
+    }
+    command << shell_quote(argument);
+  }
+  return std::system(command.str().c_str()) == 0;
+#endif
+}
+
+[[nodiscard]] bool looks_like_jpeg(const std::filesystem::path& path) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input) {
+    return false;
+  }
+  unsigned char header[3] = {};
+  input.read(reinterpret_cast<char*>(header), 3);
+  return input.gcount() == 3 && header[0] == 0xFF && header[1] == 0xD8 && header[2] == 0xFF;
+}
+
+TEST(WorkerThumbnailDispatch, GeneratesJpegAndMonotonicEvents) {
+  TemporaryDirectory directory;
+  const auto source = directory.path() / "source.mkv";
+  if (!create_fixture(source)) {
+    GTEST_SKIP() << "ffmpeg fixture generator is unavailable";
+  }
+  const auto destination = directory.path() / "thumb.jpg";
+  const protocol::JobSpec spec = valid_thumbnail_spec(source, destination, "asset-thumb-1");
+
+  std::vector<protocol::WorkerEvent> events;
+  ASSERT_TRUE(dispatch_job(spec, [&events](const protocol::WorkerEvent& event) {
+    events.push_back(event);
+    return true;
+  }));
+
+  ASSERT_GE(events.size(), 2U);
+  EXPECT_EQ(events.front().event().state(), protocol::JOB_STATE_ACCEPTED);
+  EXPECT_EQ(events.back().event().state(), protocol::JOB_STATE_SUCCEEDED);
+  EXPECT_EQ(events.back().event().result_uri(), utf8_string(destination));
+  EXPECT_TRUE(looks_like_jpeg(destination));
+  EXPECT_EQ(events.back().event().metadata().at("contract_version"), "1");
+  EXPECT_EQ(events.back().event().metadata().at("asset_id"), "asset-thumb-1");
+}
+
+TEST(WorkerWaveformDispatch, GeneratesWaveformBlobAndMonotonicEvents) {
+  TemporaryDirectory directory;
+  const auto source = directory.path() / "source.mkv";
+  if (!create_fixture(source)) {
+    GTEST_SKIP() << "ffmpeg fixture generator is unavailable";
+  }
+  const auto destination = directory.path() / "wave.bin";
+  const protocol::JobSpec spec = valid_waveform_spec(source, destination, "asset-wave-1");
+
+  std::vector<protocol::WorkerEvent> events;
+  ASSERT_TRUE(dispatch_job(spec, [&events](const protocol::WorkerEvent& event) {
+    events.push_back(event);
+    return true;
+  }));
+
+  ASSERT_GE(events.size(), 2U);
+  EXPECT_EQ(events.front().event().state(), protocol::JOB_STATE_ACCEPTED);
+  EXPECT_EQ(events.back().event().state(), protocol::JOB_STATE_SUCCEEDED);
+  EXPECT_EQ(events.back().event().result_uri(), utf8_string(destination));
+  ASSERT_TRUE(std::filesystem::is_regular_file(destination));
+  std::ifstream input(destination, std::ios::binary);
+  std::array<char, 8> magic{};
+  input.read(magic.data(), static_cast<std::streamsize>(magic.size()));
+  ASSERT_TRUE(input);
+  EXPECT_EQ(std::string_view(magic.data(), magic.size()), "VEWAVE01");
+}
+
+TEST(WorkerWaveformDispatch, MidJobCancelDoesNotLeaveCompleteOutputOrCacheEntry) {
+  TemporaryDirectory directory;
+  const auto source = directory.path() / "source.mkv";
+  if (!create_long_fixture(source)) {
+    GTEST_SKIP() << "ffmpeg fixture generator is unavailable";
+  }
+  const auto destination = directory.path() / "wave.bin";
+  const std::string asset_id = "asset-wave-cancel";
+  const protocol::JobSpec spec = valid_waveform_spec(source, destination, asset_id);
+  media_cache::CacheStore store(directory.path() / "cache");
+  const media_cache::WaveformOptions options;
+  const media_cache::CacheKey key{.asset_id = asset_id,
+                                  .kind = media_cache::CacheKind::Waveform,
+                                  .parameter_hash = media_cache::waveform_parameter_hash(options)};
+
+  jobs::CancellationRegistry registry;
+  std::vector<protocol::WorkerEvent> events;
+  std::mutex events_mutex;
+  std::atomic<bool> saw_accepted{false};
+  DispatchDependencies dependencies;
+  std::thread job_thread([&] {
+    ASSERT_TRUE(dispatch_job(spec,
+                             [&](const protocol::WorkerEvent& event) {
+                               {
+                                 std::scoped_lock lock(events_mutex);
+                                 events.push_back(event);
+                               }
+                               if (event.event().state() == protocol::JOB_STATE_ACCEPTED) {
+                                 saw_accepted.store(true, std::memory_order_release);
+                               }
+                               return true;
+                             },
+                             dependencies, registry));
+  });
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+  while (!saw_accepted.load(std::memory_order_acquire) &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  ASSERT_TRUE(saw_accepted.load(std::memory_order_acquire));
+  EXPECT_TRUE(registry.cancel(spec.job_id()));
+  job_thread.join();
+
+  bool found_cancelled = false;
+  {
+    std::scoped_lock lock(events_mutex);
+    for (const auto& event : events) {
+      EXPECT_NE(event.event().state(), protocol::JOB_STATE_SUCCEEDED);
+      if (event.event().state() == protocol::JOB_STATE_CANCELLED) {
+        found_cancelled = true;
+      }
+    }
+  }
+  ASSERT_TRUE(found_cancelled);
+  const bool complete_output = std::filesystem::is_regular_file(destination) &&
+                               std::filesystem::file_size(destination) > 16U;
+  EXPECT_FALSE(complete_output);
+  const auto present = store.contains(key);
+  ASSERT_TRUE(present);
+  EXPECT_FALSE(present.value());
 }
 
 } // namespace

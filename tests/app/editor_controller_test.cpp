@@ -138,6 +138,7 @@ private slots:
   void audioDevicePollSteadyConnectedIsNotRecovered();
   void audioDevicePollLossReturnAndDelayedStopAreRetryable();
   void audioDevicePollPauseCancelsRecoveryIntent();
+  void audioDevicePollIntervalUsesBackupWhenNotificationsLive();
   void audioMixerKeepsSystemDefaultWhenEnumerationIsEmpty();
   void normalizationGenerationRejectsObsoleteCompletionAndClearsBusy();
   void mapsAndClampsReversedTranscriptWordsInPlaybackOrder();
@@ -238,6 +239,16 @@ void EditorControllerTest::audioDevicePollPauseCancelsRecoveryIntent() {
     recovery_pending = false;
   }
   QVERIFY(!recovery_pending);
+}
+
+void EditorControllerTest::audioDevicePollIntervalUsesBackupWhenNotificationsLive() {
+  using video_editor::app::audioDevicePollIntervalMs;
+  using video_editor::app::kAudioDeviceBackupPollIntervalMs;
+  using video_editor::app::kAudioDevicePollIntervalMs;
+  QCOMPARE(audioDevicePollIntervalMs(true, true), kAudioDeviceBackupPollIntervalMs);
+  QCOMPARE(audioDevicePollIntervalMs(true, false), kAudioDevicePollIntervalMs);
+  QCOMPARE(audioDevicePollIntervalMs(false, true), kAudioDevicePollIntervalMs);
+  QCOMPARE(audioDevicePollIntervalMs(false, false), kAudioDevicePollIntervalMs);
 }
 
 void EditorControllerTest::audioMixerKeepsSystemDefaultWhenEnumerationIsEmpty() {

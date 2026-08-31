@@ -51,7 +51,8 @@ add_library(video_editor_media_codec
   src/format_open.cpp
   src/probe.cpp
   src/runtime.cpp
-  src/encoder_capabilities.cpp)
+  src/encoder_capabilities.cpp
+  src/subtitle_extract.cpp)
 
 add_library(video_editor::media_codec ALIAS video_editor_media_codec)
 

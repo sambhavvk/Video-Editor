@@ -66,7 +66,6 @@ target_link_libraries(video_editor_deliver_panel_tests
         VideoEditor::ExportService
         video_editor::media_codec
         video_editor::project_warnings
-        GTest::gtest_main
         Qt6::Test
         Qt6::Widgets
 )

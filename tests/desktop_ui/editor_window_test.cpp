@@ -51,7 +51,9 @@ private slots:
   void switchesWorkspacesAndPanelSets();
   void exposesAccessibleNames();
   void persistsWorkspaceAndProgressiveControls();
+  void precisionTrimPanelControlsTimeline();
   void exposesTransportControllerSignals();
+  void remapsAndPersistsShortcutBindings();
   void mediaBinShowsProxyLifecycle();
   void audioMixerReflectsTrackState();
   void audioMixerDisplaysStableTrackMeters();
@@ -238,6 +240,37 @@ void EditorWindowTest::persistsWorkspaceAndProgressiveControls() {
   QVERIFY(restored.action(QStringLiteral("precisionTrim"))->isChecked());
 }
 
+void EditorWindowTest::precisionTrimPanelControlsTimeline() {
+  QTemporaryDir directory;
+  auto settings = temporarySettings(directory);
+  EditorWindow window(settings.get());
+  window.show();
+  window.setPrecisionTrimVisible(true);
+  QCoreApplication::processEvents();
+
+  auto* panel = window.findChild<QWidget*>(QStringLiteral("precisionTrimPanel"));
+  QVERIFY(panel != nullptr);
+  QVERIFY(!panel->isHidden());
+
+  auto* overwriteTrim =
+      panel->findChild<QToolButton*>(QStringLiteral("precision.tool.overwriteTrim"));
+  QVERIFY(overwriteTrim != nullptr);
+  QCOMPARE(window.timeline()->toolMode(), TimelineWidget::ToolMode::Select);
+  QTest::mouseClick(overwriteTrim, Qt::LeftButton);
+  QCOMPARE(window.timeline()->toolMode(), TimelineWidget::ToolMode::OverwriteTrim);
+
+  window.setTimelineView(
+      10'000, 1'000,
+      {{QStringLiteral("video-1"), QStringLiteral("Video 1"), TrackKind::Video}},
+      {{QStringLiteral("clip-a"), QStringLiteral("Clip A"), 0, 1'000, 2'000, QColor{}, true}});
+  QSignalSpy commits(window.timeline(), &TimelineWidget::clipEditCommitted);
+  auto* nudgePlusOne = panel->findChild<QToolButton*>(QStringLiteral("precision.nudge.plus1"));
+  QVERIFY(nudgePlusOne != nullptr);
+  QTest::mouseClick(nudgePlusOne, Qt::LeftButton);
+  QCOMPARE(commits.count(), 1);
+  QCOMPARE(editIntent(commits.takeFirst()), TimelineWidget::EditIntent::Normal);
+}
+
 void EditorWindowTest::exposesTransportControllerSignals() {
   QTemporaryDir directory;
   auto settings = temporarySettings(directory);
@@ -252,6 +285,31 @@ void EditorWindowTest::exposesTransportControllerSignals() {
   QCOMPARE(playback.at(0).at(0).toDouble(), -1.0);
   QCOMPARE(playback.at(1).at(0).toDouble(), -2.0);
   QCOMPARE(playback.at(2).at(0).toDouble(), 0.0);
+}
+
+void EditorWindowTest::remapsAndPersistsShortcutBindings() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  auto settings = temporarySettings(directory);
+  const auto remapped = QKeySequence{QStringLiteral("Ctrl+Shift+B")};
+
+  {
+    EditorWindow window(settings.get());
+    QCOMPARE(window.action(QStringLiteral("splitClip"))->shortcut(),
+             QKeySequence{QStringLiteral("Ctrl+B")});
+    QVERIFY(window.applyShortcutBinding(QStringLiteral("splitClip"), remapped).isEmpty());
+    QCOMPARE(window.action(QStringLiteral("splitClip"))->shortcut(), remapped);
+    QVERIFY(!window.applyShortcutBinding(QStringLiteral("splitClip"), QKeySequence{Qt::Key_J})
+                 .isEmpty());
+    QCOMPARE(window.action(QStringLiteral("splitClip"))->shortcut(), remapped);
+  }
+
+  EditorWindow restored(settings.get());
+  QCOMPARE(restored.action(QStringLiteral("splitClip"))->shortcut(), remapped);
+  QVERIFY(!restored
+               .applyShortcutBinding(QStringLiteral("splitClip"), QKeySequence{Qt::Key_J}, true)
+               .isEmpty());
+  QCOMPARE(restored.action(QStringLiteral("reverse"))->shortcut(), QKeySequence{Qt::Key_J});
 }
 
 void EditorWindowTest::mediaBinShowsProxyLifecycle() {

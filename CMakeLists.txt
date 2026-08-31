@@ -44,12 +44,12 @@ if(VIDEO_EDITOR_BUILD_TESTS)
 endif()
 
 add_subdirectory(src/edit_model)
-add_subdirectory(src/caption_service)
 add_subdirectory(src/project_codec)
 add_subdirectory(src/project_store)
 
 if(VIDEO_EDITOR_BUILD_MEDIA)
   add_subdirectory(src/media_codec)
+  add_subdirectory(src/caption_service)
   add_subdirectory(src/asset_service)
   add_subdirectory(src/media_cache)
   add_subdirectory(src/proxy_service)

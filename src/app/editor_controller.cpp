@@ -12,6 +12,8 @@
 #include "video_editor/audio_render/original_audio_registry.h"
 #include "video_editor/audio_render/timeline_audio_renderer.h"
 #include "video_editor/caption_service/caption_service.h"
+#include "video_editor/caption_service/embedded_extract.h"
+#include "video_editor/media_codec/subtitle_extract.h"
 #include "video_editor/desktop_ui/cache_browser_dialog.hpp"
 #include "video_editor/desktop_ui/editor_window.hpp"
 #include "video_editor/desktop_ui/panel_widgets.hpp"
@@ -49,6 +51,7 @@
 #include <QFileInfo>
 #include <QFutureWatcher>
 #include <QImage>
+#include <QInputDialog>
 #include <QLocale>
 #include <QMessageBox>
 #include <QNetworkAccessManager>
@@ -884,6 +887,9 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           [this] { setPlaybackRate(playback_rate_ == 0.0 ? 1.0 : 0.0); });
   connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::importCaptionsRequested, this,
           &EditorController::chooseCaptionFile);
+  connect(window_.captionsPanel(),
+          &desktop_ui::CaptionsPanelWidget::extractEmbeddedCaptionsRequested, this,
+          &EditorController::chooseEmbeddedCaptionExtraction);
   connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::exportCaptionsRequested, this,
           &EditorController::chooseCaptionExport);
   connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::captionActivated, this,
@@ -1197,7 +1203,7 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
       audioSettings.value(QStringLiteral("audio/normalizationTargetLufs"), -14.0).toDouble(), -24.0,
       -9.0);
   window_.audioMixer()->setNormalizationTargetLufs(normalization_target_lufs_);
-  audio_device_poll_timer_.setInterval(1'000);
+  audio_device_poll_timer_.setInterval(kAudioDevicePollIntervalMs);
   connect(&audio_device_poll_timer_, &QTimer::timeout, this,
           &EditorController::refreshAudioDevices);
   audio_device_poll_timer_.start();
@@ -1710,6 +1716,116 @@ bool EditorController::importCaptionFile(const std::filesystem::path& source) {
   }
   window_.showTransientMessage(tr("Imported %1 caption cue(s)").arg(captions.size()));
   return true;
+}
+
+bool EditorController::extractEmbeddedCaptions(const std::string& asset_id,
+                                               const int stream_index) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    showError(tr("Could not extract embedded captions"),
+              tr("The project has no active sequence."));
+    return false;
+  }
+
+  const assets::AssetRecord* record = findImported(imported_assets_, asset_id);
+  if (record == nullptr) {
+    showError(tr("Could not extract embedded captions"), tr("The media asset is not in the bin."));
+    return false;
+  }
+
+  const auto imported = caption_service::importEmbeddedSubtitles(
+      record->uri, record->descriptor,
+      {.asset_id = asset_id, .stream_index = stream_index});
+  if (!imported) {
+    showError(tr("Could not extract embedded captions"),
+              QString::fromStdString(imported.error().message));
+    return false;
+  }
+
+  const auto captions = caption_service::toEditCaptionsFromEmbedded(imported.value());
+  if (captions.empty()) {
+    showError(tr("Could not extract embedded captions"),
+              tr("The embedded subtitle stream contains no text cues."));
+    return false;
+  }
+
+  const std::string gesture =
+      "extract-embedded-captions:" + edit::EntityId::generate().toString();
+  std::vector<edit::EditCommand> commands;
+  commands.reserve(captions.size());
+  for (const edit::Caption& caption : captions) {
+    commands.push_back(
+        {.operation = edit::AddCaptionCommand{.sequence_id = sequence->id, .caption = caption},
+         .coalescing_key = gesture});
+  }
+  if (!applyBatch(std::move(commands), tr("Could not extract embedded captions"))) {
+    return false;
+  }
+  window_.showTransientMessage(tr("Extracted %1 embedded caption cue(s)").arg(captions.size()));
+  return true;
+}
+
+void EditorController::chooseEmbeddedCaptionExtraction() {
+  struct Candidate final {
+    std::string asset_id;
+    int stream_index{-1};
+    QString label;
+  };
+
+  std::vector<Candidate> candidates;
+  candidates.reserve(imported_assets_.size());
+  for (const assets::AssetRecord& record : imported_assets_) {
+    for (const media::SubtitleStreamInfo& stream :
+         media::list_subtitle_streams(record.descriptor)) {
+      if (!stream.supported_text_codec) {
+        continue;
+      }
+      const QString file_name = qStringFromPath(record.uri.filename());
+      const QString language =
+          stream.language.empty() ? tr("unknown language")
+                                  : QString::fromStdString(stream.language);
+      candidates.push_back(Candidate{
+          .asset_id = record.id,
+          .stream_index = stream.index,
+          .label = tr("%1 — stream %2 (%3, %4)")
+                       .arg(file_name)
+                       .arg(stream.index)
+                       .arg(QString::fromStdString(stream.codec_name))
+                       .arg(language),
+      });
+    }
+  }
+
+  if (candidates.empty()) {
+    showError(tr("Could not extract embedded captions"),
+              tr("Import media with a text subtitle stream (SubRip, WebVTT, or mov_text) first."));
+    return;
+  }
+
+  std::string asset_id = candidates.front().asset_id;
+  int stream_index = candidates.front().stream_index;
+  if (candidates.size() > 1) {
+    QStringList labels;
+    labels.reserve(static_cast<int>(candidates.size()));
+    for (const Candidate& candidate : candidates) {
+      labels.push_back(candidate.label);
+    }
+    bool accepted = false;
+    const QString choice = QInputDialog::getItem(
+        &window_, tr("Extract embedded captions"), tr("Subtitle stream:"), labels, 0, false,
+        &accepted);
+    if (!accepted) {
+      return;
+    }
+    const int selected_index = labels.indexOf(choice);
+    if (selected_index < 0 || selected_index >= static_cast<int>(candidates.size())) {
+      return;
+    }
+    asset_id = candidates[static_cast<std::size_t>(selected_index)].asset_id;
+    stream_index = candidates[static_cast<std::size_t>(selected_index)].stream_index;
+  }
+
+  (void)extractEmbeddedCaptions(asset_id, stream_index);
 }
 
 bool EditorController::exportCaptionFile(const std::filesystem::path& destination) {
@@ -2247,8 +2363,12 @@ void EditorController::finishProxyJob(const std::string& asset_id, const ProxyOu
     std::filesystem::path playback_proxy = outcome.destination;
     std::optional<std::filesystem::path> playback_pts_map;
     if (media_cache_ != nullptr) {
-      if (cache_job_future_.isRunning()) {
-        cache_job_future_.waitForFinished();
+      if (cache_job_running_) {
+        if (cache_session_ != nullptr) {
+          cache_session_->waitUntilFinished();
+        } else if (cache_job_future_.isRunning()) {
+          cache_job_future_.waitForFinished();
+        }
       }
       const auto hash_profile = proxyProfileForHash(manifest_profile, outcome.ffv1);
       const media_cache::CacheKey proxy_key{.asset_id = outcome.asset_id,
@@ -3148,6 +3268,14 @@ void EditorController::advancePlayback() {
       playback_clock_.restart();
     } else {
       return;
+    }
+  }
+
+  if (audio_playback_ != nullptr) {
+    const bool notifications_active = audio_playback_->device_open();
+    if (notifications_active != audio_device_notifications_tracked_) {
+      audio_device_notifications_tracked_ = notifications_active;
+      updateAudioDevicePollInterval();
     }
   }
 
@@ -5350,6 +5478,27 @@ void EditorController::setNormalizationTarget(const double targetLufs) {
   window_.audioMixer()->setNormalizationStatus(tr("Target changed; analyze again."));
 }
 
+void EditorController::audioDeviceNotificationThunk(void* const user_data) noexcept {
+  auto* self = static_cast<EditorController*>(user_data);
+  if (self == nullptr) {
+    return;
+  }
+  QMetaObject::invokeMethod(self, &EditorController::onAudioDeviceHotplugNotification,
+                            Qt::QueuedConnection);
+}
+
+void EditorController::onAudioDeviceHotplugNotification() {
+  refreshAudioDevices();
+}
+
+void EditorController::updateAudioDevicePollInterval() {
+  const bool backend = audio::MiniaudioOutputDevice::available();
+  const bool notifications_active =
+      backend && audio_playback_ != nullptr && audio_playback_->device_open();
+  audio_device_poll_timer_.setInterval(
+      audioDevicePollIntervalMs(backend, notifications_active));
+}
+
 void EditorController::refreshAudioDevices() {
   if (audio_devices_watcher_.isRunning()) {
     return;
@@ -6380,8 +6529,11 @@ bool EditorController::startAudioMasterPlayback() {
         .device_id = selected_audio_device_id_.toStdString(),
         .calibrated_latency_frames = selected_device_calibrated_latency_frames_,
     };
+    auto miniaudio_device = std::make_unique<audio::MiniaudioOutputDevice>();
+    miniaudio_device->set_device_notification_callback(&EditorController::audioDeviceNotificationThunk,
+                                                       this);
     auto candidate = std::make_unique<audio::AsyncRealtimeAudioPlayback>(
-        std::move(provider), configuration, std::make_unique<audio::MiniaudioOutputDevice>());
+        std::move(provider), configuration, std::move(miniaudio_device));
     const audio::PlaybackCommandReceipt receipt = candidate->request_start(playhead_);
     if (!receipt.accepted) {
       const QString failure = receipt.error.has_value()
@@ -6399,6 +6551,8 @@ bool EditorController::startAudioMasterPlayback() {
 
     playback_audio_renderer_ = std::move(timeline_renderer);
     audio_playback_ = std::move(candidate);
+    audio_device_notifications_tracked_ = false;
+    updateAudioDevicePollInterval();
     audio_master_active_ = false;
     audio_start_pending_ = false;
     audio_session_stale_ = false;
@@ -6430,6 +6584,10 @@ void EditorController::stopAudioPlayback() noexcept {
   last_audio_xrun_count_ = 0;
   if (audio_playback_ != nullptr) {
     static_cast<void>(audio_playback_->request_stop());
+  }
+  if (audio_device_notifications_tracked_) {
+    audio_device_notifications_tracked_ = false;
+    updateAudioDevicePollInterval();
   }
   window_.audioMixer()->setTrackMeters({});
   playback_audio_renderer_.reset();
@@ -6837,7 +6995,14 @@ void EditorController::showError(const QString& title, const QString& message) {
 void EditorController::waitForInFlightCacheJob(const bool cancel) {
   if (cancel) {
     ++cache_job_generation_;
+    cache_cancel_requested_ = true;
+    if (cache_session_ != nullptr) {
+      cache_session_->cancel();
+    }
     cache_job_stop_source_.request_stop();
+  }
+  if (cache_session_ != nullptr) {
+    cache_session_->waitUntilFinished(30'000);
   }
   if (cache_job_future_.isRunning()) {
     cache_job_future_.waitForFinished();
@@ -6846,6 +7011,16 @@ void EditorController::waitForInFlightCacheJob(const bool cancel) {
     cache_job_running_ = false;
     cache_job_queue_.clear();
     cache_job_stop_source_ = std::stop_source();
+    cache_cancel_requested_ = false;
+    if (cache_session_ != nullptr) {
+      cache_session_->deleteLater();
+      cache_session_ = nullptr;
+    }
+    if (!cache_temp_result_.empty()) {
+      std::error_code ignored;
+      std::filesystem::remove(cache_temp_result_, ignored);
+      cache_temp_result_.clear();
+    }
   }
 }
 
@@ -7009,61 +7184,58 @@ void EditorController::enqueueMediaCacheJobs(const assets::AssetRecord& asset) {
   pumpCacheJobs();
 }
 
-void EditorController::pumpCacheJobs() {
-  if (cache_job_running_ || cache_job_queue_.empty() || media_cache_ == nullptr || cache_disk_full_) {
-    return;
+void EditorController::finishCacheJob(const CacheJobOutcome& outcome) {
+  if (cache_session_ != nullptr) {
+    cache_session_->deleteLater();
+    cache_session_ = nullptr;
   }
-  const auto job = cache_job_queue_.front();
-  cache_job_queue_.pop_front();
-  const assets::AssetRecord* record = findImported(imported_assets_, job.first);
-  if (record == nullptr || record->availability != assets::AssetAvailability::Online) {
+  if (!cache_temp_result_.empty()) {
+    std::error_code ignored;
+    std::filesystem::remove(cache_temp_result_, ignored);
+    cache_temp_result_.clear();
+  }
+  cache_job_running_ = false;
+  cache_cancel_requested_ = false;
+  if (outcome.generation != cache_job_generation_) {
     pumpCacheJobs();
     return;
   }
+  if (outcome.disk_full) {
+    cache_disk_full_ = true;
+    cache_job_queue_.clear();
+    showError(tr("Media cache is full"),
+              outcome.error.isEmpty() ? tr("The media cache has no remaining space.")
+                                      : outcome.error);
+    return;
+  }
+  if (outcome.succeeded) {
+    if (outcome.kind == kCacheJobThumbnail && !outcome.thumbnail.isNull()) {
+      media_thumbnails_[outcome.asset_id] = outcome.thumbnail;
+    } else if (outcome.kind == kCacheJobWaveform) {
+      media_waveforms_[outcome.asset_id] = outcome.waveform;
+    }
+    refreshMediaView();
+    refreshTimelineView();
+  } else if (!outcome.cancelled && !outcome.error.isEmpty()) {
+    window_.showTransientMessage(
+        tr("Could not cache media preview: %1").arg(outcome.error));
+  }
+  if (auto* browser = window_.cacheBrowser(); browser != nullptr && browser->isVisible()) {
+    refreshCacheInventory();
+  }
+  pumpCacheJobs();
+}
 
-  cache_job_running_ = true;
-  const std::string asset_id = record->id;
-  const std::filesystem::path uri = record->uri;
-  const int kind = job.second;
-  const std::uint64_t generation = cache_job_generation_;
+void EditorController::runCacheJobWithQtConcurrent(const std::string& asset_id,
+                                                   const std::filesystem::path& uri, const int kind,
+                                                   const std::uint64_t generation) {
   const std::stop_token stop_token = cache_job_stop_source_.get_token();
   media_cache::CacheStore* store = media_cache_.get();
-
   auto* watcher = new QFutureWatcher<CacheJobOutcome>(this);
   connect(watcher, &QFutureWatcher<CacheJobOutcome>::finished, this, [this, watcher] {
-    const CacheJobOutcome outcome = watcher->result();
+    finishCacheJob(watcher->result());
     watcher->deleteLater();
-    cache_job_running_ = false;
-    if (outcome.generation != cache_job_generation_) {
-      pumpCacheJobs();
-      return;
-    }
-    if (outcome.disk_full) {
-      cache_disk_full_ = true;
-      cache_job_queue_.clear();
-      showError(tr("Media cache is full"),
-                outcome.error.isEmpty() ? tr("The media cache has no remaining space.")
-                                        : outcome.error);
-      return;
-    }
-    if (outcome.succeeded) {
-      if (outcome.kind == kCacheJobThumbnail && !outcome.thumbnail.isNull()) {
-        media_thumbnails_[outcome.asset_id] = outcome.thumbnail;
-      } else if (outcome.kind == kCacheJobWaveform) {
-        media_waveforms_[outcome.asset_id] = outcome.waveform;
-      }
-      refreshMediaView();
-      refreshTimelineView();
-    } else if (!outcome.cancelled && !outcome.error.isEmpty()) {
-      window_.showTransientMessage(
-          tr("Could not cache media preview: %1").arg(outcome.error));
-    }
-    if (auto* browser = window_.cacheBrowser(); browser != nullptr && browser->isVisible()) {
-      refreshCacheInventory();
-    }
-    pumpCacheJobs();
   });
-
   cache_job_future_ = QtConcurrent::run(
       [asset_id, uri, kind, store, stop_token, generation]() -> CacheJobOutcome {
         CacheJobOutcome outcome;
@@ -7096,6 +7268,155 @@ void EditorController::pumpCacheJobs() {
         return outcome;
       });
   watcher->setFuture(cache_job_future_);
+}
+
+void EditorController::pumpCacheJobs() {
+  if (cache_job_running_ || cache_job_queue_.empty() || media_cache_ == nullptr || cache_disk_full_) {
+    return;
+  }
+  const auto job = cache_job_queue_.front();
+  cache_job_queue_.pop_front();
+  const assets::AssetRecord* record = findImported(imported_assets_, job.first);
+  if (record == nullptr || record->availability != assets::AssetAvailability::Online) {
+    pumpCacheJobs();
+    return;
+  }
+
+  cache_job_running_ = true;
+  const std::string asset_id = record->id;
+  const std::filesystem::path uri = record->uri;
+  const int kind = job.second;
+  const std::uint64_t generation = cache_job_generation_;
+
+  const QString worker_path =
+      resolveWorkerHostPath(QCoreApplication::applicationDirPath(),
+                            qEnvironmentVariable("VIDEO_EDITOR_WORKER_HOST"));
+  if (worker_path.isEmpty()) {
+    runCacheJobWithQtConcurrent(asset_id, uri, kind, generation);
+    return;
+  }
+
+  const QString suffix =
+      kind == kCacheJobThumbnail ? QStringLiteral(".thumbnail.jpg") : QStringLiteral(".waveform.bin");
+  cache_temp_result_ =
+      pathFromQString(QDir(qStringFromPath(mediaCacheDirectory()))
+                          .filePath(QStringLiteral("worker-staging/%1%2")
+                                        .arg(QString::fromStdString(asset_id), suffix)));
+  {
+    std::error_code ignored;
+    std::filesystem::create_directories(std::filesystem::path(cache_temp_result_).parent_path(),
+                                        ignored);
+    std::filesystem::remove(cache_temp_result_, ignored);
+  }
+
+  jobs::v1::JobSpec spec;
+  spec.set_job_id(jobs::make_job_id());
+  spec.set_kind(kind == kCacheJobThumbnail ? jobs::v1::JOB_KIND_THUMBNAIL
+                                           : jobs::v1::JOB_KIND_WAVEFORM);
+  spec.add_input_uris(utf8StringFromPath(uri));
+  spec.set_output_uri(utf8StringFromPath(cache_temp_result_));
+  spec.set_preset_id(kind == kCacheJobThumbnail ? "video-editor.thumbnail.v1"
+                                                : "video-editor.waveform.v1");
+  if (kind == kCacheJobThumbnail) {
+    jobs::v1::ThumbnailJobOptions options;
+    options.set_schema_version(1);
+    options.set_asset_id(asset_id);
+    options.set_stream_index(-1);
+    options.set_strategy(1);
+    options.SerializeToString(spec.mutable_options());
+  } else {
+    jobs::v1::WaveformJobOptions options;
+    options.set_schema_version(1);
+    options.set_asset_id(asset_id);
+    options.set_stream_index(-1);
+    options.SerializeToString(spec.mutable_options());
+  }
+
+  auto* session = new WorkerHostSession(this);
+  cache_session_ = session;
+  session->setEventHandler([this, asset_id, kind, generation](const jobs::v1::WorkerEvent& envelope) {
+    const auto& job = envelope.event();
+    if (job.state() == jobs::v1::JOB_STATE_ACCEPTED ||
+        job.state() == jobs::v1::JOB_STATE_RUNNING) {
+      return;
+    }
+    CacheJobOutcome outcome;
+    outcome.asset_id = asset_id;
+    outcome.kind = kind;
+    outcome.generation = generation;
+    const bool cancelled =
+        job.state() == jobs::v1::JOB_STATE_CANCELLED || cache_cancel_requested_;
+    if (job.state() == jobs::v1::JOB_STATE_SUCCEEDED) {
+      const media_cache::ThumbnailOptions thumb_options;
+      const media_cache::WaveformOptions wave_options;
+      const media_cache::CacheKey key{
+          .asset_id = asset_id,
+          .kind = kind == kCacheJobThumbnail ? media_cache::CacheKind::Thumbnail
+                                             : media_cache::CacheKind::Waveform,
+          .parameter_hash = kind == kCacheJobThumbnail
+                                ? media_cache::thumbnail_parameter_hash(thumb_options)
+                                : media_cache::waveform_parameter_hash(wave_options)};
+      const auto stored = media_cache_->put_file(key, cache_temp_result_);
+      if (!stored) {
+        outcome.error = QString::fromStdString(stored.error().message);
+        if (stored.error().code == media_cache::CacheErrorCode::Full) {
+          outcome.disk_full = true;
+        }
+        finishCacheJob(outcome);
+        return;
+      }
+      if (kind == kCacheJobThumbnail) {
+        if (auto thumbnail = media_cache::load_thumbnail(asset_id, thumb_options, *media_cache_)) {
+          outcome.thumbnail = imageFromJpeg(thumbnail.value().jpeg_bytes);
+          outcome.succeeded = !outcome.thumbnail.isNull();
+        }
+      } else if (auto waveform = media_cache::load_waveform(asset_id, wave_options, *media_cache_)) {
+        outcome.waveform = waveformBucketsForUi(waveform.value());
+        outcome.succeeded = true;
+      }
+      finishCacheJob(outcome);
+      return;
+    }
+    outcome.cancelled = cancelled;
+    outcome.error = job.has_error() ? QString::fromStdString(job.error().user_message())
+                                    : tr("Media preview generation failed.");
+    finishCacheJob(outcome);
+  });
+  session->setStartFailedHandler([this, asset_id, kind, generation](const QString& message) {
+    finishCacheJob(CacheJobOutcome{.asset_id = asset_id,
+                                   .kind = kind,
+                                   .generation = generation,
+                                   .error = message});
+  });
+  session->setFinishedHandler(
+      [this, asset_id, kind, generation](const bool abnormal, int, QProcess::ExitStatus) {
+        if (!cache_job_running_) {
+          return;
+        }
+        finishCacheJob(CacheJobOutcome{
+            .asset_id = asset_id,
+            .kind = kind,
+            .generation = generation,
+            .cancelled = cache_cancel_requested_,
+            .error = cache_cancel_requested_
+                         ? QString{}
+                         : (abnormal ? tr("The media cache worker stopped unexpectedly.")
+                                     : tr("Media preview generation ended without a result."))});
+      });
+  WorkerHostSession::LaunchOptions launch;
+  launch.application_directory = QCoreApplication::applicationDirPath();
+  launch.configured_path = qEnvironmentVariable("VIDEO_EDITOR_WORKER_HOST");
+  if (!session->start(spec, launch)) {
+    cache_session_ = nullptr;
+    session->deleteLater();
+    if (!cache_temp_result_.empty()) {
+      std::error_code ignored;
+      std::filesystem::remove(cache_temp_result_, ignored);
+      cache_temp_result_.clear();
+    }
+    runCacheJobWithQtConcurrent(asset_id, uri, kind, generation);
+    return;
+  }
 }
 
 void EditorController::scheduleRecommendedProxies() {

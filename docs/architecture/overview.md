@@ -143,10 +143,10 @@ fresh `video_editor_worker_host` process.
 
 Import, preview, proxy generation, export, model verification, transcription, and silence analysis
 run away from the Qt UI thread. Preview uses request
-epochs. Proxy, export, and transcription use a fresh framed worker-host process; kill is the
-cancellation and crash boundary, and only atomically committed files replace destinations. The
-stdin/stdout host still dispatches one job synchronously, so it cannot consume a `CancelJob` frame
-while FFmpeg is running. Named-pipe/Unix-socket routing is not connected. Cache jobs, import, and
+epochs. Proxy, export, and transcription use a fresh framed worker-host process; `CancelJob` over
+duplex stdin is the preferred cancellation path, with process kill as a timeout/write-failure
+fallback, and only atomically committed files replace destinations. Worker death still leaves
+destinations unchanged. Named-pipe/Unix-socket routing is not connected. Cache jobs, import, and
 preview remain in-process through QtConcurrent or request epochs.
 
 The realtime audio path has a dedicated pre-render worker and a fixed 48 kHz stereo float32 device

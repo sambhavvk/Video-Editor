@@ -1114,6 +1114,20 @@ TEST(MiniaudioOutputDevice, UnavailableBuildReportsTypedFallbackWithoutOpeningHa
   EXPECT_FALSE(device.is_open());
 }
 
+TEST(MiniaudioOutputDevice, DeviceNotificationCallbackIsDeliveredWithoutWaitingForPoll) {
+  MiniaudioOutputDevice device;
+  int notification_count = 0;
+  device.set_device_notification_callback(
+      [](void* user_data) noexcept {
+        auto* counter = static_cast<int*>(user_data);
+        ++(*counter);
+      },
+      &notification_count);
+  EXPECT_FALSE(device.device_notifications_active());
+  device.test_deliver_device_notification();
+  EXPECT_EQ(notification_count, 1);
+}
+
 TEST(MiniaudioDeviceEnumerator, EnumerateSucceedsOrReturnsEmptyWithoutThrowing) {
   MiniaudioDeviceEnumerator enumerator;
   const auto devices = enumerator.enumerate();

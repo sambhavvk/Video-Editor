@@ -7,6 +7,7 @@
 #include <QFileInfo>
 #include <QMetaObject>
 #include <QStandardPaths>
+#include <QTimer>
 
 #include <cstdint>
 #include <string>
@@ -49,6 +50,8 @@ QString resolveTranscriptionWorkerPath(const QString& application_directory,
 
 namespace {
 
+constexpr int kCancelKillTimeoutMs = 5'000;
+
 [[nodiscard]] bool encode_start_request(const jobs::v1::JobSpec& spec, QByteArray& frame) {
   jobs::v1::WorkerRequest request;
   request.set_protocol_major(jobs::kProtocolMajor);
@@ -65,6 +68,29 @@ namespace {
   }
   frame.append(encoded.data(), static_cast<qsizetype>(encoded.size()));
   return true;
+}
+
+[[nodiscard]] bool encode_cancel_request(const std::string& job_id, QByteArray& frame) {
+  jobs::v1::WorkerRequest request;
+  request.set_protocol_major(jobs::kProtocolMajor);
+  request.set_protocol_minor(jobs::kProtocolMinor);
+  request.mutable_cancel()->set_job_id(job_id);
+  std::string encoded;
+  if (!request.SerializeToString(&encoded) || encoded.size() > jobs::kMaximumFrameBytes) {
+    return false;
+  }
+  frame.resize(4);
+  const auto size = static_cast<std::uint32_t>(encoded.size());
+  for (int index = 0; index < 4; ++index) {
+    frame[index] = static_cast<char>((size >> (8 * index)) & 0xffU);
+  }
+  frame.append(encoded.data(), static_cast<qsizetype>(encoded.size()));
+  return true;
+}
+
+[[nodiscard]] bool is_terminal_state(const jobs::v1::JobState state) {
+  return state == jobs::v1::JOB_STATE_SUCCEEDED || state == jobs::v1::JOB_STATE_FAILED ||
+         state == jobs::v1::JOB_STATE_CANCELLED;
 }
 
 } // namespace
@@ -104,6 +130,7 @@ bool WorkerHostSession::start(const jobs::v1::JobSpec& spec, const LaunchOptions
   expected_job_id_ = QString::fromStdString(spec.job_id());
   finished_emitted_ = false;
   start_failed_ = false;
+  cancel_pending_ = false;
 
   process_ = new QProcess(this);
   process_->setProcessEnvironment(options.environment);
@@ -120,9 +147,31 @@ bool WorkerHostSession::start(const jobs::v1::JobSpec& spec, const LaunchOptions
 }
 
 void WorkerHostSession::cancel() {
-  if (process_ != nullptr && process_->state() != QProcess::NotRunning) {
-    process_->kill();
+  if (process_ == nullptr || process_->state() == QProcess::NotRunning) {
+    return;
   }
+  if (cancel_pending_) {
+    return;
+  }
+  if (expected_job_id_.isEmpty()) {
+    process_->kill();
+    return;
+  }
+  QByteArray frame;
+  if (!encode_cancel_request(expected_job_id_.toStdString(), frame)) {
+    process_->kill();
+    return;
+  }
+  if (process_->write(frame) != frame.size()) {
+    process_->kill();
+    return;
+  }
+  cancel_pending_ = true;
+  QTimer::singleShot(kCancelKillTimeoutMs, this, [this]() {
+    if (process_ != nullptr && process_->state() != QProcess::NotRunning && cancel_pending_) {
+      process_->kill();
+    }
+  });
 }
 
 void WorkerHostSession::waitUntilFinished(const int timeout_ms) {
@@ -148,6 +197,12 @@ void WorkerHostSession::onStarted() {
     return;
   }
   request_frame_.clear();
+}
+
+void WorkerHostSession::closeWriteChannelIfOpen() {
+  if (process_ == nullptr || process_->state() == QProcess::NotRunning) {
+    return;
+  }
   process_->closeWriteChannel();
 }
 
@@ -191,6 +246,10 @@ void WorkerHostSession::onReadyRead() {
         event.event().state() == jobs::v1::JOB_STATE_ACCEPTED) {
       event_handler_(event);
       continue;
+    }
+    if (is_terminal_state(event.event().state())) {
+      cancel_pending_ = false;
+      closeWriteChannelIfOpen();
     }
     const EventHandler handler = event_handler_;
     QMetaObject::invokeMethod(

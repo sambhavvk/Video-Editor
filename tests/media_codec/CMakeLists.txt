@@ -11,7 +11,8 @@ pkg_check_modules(EXPORT_TEST_AVUTIL REQUIRED IMPORTED_TARGET
                   libavutil=${VIDEO_EDITOR_AVUTIL_VERSION})
 
 add_executable(video_editor_media_codec_tests
-  probe_test.cpp)
+  probe_test.cpp
+  subtitle_extract_test.cpp)
 
 target_link_libraries(
   video_editor_media_codec_tests

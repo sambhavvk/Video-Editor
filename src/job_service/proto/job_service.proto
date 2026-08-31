@@ -75,6 +75,32 @@ message TranscriptionResult {
   int64 source_duration_centiseconds = 12;
 }
 
+// Typed payload carried in JobSpec.options for JOB_KIND_THUMBNAIL. Unknown
+// fields are rejected by the worker until a schema version is explicitly
+// supported.
+message ThumbnailJobOptions {
+  uint32 schema_version = 1;
+  string asset_id = 2;
+  int32 stream_index = 3;
+  int32 maximum_width = 4;
+  // 0 = First, 1 = Middle (default), 2 = Last.
+  int32 strategy = 5;
+  int32 quality = 6;
+}
+
+// Typed payload carried in JobSpec.options for JOB_KIND_WAVEFORM. Unknown
+// fields are rejected by the worker until a schema version is explicitly
+// supported.
+message WaveformJobOptions {
+  uint32 schema_version = 1;
+  string asset_id = 2;
+  int32 stream_index = 3;
+  int64 finest_level_buckets = 4;
+  int32 level_count = 5;
+  int64 sample_rate = 6;
+  int64 channel_count = 7;
+}
+
 // Typed payload carried in JobSpec.options for JOB_KIND_EXPORT. Unknown fields
 // are rejected by the worker until a schema version is explicitly supported.
 message ExportOptions {

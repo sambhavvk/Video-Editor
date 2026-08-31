@@ -9,6 +9,7 @@ target_link_libraries(
   video_editor_worker_tests
   PRIVATE
     video_editor::worker_dispatch
+    video_editor::media_cache
     video_editor::transcription_service
     video_editor::job_service
     video_editor::proxy_service

@@ -8,6 +8,11 @@
 
 namespace video_editor::audio {
 
+// Invoked from a miniaudio backend thread when the open device stops, reroutes,
+// or is interrupted. Implementations must be noexcept and thread-safe; they must
+// not open, close, or start/stop devices.
+using MiniaudioDeviceNotificationCallback = void (*)(void* user_data) noexcept;
+
 // Optional native backend. The class remains available in no-device builds and
 // reports Unavailable from open(); available() identifies builds compiled with
 // the pinned miniaudio header.
@@ -22,6 +27,12 @@ public:
   MiniaudioOutputDevice& operator=(MiniaudioOutputDevice&&) noexcept;
 
   [[nodiscard]] static bool available() noexcept;
+  void set_device_notification_callback(MiniaudioDeviceNotificationCallback callback,
+                                        void* user_data) noexcept;
+  // True while an open miniaudio device has a live notification callback.
+  [[nodiscard]] bool device_notifications_active() const noexcept;
+  // Unit-test hook that invokes the registered notification callback directly.
+  void test_deliver_device_notification() noexcept;
   [[nodiscard]] AudioDeviceResult open(const AudioDeviceConfiguration& configuration) override;
   [[nodiscard]] AudioDeviceResult start() override;
   void stop() noexcept override;

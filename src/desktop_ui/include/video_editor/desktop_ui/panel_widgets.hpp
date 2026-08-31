@@ -247,6 +247,7 @@ public:
 
 signals:
   void importCaptionsRequested();
+  void extractEmbeddedCaptionsRequested();
   void exportCaptionsRequested();
   void addCaptionRequested();
   void removeCaptionRequested(int row);

@@ -14,6 +14,7 @@ target_include_directories(
 target_link_libraries(
   video_editor_worker_dispatch
   PRIVATE
+    video_editor::media_cache
     video_editor::media_codec
     video_editor::proxy_service
     video_editor::transcription_service

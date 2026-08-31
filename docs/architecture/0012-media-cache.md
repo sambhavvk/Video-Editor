@@ -109,7 +109,9 @@ produces the `AssetRecord` and fingerprint used as the cache key).
   `put_file` / `path_for` and `CacheKind::Proxy` / `CacheKind::ProxyPtsMap`.
   **File > Manage Media Cache…** is the inspection UI.
 - The store is deliberately not thread-safe; the application controller
-  serializes access with a one-at-a-time cache job queue.
+  serializes access with a one-at-a-time cache job queue. Thumbnail and waveform
+  jobs run in a fresh worker when available; the worker writes a temp blob and
+  the desktop adopts it with `put_file` so only one process updates the index.
 - Windows blob fsync is deferred; the index uses `PRAGMA synchronous = FULL`
   for its own durability in the meantime.
 
