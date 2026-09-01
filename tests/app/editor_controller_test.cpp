@@ -115,6 +115,28 @@ std::size_t audioClipCount(const video_editor::edit::Project& project) {
   return count;
 }
 
+std::size_t videoTrackCount(const video_editor::edit::Sequence& sequence) {
+  return static_cast<std::size_t>(std::count_if(
+      sequence.tracks.begin(), sequence.tracks.end(), [](const auto& track) {
+        return track.kind == video_editor::edit::TrackKind::Video;
+      }));
+}
+
+const video_editor::edit::Track*
+videoTrackAt(const video_editor::edit::Sequence& sequence, const std::size_t ordinal) {
+  std::size_t seen = 0;
+  for (const auto& track : sequence.tracks) {
+    if (track.kind != video_editor::edit::TrackKind::Video) {
+      continue;
+    }
+    if (seen == ordinal) {
+      return &track;
+    }
+    ++seen;
+  }
+  return nullptr;
+}
+
 } // namespace
 
 class EditorControllerTest final : public QObject {
@@ -146,6 +168,10 @@ private slots:
   void reconstructsMediaRecordsFromPersistedAssets();
   void cancellingProxyDoesNotRegisterCompleteProxy();
   void proxyWorkerDeathReportsFailureWithoutHanging();
+  void rippleInsertsStillOverlayOnFreeVideoTrack();
+  void rippleInsertsSecondStillOverlayAddsVideoTrack();
+  void rippleInsertsStillOnEmptyTimelineSetsFormat();
+  void rippleInsertVideoMidClipStillFails();
 
 private:
   std::unique_ptr<QTemporaryDir> application_data_;
@@ -1189,6 +1215,140 @@ void EditorControllerTest::proxyWorkerDeathReportsFailureWithoutHanging() {
 #else
   qunsetenv("VIDEO_EDITOR_WORKER_HOST");
 #endif
+}
+
+void EditorControllerTest::rippleInsertsStillOverlayOnFreeVideoTrack() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString video_path = directory.filePath(QStringLiteral("base-video.mkv"));
+  const QString still_path = directory.filePath(QStringLiteral("overlay.ppm"));
+  QVERIFY(writePlaybackVideo(video_path));
+  writePpmFrame(still_path, 16, 10);
+
+  QSettings settings(directory.filePath(QStringLiteral("still-overlay-ui.ini")), QSettings::IniFormat);
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+  controller.importPaths({video_path});
+  QTRY_COMPARE_WITH_TIMEOUT(
+      controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
+  window.mediaActivated(window.mediaBin()->items().front().id);
+  window.rippleInsertFromSource();
+
+  controller.importPaths({still_path});
+  QTRY_COMPARE_WITH_TIMEOUT(
+      controller.editor().projectAt(controller.editor().revision())->assets.size(), 2U, 10'000);
+  window.mediaActivated(window.mediaBin()->items().back().id);
+  window.rippleInsertFromSource();
+
+  const auto project = controller.editor().projectAt(controller.editor().revision());
+  const auto& sequence = project->sequences.front();
+  QCOMPARE(videoTrackCount(sequence), 2U);
+  const auto* first_video = videoTrackAt(sequence, 0);
+  const auto* second_video = videoTrackAt(sequence, 1);
+  QVERIFY(first_video != nullptr);
+  QVERIFY(second_video != nullptr);
+  QCOMPARE(first_video->clips.size(), 1U);
+  QCOMPARE(second_video->clips.size(), 1U);
+  QCOMPARE(first_video->clips.front().timeline_range.start, video_editor::edit::Time{});
+  QCOMPARE(second_video->clips.front().timeline_range.start, video_editor::edit::Time{});
+}
+
+void EditorControllerTest::rippleInsertsSecondStillOverlayAddsVideoTrack() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString video_path = directory.filePath(QStringLiteral("stacked-base.mkv"));
+  const QString still_path = directory.filePath(QStringLiteral("stacked-overlay.ppm"));
+  QVERIFY(writePlaybackVideo(video_path));
+  writePpmFrame(still_path, 16, 10);
+
+  QSettings settings(directory.filePath(QStringLiteral("stacked-still-ui.ini")), QSettings::IniFormat);
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+  controller.importPaths({video_path, still_path});
+  QTRY_COMPARE_WITH_TIMEOUT(
+      controller.editor().projectAt(controller.editor().revision())->assets.size(), 2U, 10'000);
+
+  window.mediaActivated(window.mediaBin()->items().front().id);
+  window.rippleInsertFromSource();
+  window.mediaActivated(window.mediaBin()->items().back().id);
+  window.rippleInsertFromSource();
+  window.mediaActivated(window.mediaBin()->items().back().id);
+  window.rippleInsertFromSource();
+
+  auto project = controller.editor().projectAt(controller.editor().revision());
+  QCOMPARE(videoTrackCount(project->sequences.front()), 3U);
+  const auto* third_video = videoTrackAt(project->sequences.front(), 2);
+  QVERIFY(third_video != nullptr);
+  QCOMPARE(third_video->clips.size(), 1U);
+  QVERIFY(third_video->clips.front().timeline_range.start == video_editor::edit::Time{});
+
+  window.undoRequested();
+  project = controller.editor().projectAt(controller.editor().revision());
+  QCOMPARE(videoTrackCount(project->sequences.front()), 2U);
+  QCOMPARE(videoTrackAt(project->sequences.front(), 2), nullptr);
+  const auto* second_video = videoTrackAt(project->sequences.front(), 1);
+  QVERIFY(second_video != nullptr);
+  QCOMPARE(second_video->clips.size(), 1U);
+}
+
+void EditorControllerTest::rippleInsertsStillOnEmptyTimelineSetsFormat() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString still_path = directory.filePath(QStringLiteral("empty-timeline-still.ppm"));
+  writePpmFrame(still_path, 16, 10);
+
+  QSettings settings(directory.filePath(QStringLiteral("empty-still-ui.ini")), QSettings::IniFormat);
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+  controller.importPaths({still_path});
+  QTRY_COMPARE_WITH_TIMEOUT(
+      controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
+
+  window.mediaActivated(window.mediaBin()->items().front().id);
+  window.rippleInsertFromSource();
+
+  const auto project = controller.editor().projectAt(controller.editor().revision());
+  const auto& sequence = project->sequences.front();
+  QCOMPARE(sequence.width, 16U);
+  QCOMPARE(sequence.height, 10U);
+  QCOMPARE(sequence.tracks.front().clips.size(), 1U);
+  QCOMPARE(sequence.tracks.front().clips.front().timeline_range.start, video_editor::edit::Time{});
+}
+
+void EditorControllerTest::rippleInsertVideoMidClipStillFails() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString video_path = directory.filePath(QStringLiteral("mid-clip-video.mkv"));
+  QVERIFY(writePlaybackVideo(video_path));
+
+  QSettings settings(directory.filePath(QStringLiteral("mid-clip-ui.ini")), QSettings::IniFormat);
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+  controller.importPaths({video_path});
+  QTRY_COMPARE_WITH_TIMEOUT(
+      controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
+
+  window.mediaActivated(window.mediaBin()->items().front().id);
+  window.rippleInsertFromSource();
+  auto project = controller.editor().projectAt(controller.editor().revision());
+  const auto* first_video = videoTrackAt(project->sequences.front(), 0);
+  QVERIFY(first_video != nullptr);
+  QCOMPARE(first_video->clips.size(), 1U);
+  const auto clip_duration = first_video->clips.front().timeline_range.duration;
+  const qint64 mid_ui = static_cast<qint64>(
+                             clip_duration
+                                 .rescaledTo(window.timeline()->timeScale(),
+                                             video_editor::edit::RoundingMode::NearestTiesEven)
+                                 .value()) /
+                         2;
+  window.seekRequested(mid_ui);
+
+  const auto revision_before = controller.editor().revision();
+  window.mediaActivated(window.mediaBin()->items().front().id);
+  window.rippleInsertFromSource();
+  project = controller.editor().projectAt(controller.editor().revision());
+  QCOMPARE(controller.editor().revision(), revision_before);
+  QCOMPARE(videoTrackAt(project->sequences.front(), 0)->clips.size(), 1U);
 }
 
 QTEST_MAIN(EditorControllerTest)

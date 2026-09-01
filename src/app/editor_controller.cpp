@@ -245,6 +245,46 @@ constexpr int kCacheJobWaveform = 1;
                      [](const media::StreamDescriptor& stream) { return stream.audio.has_value(); });
 }
 
+[[nodiscard]] bool isStillImageUriExtension(const std::string& uri) {
+  const auto dot = uri.find_last_of('.');
+  if (dot == std::string::npos || dot + 1 >= uri.size()) {
+    return false;
+  }
+  std::string extension = uri.substr(dot);
+  std::transform(extension.begin(), extension.end(), extension.begin(),
+                 [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+  return extension == ".png" || extension == ".jpg" || extension == ".jpeg" ||
+         extension == ".bmp" || extension == ".webp" || extension == ".tif" ||
+         extension == ".tiff" || extension == ".ppm";
+}
+
+[[nodiscard]] bool containerLooksLikeImage(const edit::Asset& asset) {
+  const auto found = asset.metadata.find("container");
+  if (found == asset.metadata.end()) {
+    return false;
+  }
+  const std::string& container = found->second;
+  return container.find("image") != std::string::npos ||
+         container.find("png") != std::string::npos || container.find("jpeg") != std::string::npos;
+}
+
+[[nodiscard]] bool isStillOverlayAsset(const edit::Asset& asset) {
+  const auto media_kind = asset.metadata.find("media_kind");
+  if (media_kind != asset.metadata.end()) {
+    if (media_kind->second == "still" || media_kind->second == "image_sequence") {
+      return true;
+    }
+  }
+  return asset.has_video && !asset.has_audio &&
+         (containerLooksLikeImage(asset) || isStillImageUriExtension(asset.source_uri));
+}
+
+[[nodiscard]] bool trackOverlapsRange(const edit::Track& track, const edit::TimeRange& range) {
+  return std::any_of(track.clips.begin(), track.clips.end(), [&](const edit::Clip& clip) {
+    return clip.timeline_range.overlaps(range);
+  });
+}
+
 [[nodiscard]] bool storeErrorLooksFull(const std::string& message) {
   return message.find("budget") != std::string::npos || message.find("Full") != std::string::npos ||
          message.find("exceeds") != std::string::npos;
@@ -2551,24 +2591,63 @@ void EditorController::insertLoadedSource(const edit::InsertMode mode) {
   }
   const edit::Asset asset_copy = *asset;
   const edit::EntityId sequence_id = sequence->id;
-  std::optional<edit::EntityId> video_track_id;
-  std::optional<edit::EntityId> audio_track_id;
-  for (const edit::Track& track : sequence->tracks) {
-    if (!track.locked && track.targeted && track.kind == edit::TrackKind::Video &&
-        !video_track_id.has_value()) {
-      video_track_id = track.id;
-    }
-    if (!track.locked && track.targeted && track.kind == edit::TrackKind::Audio &&
-        !audio_track_id.has_value()) {
-      audio_track_id = track.id;
-    }
-  }
   const edit::TimeRange source_range = markedSourceRange();
   const edit::Time start = playheadTime();
   const edit::Time duration = source_range.duration;
+  const edit::TimeRange dest_range{start, duration};
+  const bool still_overlay =
+      mode == edit::InsertMode::Ripple && isStillOverlayAsset(asset_copy);
+  const edit::InsertMode clip_insert_mode =
+      still_overlay ? edit::InsertMode::RejectOverlap : mode;
+  std::optional<edit::EntityId> video_track_id;
+  std::optional<edit::EntityId> audio_track_id;
+  std::vector<edit::EditCommand> commands;
+  if (still_overlay) {
+    bool has_targeted_video_track = false;
+    for (const edit::Track& track : sequence->tracks) {
+      if (!track.locked && track.targeted && track.kind == edit::TrackKind::Video) {
+        has_targeted_video_track = true;
+        if (!video_track_id.has_value() && !trackOverlapsRange(track, dest_range)) {
+          video_track_id = track.id;
+        }
+      }
+    }
+    if (!video_track_id.has_value() && has_targeted_video_track) {
+      edit::Track track;
+      track.kind = edit::TrackKind::Video;
+      track.targeted = true;
+      const auto ordinal =
+          1 + std::count_if(sequence->tracks.begin(), sequence->tracks.end(),
+                            [](const edit::Track& item) {
+                              return item.kind == edit::TrackKind::Video;
+                            });
+      track.name = std::string("Video ") + std::to_string(ordinal);
+      video_track_id = track.id;
+      std::size_t insert_index = 0;
+      for (std::size_t index = 0; index < sequence->tracks.size(); ++index) {
+        if (sequence->tracks[index].kind == edit::TrackKind::Video) {
+          insert_index = index + 1;
+        }
+      }
+      commands.push_back({.operation = edit::AddTrackCommand{.sequence_id = sequence_id,
+                                                              .track = track,
+                                                              .index = insert_index},
+                          .coalescing_key = {}});
+    }
+  } else {
+    for (const edit::Track& track : sequence->tracks) {
+      if (!track.locked && track.targeted && track.kind == edit::TrackKind::Video &&
+          !video_track_id.has_value()) {
+        video_track_id = track.id;
+      }
+      if (!track.locked && track.targeted && track.kind == edit::TrackKind::Audio &&
+          !audio_track_id.has_value()) {
+        audio_track_id = track.id;
+      }
+    }
+  }
   const edit::EntityId linked = edit::EntityId::generate();
   std::optional<edit::EntityId> first_inserted;
-  std::vector<edit::EditCommand> commands;
 
   const bool sequence_has_no_clips =
       std::all_of(sequence->tracks.begin(), sequence->tracks.end(),
@@ -2606,7 +2685,7 @@ void EditorController::insertLoadedSource(const edit::InsertMode mode) {
         {.operation = edit::InsertClipCommand{.sequence_id = sequence_id,
                                               .track_id = *track_id,
                                               .clip = std::move(clip),
-                                              .mode = mode},
+                                              .mode = clip_insert_mode},
          .coalescing_key = {}});
     return true;
   };
@@ -5583,8 +5662,9 @@ bool EditorController::applyBatch(std::vector<edit::EditCommand> commands,
   const auto result =
       editor_->applyBatch(std::move(commands), editor_->revision(), "Timeline batch", batch_key);
   if (!result) {
-    SessionEventLog::instance().log_backend("applyBatch",
-                                            "failure count=" + std::to_string(command_count));
+    SessionEventLog::instance().log_backend(
+        "applyBatch", "failure count=" + std::to_string(command_count) + " error=" +
+                          result.error().message);
     window_.showTransientMessage(QStringLiteral("%1: %2").arg(
         failureContext, QString::fromStdString(result.error().message)));
     refreshViews();
