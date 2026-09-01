@@ -3,6 +3,7 @@
 #include "video_editor/edit_model/effect_evaluator.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <limits>
 #include <mutex>
@@ -680,6 +681,51 @@ validateTransition(const Project& project, const Sequence& sequence, const Trans
   return std::nullopt;
 }
 
+[[nodiscard]] bool isDigitSpan(std::string_view text) {
+  return !text.empty() &&
+         std::all_of(text.begin(), text.end(),
+                     [](const unsigned char character) { return std::isdigit(character) != 0; });
+}
+
+[[nodiscard]] std::string stripTrailingSplitSuffix(std::string name) {
+  const auto open = name.rfind('[');
+  if (open == std::string::npos) {
+    return name;
+  }
+  const auto close = name.find(']', open);
+  if (close != name.size() - 1) {
+    return name;
+  }
+  const auto colon = name.find(':', open);
+  if (colon == std::string::npos || colon <= open + 1 || colon + 1 >= close) {
+    return name;
+  }
+  if (!isDigitSpan(std::string_view(name).substr(open + 1, colon - open - 1)) ||
+      !isDigitSpan(std::string_view(name).substr(colon + 1, close - colon - 1))) {
+    return name;
+  }
+  name.resize(open);
+  return name;
+}
+
+[[nodiscard]] std::int64_t floorWholeSeconds(const Time& time) {
+  return time.rescaledTo(1, RoundingMode::Floor).value();
+}
+
+[[nodiscard]] std::string splitHalfName(const std::string& base, const std::int64_t start_seconds,
+                                        const std::int64_t end_seconds) {
+  return base + "[" + std::to_string(start_seconds) + ":" + std::to_string(end_seconds) + "]";
+}
+
+void renameSplitHalves(Clip& left, Clip& right, const Clip& original, const Time split_time) {
+  const auto base = stripTrailingSplitSuffix(original.name);
+  const auto start_seconds = floorWholeSeconds(original.timeline_range.start);
+  const auto split_seconds = floorWholeSeconds(split_time);
+  const auto end_seconds = floorWholeSeconds(original.timeline_range.end());
+  left.name = splitHalfName(base, start_seconds, split_seconds);
+  right.name = splitHalfName(base, split_seconds, end_seconds);
+}
+
 [[nodiscard]] Time sourceDeltaForTimelineDelta(const Clip& clip, Time timeline_delta) {
   return timeline_delta
       .scaled(clip.playback_rate.numerator(), clip.playback_rate.denominator(),
@@ -1016,6 +1062,7 @@ struct PlannedClip final {
             splitClipObject(*location->clip, command.split_time, right_ids.at(id), left, right)) {
       return issue;
     }
+    renameSplitHalves(left, right, *location->clip, command.split_time);
     if (const auto issue = validateClip(project, *location->track, left))
       return issue;
     if (const auto issue = validateClip(project, *location->track, right))

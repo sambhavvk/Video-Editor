@@ -139,11 +139,16 @@ Control requests ripple intent and Alt requests overwrite intent for compatible 
 gestures. Invalid destinations, overlaps, missing source handles, non-adjacent precision edits, and
 locked selected/linked participants reject the complete batch and restore the authoritative view.
 
+Right-click a clip for **Properties** (select and raise the Inspector), **Cut here** (split at the
+clicked position), **Delete**, or **Ripple Delete**.
+
 Other editing operations:
 
 - **Split Clip** splits every selected clip at the playhead and automatically includes linked A/V;
-  all right-half IDs are explicit and the complete operation is atomic.
-- **Delete** removes the selected clips and their linked A/V while leaving gaps.
+  all right-half IDs are explicit and the complete operation is atomic. Each half is renamed with
+  whole-second timeline ranges, for example `clip1[0:130]` and `clip1[130:600]`.
+- **Delete** removes the selected clips and their linked A/V while leaving gaps. The Inspector also
+  exposes a **Delete clip** button when a clip is selected.
 - **Ripple Delete** removes them and closes each affected track independently.
 - Undo and redo treat a multi-selection or linked operation as one step.
 - **Alt+Left/Right** nudges the selection by one exact sequence frame; add **Shift** for ten frames

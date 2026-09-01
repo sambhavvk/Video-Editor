@@ -390,6 +390,62 @@ TEST(TimelineEditorTest, SplitsClipAndMapsSourceRanges) {
   EXPECT_EQ(left->source_range, TimeRange(Time(0, 1), Time(4, 1)));
   EXPECT_EQ(right->timeline_range, TimeRange(Time(14, 1), Time(6, 1)));
   EXPECT_EQ(right->source_range, TimeRange(Time(4, 1), Time(6, 1)));
+  EXPECT_EQ(left->name, "Video[10:14]");
+  EXPECT_EQ(right->name, "Video[14:20]");
+}
+
+TEST(TimelineEditorTest, SplitRenamesHalvesWithWholeSecondRanges) {
+  auto fixture = makeProject();
+  fixture.project.assets[0].duration = Time(600, 1);
+  TimelineEditor editor(fixture.project);
+  auto clip = makeClip(fixture.asset_id, 0, 600);
+  clip.name = "clip1[0:130]";
+  clip.source_range = TimeRange(Time(0, 1), Time(600, 1));
+  auto revision = insert(editor, Revision{0}, fixture.sequence_id, fixture.video_track_id, clip);
+
+  const auto right_id = EntityId::generate();
+  auto result = editor.apply(
+      EditCommand{SplitClipCommand{fixture.sequence_id, clip.id, Time(130, 1), right_id}, {}},
+      revision);
+  ASSERT_TRUE(result) << (result ? "" : result.error().message);
+
+  const auto current = snapshot(editor, fixture.sequence_id, result.value());
+  const auto* left = current.findClip(clip.id);
+  const auto* right = current.findClip(right_id);
+  ASSERT_NE(left, nullptr);
+  ASSERT_NE(right, nullptr);
+  EXPECT_EQ(left->name, "clip1[0:130]");
+  EXPECT_EQ(right->name, "clip1[130:600]");
+}
+
+TEST(TimelineEditorTest, SplitRenamesLinkedCompanions) {
+  auto fixture = makeProject();
+  auto video = makeClip(fixture.asset_id, 0, 10);
+  auto audio = makeClip(fixture.asset_id, 0, 10, ClipKind::Audio);
+  video.name = "Scene";
+  audio.name = "Scene";
+  const auto group = EntityId::generate();
+  video.linked_group = group;
+  audio.linked_group = group;
+  fixture.project.sequences[0].tracks[0].clips.push_back(video);
+  fixture.project.sequences[0].tracks[1].clips.push_back(audio);
+  TimelineEditor editor(fixture.project);
+  const auto video_right = EntityId::generate();
+  const auto audio_right = EntityId::generate();
+  const auto applied = editor.apply(EditCommand{SplitClipCommand{fixture.sequence_id,
+                                                                 video.id,
+                                                                 Time(5, 1),
+                                                                 video_right,
+                                                                 true,
+                                                                 {{audio.id, audio_right}}},
+                                                {}},
+                                    Revision{0});
+  ASSERT_TRUE(applied) << (applied ? "" : applied.error().message);
+  const auto current = snapshot(editor, fixture.sequence_id, applied.value());
+  EXPECT_EQ(current.findClip(video.id)->name, "Scene[0:5]");
+  EXPECT_EQ(current.findClip(video_right)->name, "Scene[5:10]");
+  EXPECT_EQ(current.findClip(audio.id)->name, "Scene[0:5]");
+  EXPECT_EQ(current.findClip(audio_right)->name, "Scene[5:10]");
 }
 
 TEST(TimelineEditorTest, OverwritePreservesUncoveredClipSegments) {
