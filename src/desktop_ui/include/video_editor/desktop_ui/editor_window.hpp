@@ -5,6 +5,7 @@
 #pragma once
 
 #include "video_editor/desktop_ui/cache_browser_dialog.hpp"
+#include "video_editor/desktop_ui/export_dialog.hpp"
 #include "video_editor/desktop_ui/ui_types.hpp"
 
 #include <QHash>
@@ -92,6 +93,8 @@ public:
                        QVector<TimelineClipView> clips, QVector<TimelineMarkerView> markers,
                        QVector<TimelineGapView> gaps);
   void showTransientMessage(const QString& message, int timeoutMs = 4000);
+  void showExportDialog(const QString& presetId = {});
+  void focusInspector();
 
 public slots:
   void setWorkspace(Workspace workspace);
@@ -113,7 +116,7 @@ signals:
   void saveProjectAsRequested();
   void importMediaRequested();
   void manageMediaCacheRequested();
-  void exportRequested(const QString& presetId);
+  void exportConfirmed(const QString& destination, const QString& presetId);
   void undoRequested();
   void redoRequested();
   void splitClipRequested();
@@ -208,6 +211,7 @@ private:
   CaptionsPanelWidget* captions_panel_{nullptr};
   DeliverPanelWidget* deliver_panel_{nullptr};
   CacheBrowserDialog* cache_browser_{nullptr};
+  ExportDialog* export_dialog_{nullptr};
 
   QDockWidget* media_dock_{nullptr};
   QDockWidget* inspector_dock_{nullptr};

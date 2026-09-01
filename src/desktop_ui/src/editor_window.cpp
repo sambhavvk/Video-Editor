@@ -4,7 +4,7 @@
 
 #include "video_editor/desktop_ui/editor_window.hpp"
 
-#include "video_editor/desktop_ui/cache_browser_dialog.hpp"
+#include "video_editor/desktop_ui/export_dialog.hpp"
 #include "video_editor/desktop_ui/command_palette.hpp"
 #include "video_editor/desktop_ui/keyboard_shortcuts_dialog.hpp"
 #include "video_editor/desktop_ui/panel_widgets.hpp"
@@ -16,6 +16,7 @@
 #include <QActionGroup>
 #include <QApplication>
 #include <QCloseEvent>
+#include <QDialog>
 #include <QDockWidget>
 #include <QFileDialog>
 #include <QFrame>
@@ -204,7 +205,6 @@ void EditorWindow::setProjectDirty(bool dirty) {
 
 void EditorWindow::setMediaItems(const QVector<MediaItemView>& items) {
   media_bin_->setItems(items);
-  deliver_panel_->setExportEnabled(!items.isEmpty());
 }
 
 void EditorWindow::setTimelineView(qint64 duration, qint64 timeScale,
@@ -224,6 +224,29 @@ void EditorWindow::setTimelineView(qint64 duration, qint64 timeScale,
 
 void EditorWindow::showTransientMessage(const QString& message, int timeoutMs) {
   statusBar()->showMessage(message, timeoutMs);
+}
+
+void EditorWindow::showExportDialog(const QString& presetId) {
+  QString effective_preset = presetId;
+  if (effective_preset.isEmpty()) {
+    effective_preset = deliver_panel_->selectedPresetId();
+  }
+  export_dialog_->setSelectedPreset(effective_preset);
+  export_dialog_->setDestinationPath(deliver_panel_->destinationPath());
+  if (export_dialog_->exec() != QDialog::Accepted) {
+    return;
+  }
+  const QString destination = export_dialog_->destinationPath();
+  deliver_panel_->setDestinationPath(destination);
+  emit exportConfirmed(destination, export_dialog_->selectedPresetId());
+}
+
+void EditorWindow::focusInspector() {
+  if (inspector_dock_ == nullptr) {
+    return;
+  }
+  inspector_dock_->show();
+  inspector_dock_->raise();
 }
 
 void EditorWindow::setWorkspace(Workspace workspace) {
@@ -475,6 +498,7 @@ void EditorWindow::createPanels() {
   deliver_panel_ = new DeliverPanelWidget(this);
   deliver_panel_->setExportEnabled(false);
   cache_browser_ = new CacheBrowserDialog(this);
+  export_dialog_ = new ExportDialog(this);
 
   media_dock_ = makeDock(QStringLiteral("mediaDock"), tr("Media Bin"), media_bin_, this);
   inspector_dock_ = makeDock(QStringLiteral("inspectorDock"), tr("Inspector"), inspector_, this);
@@ -527,7 +551,7 @@ void EditorWindow::createActions() {
   create(QStringLiteral("manageMediaCache"), tr("Manage Media Cache…"),
          tr("Review cache use and set the media cache budget"));
   auto* exportAction = create(QStringLiteral("export"), tr("Export Video…"),
-                              tr("Open the Deliver workspace"), QKeySequence{tr("Ctrl+E")});
+                              tr("Export the current sequence"), QKeySequence{tr("Ctrl+E")});
   exportAction->setIcon(style()->standardIcon(QStyle::SP_DialogSaveButton));
   create(QStringLiteral("quit"), tr("Quit"), tr("Close the application"), QKeySequence::Quit);
 
@@ -641,7 +665,7 @@ void EditorWindow::createActions() {
   connect(action(QStringLiteral("saveProjectAs")), &QAction::triggered, this,
           &EditorWindow::saveProjectAsRequested);
   connect(import, &QAction::triggered, this, &EditorWindow::importMediaRequested);
-  connect(exportAction, &QAction::triggered, this, [this] { setWorkspace(Workspace::Deliver); });
+  connect(exportAction, &QAction::triggered, this, [this] { showExportDialog(); });
   connect(action(QStringLiteral("quit")), &QAction::triggered, this, &QWidget::close);
   connect(action(QStringLiteral("undo")), &QAction::triggered, this, &EditorWindow::undoRequested);
   connect(action(QStringLiteral("redo")), &QAction::triggered, this, &EditorWindow::redoRequested);
@@ -922,7 +946,7 @@ void EditorWindow::connectControllerSurface() {
   connect(timeline_, &TimelineWidget::transitionPresetChanged, this,
           &EditorWindow::transitionPresetChanged);
   connect(deliver_panel_, &DeliverPanelWidget::exportRequested, this,
-          &EditorWindow::exportRequested);
+          [this](const QString& presetId) { showExportDialog(presetId); });
   connect(action(QStringLiteral("safeGuides")), &QAction::toggled, program_viewer_,
           &ProgramViewer::setSafeGuidesVisible);
   connect(action(QStringLiteral("zoomInTimeline")), &QAction::triggered, timeline_,

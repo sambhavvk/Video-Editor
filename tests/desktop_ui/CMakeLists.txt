@@ -70,11 +70,26 @@ target_link_libraries(video_editor_deliver_panel_tests
         Qt6::Widgets
 )
 
+add_executable(video_editor_export_dialog_tests
+    export_dialog_test.cpp
+)
+
+target_compile_features(video_editor_export_dialog_tests PRIVATE cxx_std_20)
+target_link_libraries(video_editor_export_dialog_tests
+    PRIVATE
+        VideoEditor::DesktopUi
+        VideoEditor::ExportService
+        video_editor::media_codec
+        Qt6::Test
+        Qt6::Widgets
+)
+
 set_target_properties(
     video_editor_desktop_ui_tests
     video_editor_desktop_ui_accessibility_tests
     video_editor_desktop_ui_beginner_walkthrough_tests
     video_editor_deliver_panel_tests
+    video_editor_export_dialog_tests
     PROPERTIES
         AUTOMOC ON
         CXX_EXTENSIONS OFF
@@ -100,6 +115,12 @@ set_tests_properties(desktop_ui.beginner_walkthrough PROPERTIES
 
 add_test(NAME desktop_ui.deliver_panel COMMAND video_editor_deliver_panel_tests)
 set_tests_properties(desktop_ui.deliver_panel PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+    TIMEOUT 30
+)
+
+add_test(NAME desktop_ui.export_dialog COMMAND video_editor_export_dialog_tests)
+set_tests_properties(desktop_ui.export_dialog PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     TIMEOUT 30
 )

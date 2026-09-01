@@ -506,6 +506,11 @@ bool isKnownPlatformPreset(const int value) noexcept {
          value <= static_cast<int>(export_service::PlatformPreset::PodcastAudioOnly);
 }
 
+[[nodiscard]] bool sequenceHasClips(const edit::Sequence& sequence) {
+  return std::any_of(sequence.tracks.cbegin(), sequence.tracks.cend(),
+                     [](const edit::Track& track) { return !track.clips.empty(); });
+}
+
 QVariant effectValueForUi(const edit::EffectValue& value) {
   if (const auto* integer = std::get_if<std::int64_t>(&value)) {
     return QVariant::fromValue<qlonglong>(*integer);
@@ -923,8 +928,12 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           });
   connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::captionStyleEdited, this,
           &EditorController::captionStyleEdited);
-  connect(&window_, &desktop_ui::EditorWindow::exportRequested, this,
-          &EditorController::chooseVideoExport);
+  connect(&window_, &desktop_ui::EditorWindow::exportConfirmed, this,
+          [this](const QString& destination, const QString& presetId) {
+            (void)startVideoExport(pathFromQString(destination), presetId, true);
+          });
+  connect(window_.deliverPanel(), &desktop_ui::DeliverPanelWidget::cancelRequested, this,
+          &EditorController::cancelVideoExport);
   connect(window_.deliverPanel(), &desktop_ui::DeliverPanelWidget::destinationBrowseRequested, this,
           [this] {
             bool numeric = false;
@@ -1876,46 +1885,15 @@ bool EditorController::exportCaptionFile(const std::filesystem::path& destinatio
   return true;
 }
 
-void EditorController::chooseVideoExport(const QString& presetId) {
-  if (export_in_flight_) {
-    export_cancel_requested_ = true;
-    if (export_session_ != nullptr) {
-      export_session_->cancel();
-    }
-    window_.showTransientMessage(tr("Cancelling export…"));
+void EditorController::cancelVideoExport() {
+  if (!export_in_flight_) {
     return;
   }
-  bool numeric_preset = false;
-  const auto parsed_preset = presetId.toInt(&numeric_preset);
-  const bool legacy_prores = presetId == QStringLiteral("master.prores");
-  const auto platform = numeric_preset && isKnownPlatformPreset(parsed_preset)
-                            ? static_cast<export_service::PlatformPreset>(parsed_preset)
-                            : (legacy_prores ? export_service::PlatformPreset::ReferenceProRes
-                                             : export_service::PlatformPreset::ReferenceFfv1);
-  const auto preset = export_service::reference_video_preset_for(platform).value_or(
-      export_service::VideoPreset::Ffv1Matroska);
-  const bool webm = preset == export_service::VideoPreset::Vp9OpusWebm;
-  const QString extension =
-      webm ? QStringLiteral("webm")
-           : (preset == export_service::VideoPreset::Ffv1Matroska ? QStringLiteral("mkv")
-                                                                  : QStringLiteral("mov"));
-  const QString filter =
-      webm ? tr("WebM video (*.webm)")
-           : (preset == export_service::VideoPreset::Ffv1Matroska ? tr("Matroska video (*.mkv)")
-                                                                  : tr("QuickTime movie (*.mov)"));
-  const QString default_name = platform == export_service::PlatformPreset::PodcastAudioOnly
-                                   ? QStringLiteral("podcast.webm")
-                                   : QStringLiteral("export.%1").arg(extension);
-  QString destination = window_.deliverPanel()->destinationPath();
-  if (destination.isEmpty() ||
-      !destination.endsWith(QStringLiteral(".%1").arg(extension), Qt::CaseInsensitive)) {
-    destination =
-        QFileDialog::getSaveFileName(&window_, tr("Export creator delivery"), default_name, filter);
+  export_cancel_requested_ = true;
+  if (export_session_ != nullptr) {
+    export_session_->cancel();
   }
-  if (!destination.isEmpty()) {
-    window_.deliverPanel()->setDestinationPath(destination);
-    (void)startVideoExport(pathFromQString(destination), presetId, true);
-  }
+  window_.showTransientMessage(tr("Cancelling export…"));
 }
 
 bool EditorController::startVideoExport(const std::filesystem::path& destination,
@@ -1925,7 +1903,7 @@ bool EditorController::startVideoExport(const std::filesystem::path& destination
     return false;
   }
   const edit::Sequence* sequence = currentSequence();
-  if (sequence == nullptr || edit::sequenceDuration(*sequence).isZero()) {
+  if (sequence == nullptr || !sequenceHasClips(*sequence)) {
     showError(tr("Could not export"), tr("Add at least one clip to the timeline first."));
     return false;
   }
@@ -6044,7 +6022,7 @@ void EditorController::refreshViews() {
   window_.setProjectDisplayName(QString::fromStdString(project->name));
   const edit::Sequence* sequence = currentSequence();
   window_.deliverPanel()->setExportEnabled(
-      export_in_flight_ || (sequence != nullptr && !edit::sequenceDuration(*sequence).isZero()));
+      export_in_flight_ || (sequence != nullptr && sequenceHasClips(*sequence)));
   refreshMediaView();
   refreshTimelineView();
   refreshInspectorView();

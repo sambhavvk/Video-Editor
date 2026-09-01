@@ -327,12 +327,13 @@ failures do not commit a partial destination. See [Media, proxies, and cache](re
 ## Export a master or creator file
 
 1. Add at least one clip to the sequence.
-2. Open **Deliver**. Choose FFV1/Matroska or ProRes/MOV for a reference master, or a YouTube,
-   vertical, or podcast preset for FOSS VP9/Opus WebM delivery.
-3. Optionally expand the controls and select resolution, frame rate, video bitrate or VP9 quality,
-   audio bitrate, and caption burn-in/sidecar behavior.
-4. Choose **Browse…** to select a destination, then **Export master**. Use the export button again
-   to request cancellation while the job is running.
+2. Choose **File → Export Video…** (`Ctrl+E`) or open **Deliver** and choose **Export master**.
+   Both open the export dialog with the current Deliver preset and destination.
+3. Pick a format preset, choose a destination with **Browse…**, then confirm with **OK**.
+   Use **Export master** again while a job is running to request cancellation.
+4. In **Deliver**, optionally expand the controls and select resolution, frame rate, video bitrate
+   or VP9 quality, audio bitrate, and caption burn-in/sidecar behavior before exporting. The dialog
+   uses those advanced options for the export pipeline.
 
 The exporter binds to an immutable revision, renders the full sequence resolution with originals,
 and writes a unique temporary sibling. Only a complete output is atomically committed. Failure or
@@ -366,7 +367,7 @@ Qt maps standard shortcuts to the platform convention; the table uses the Window
 | --- | --- |
 | New / Open / Save / Save As | `Ctrl+N` / `Ctrl+O` / `Ctrl+S` / `Ctrl+Shift+S` |
 | Import media | `Ctrl+I` |
-| Open Deliver workspace | `Ctrl+E` |
+| Export video | `Ctrl+E` |
 | Undo / Redo | `Ctrl+Z` / platform redo shortcut |
 | Split selected clip | `Ctrl+B` |
 | Delete / Ripple delete | `Delete` / `Shift+Delete` |

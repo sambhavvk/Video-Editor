@@ -272,7 +272,7 @@ private slots:
   void selectAudioOutputDevice(const QString& deviceId);
   void calibrateOutputLatency();
   void setNormalizationTarget(double targetLufs);
-  void chooseVideoExport(const QString& presetId);
+  void cancelVideoExport();
 
 private:
   enum class AudioControlIntent : std::uint8_t { None, Start, Pause, Resume, Seek };
