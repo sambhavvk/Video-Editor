@@ -912,6 +912,8 @@ void EditorWindow::connectControllerSurface() {
   connect(inspector_, &InspectorWidget::effectLutBrowseRequested, this,
           &EditorWindow::effectLutBrowseRequested);
   connect(inspector_, &InspectorWidget::addTitleRequested, this, &EditorWindow::addTitleRequested);
+  connect(inspector_, &InspectorWidget::deleteClipRequested, this,
+          [this] { emit deleteSelectionRequested(false); });
   connect(timeline_, &TimelineWidget::transitionActivated, this,
           &EditorWindow::transitionActivated);
   connect(timeline_, &TimelineWidget::transitionDurationEdited, this,

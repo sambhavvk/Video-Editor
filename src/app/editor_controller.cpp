@@ -1009,6 +1009,18 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::setNormalizationTarget);
   connect(window_.timeline(), &desktop_ui::TimelineWidget::clipActivated, this,
           [this](const QString& clipId) { setClipSelection({clipId}, clipId); });
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::clipInspectorRequested, this,
+          [this](const QString& clipId) {
+            setClipSelection({clipId}, clipId);
+            window_.focusInspector();
+          });
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::clipCutAtRequested, this,
+          &EditorController::splitClipAt);
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::clipDeleteRequested, this,
+          [this](const QString& clipId, const bool ripple) {
+            setClipSelection({clipId}, clipId);
+            deleteSelectedClip(ripple);
+          });
   connect(window_.timeline(), &desktop_ui::TimelineWidget::clipSelectionChanged, this,
           &EditorController::setClipSelection);
   connect(window_.timeline(), &desktop_ui::TimelineWidget::clipBatchEditCommitted, this,
@@ -2853,6 +2865,39 @@ void EditorController::splitSelectedClip() {
   }
   (void)applyBatch(std::move(commands),
                    tr("Could not split the selected clips and their linked media"));
+}
+
+void EditorController::splitClipAt(const QString& clipIdText, const qint64 uiTime) {
+  const edit::Sequence* sequence = currentSequence();
+  const auto clipId = parseId(clipIdText);
+  if (sequence == nullptr || !clipId.has_value()) {
+    return;
+  }
+  const edit::Clip* clip = edit::findClip(*sequence, *clipId);
+  if (clip == nullptr) {
+    return;
+  }
+  const auto split_time = timelineTime(uiTime);
+  if (split_time <= clip->timeline_range.start || split_time >= clip->timeline_range.end()) {
+    window_.showTransientMessage(tr("Click inside the clip to cut"));
+    return;
+  }
+  setClipSelection({clipIdText}, clipIdText);
+  const auto participants = expandLinkedSelection(*sequence, {*clipId});
+  edit::SplitClipCommand split{.sequence_id = sequence->id,
+                               .clip_id = *clipId,
+                               .split_time = split_time,
+                               .right_clip_id = edit::EntityId::generate(),
+                               .include_linked = participants.size() > 1,
+                               .linked_right_clip_ids = {}};
+  for (const auto& participant : participants) {
+    if (participant != *clipId) {
+      split.linked_right_clip_ids.push_back(
+          {.clip_id = participant, .right_clip_id = edit::EntityId::generate()});
+    }
+  }
+  (void)applyBatch({{.operation = std::move(split), .coalescing_key = {}}},
+                   tr("Could not split the clip at this position"));
 }
 
 void EditorController::deleteSelectedClip(const bool ripple) {

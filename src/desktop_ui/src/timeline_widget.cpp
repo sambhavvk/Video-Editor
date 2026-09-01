@@ -1170,7 +1170,30 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
   }
   const auto index = clipAt(event->pos());
   if (index >= 0) {
-    emit clipContextMenuRequested(clips_.at(index).id, event->globalPos());
+    const auto clip = clips_.at(index);
+    const auto clickTime = timeForX(event->pos().x());
+    const bool cutInside =
+        clickTime > clip.start && clickTime < clip.start + std::max<qint64>(1, clip.duration);
+    QMenu menu(this);
+    auto* properties = menu.addAction(tr("Properties"));
+    auto* cutHere = menu.addAction(tr("Cut here"));
+    cutHere->setEnabled(cutInside);
+    cutHere->setToolTip(tr("Split the clip at the clicked position"));
+    menu.addSeparator();
+    auto* remove = menu.addAction(tr("Delete"));
+    auto* rippleRemove = menu.addAction(tr("Ripple Delete"));
+    remove->setToolTip(tr("Delete the clip and leave a gap"));
+    rippleRemove->setToolTip(tr("Delete the clip and close the gap"));
+    const auto* chosen = menu.exec(event->globalPos());
+    if (chosen == properties) {
+      emit clipInspectorRequested(clip.id);
+    } else if (chosen == cutHere && cutInside) {
+      emit clipCutAtRequested(clip.id, clickTime);
+    } else if (chosen == remove) {
+      emit clipDeleteRequested(clip.id, false);
+    } else if (chosen == rippleRemove) {
+      emit clipDeleteRequested(clip.id, true);
+    }
     event->accept();
     return;
   }

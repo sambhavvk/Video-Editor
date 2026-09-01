@@ -216,6 +216,7 @@ private slots:
   void stepSourceFrame(int direction);
   void advanceSourcePlayback();
   void splitSelectedClip();
+  void splitClipAt(const QString& clipId, qint64 uiTime);
   void deleteSelectedClip(bool ripple);
   void undo();
   void redo();

@@ -105,6 +105,7 @@ signals:
   void effectKeyframeControlPointsEdited(const QString& effectId, const QString& parameterId,
                                          const QString& keyframeId, const QPointF& incoming,
                                          const QPointF& outgoing);
+  void deleteClipRequested();
   void pickWhiteBalanceRequested();
   void effectLutBrowseRequested(const QString& effectId, const QString& parameterId);
   void addTitleRequested();
@@ -117,6 +118,7 @@ private:
   void publishAssetMetadata();
 
   QLabel* selection_name_{nullptr};
+  QPushButton* delete_clip_{nullptr};
   QGroupBox* asset_group_{nullptr};
   QLineEdit* asset_title_{nullptr};
   QLineEdit* asset_tags_{nullptr};

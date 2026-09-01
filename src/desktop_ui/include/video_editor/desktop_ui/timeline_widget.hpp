@@ -150,7 +150,9 @@ signals:
   void transitionPresetChanged(const QString& transitionId, const QString& kind);
   void seekRequested(qint64 position);
   void clipActivated(const QString& clipId);
-  void clipContextMenuRequested(const QString& clipId, const QPoint& globalPosition);
+  void clipInspectorRequested(const QString& clipId);
+  void clipCutAtRequested(const QString& clipId, qint64 uiTime);
+  void clipDeleteRequested(const QString& clipId, bool ripple);
   void playheadChanged(qint64 position);
   void zoomChanged(double pixelsPerSecond);
   // Deltas use the widget's exact integer time scale. Control requests a ripple

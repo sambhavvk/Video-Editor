@@ -325,6 +325,13 @@ InspectorWidget::InspectorWidget(QWidget* parent) : QWidget(parent) {
   selection_name_->setFont(titleFont);
   layout->addWidget(selection_name_);
 
+  delete_clip_ = new QPushButton(tr("Delete clip"), this);
+  delete_clip_->setObjectName(QStringLiteral("inspectorDeleteClip"));
+  delete_clip_->setAccessibleName(tr("Delete clip"));
+  delete_clip_->setVisible(false);
+  layout->addWidget(delete_clip_);
+  connect(delete_clip_, &QPushButton::clicked, this, &InspectorWidget::deleteClipRequested);
+
   asset_group_ = new QGroupBox(tr("Asset"), this);
   asset_group_->setObjectName(QStringLiteral("inspectorAssetGroup"));
   asset_group_->setAccessibleName(tr("Asset metadata"));
@@ -775,6 +782,7 @@ void InspectorWidget::publishAssetMetadata() {
 
 void InspectorWidget::setSelectionName(const QString& name) {
   selection_name_->setText(name.isEmpty() ? tr("No selection") : name);
+  delete_clip_->setVisible(!name.isEmpty());
   content_->setCurrentIndex(name.isEmpty() ? 0 : 1);
 }
 
