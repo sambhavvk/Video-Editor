@@ -446,6 +446,32 @@ TEST(TimelineEditorTest, SplitRenamesLinkedCompanions) {
   EXPECT_EQ(current.findClip(video_right)->name, "Scene[5:10]");
   EXPECT_EQ(current.findClip(audio.id)->name, "Scene[0:5]");
   EXPECT_EQ(current.findClip(audio_right)->name, "Scene[5:10]");
+  const auto* left_video = current.findClip(video.id);
+  const auto* left_audio = current.findClip(audio.id);
+  const auto* right_video = current.findClip(video_right);
+  const auto* right_audio = current.findClip(audio_right);
+  ASSERT_NE(left_video, nullptr);
+  ASSERT_NE(left_audio, nullptr);
+  ASSERT_NE(right_video, nullptr);
+  ASSERT_NE(right_audio, nullptr);
+  ASSERT_TRUE(left_video->linked_group.has_value());
+  ASSERT_TRUE(left_audio->linked_group.has_value());
+  ASSERT_TRUE(right_video->linked_group.has_value());
+  ASSERT_TRUE(right_audio->linked_group.has_value());
+  EXPECT_EQ(left_video->linked_group, group);
+  EXPECT_EQ(left_audio->linked_group, group);
+  EXPECT_EQ(right_video->linked_group, right_audio->linked_group);
+  EXPECT_NE(left_video->linked_group, right_video->linked_group);
+
+  const auto removed = editor.apply(
+      EditCommand{RemoveClipCommand{fixture.sequence_id, video.id, false, true}, {}},
+      applied.value());
+  ASSERT_TRUE(removed) << (removed ? "" : removed.error().message);
+  const auto after_remove = snapshot(editor, fixture.sequence_id, removed.value());
+  EXPECT_NE(after_remove.findClip(video_right), nullptr);
+  EXPECT_NE(after_remove.findClip(audio_right), nullptr);
+  EXPECT_EQ(after_remove.findClip(video.id), nullptr);
+  EXPECT_EQ(after_remove.findClip(audio.id), nullptr);
 }
 
 TEST(TimelineEditorTest, OverwritePreservesUncoveredClipSegments) {

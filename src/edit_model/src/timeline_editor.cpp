@@ -1069,6 +1069,12 @@ struct PlannedClip final {
       return issue;
     plans.push_back(SplitPlan{location->track, id, std::move(left), std::move(right)});
   }
+  if (!plans.empty() && plans.front().left.linked_group.has_value()) {
+    const auto right_group = EntityId::generate();
+    for (auto& plan : plans) {
+      plan.right.linked_group = right_group;
+    }
+  }
   for (auto& plan : plans) {
     const auto found = std::find_if(plan.track->clips.begin(), plan.track->clips.end(),
                                     [&](const Clip& clip) { return clip.id == plan.original_id; });
