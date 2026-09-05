@@ -5,10 +5,12 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <filesystem>
 #include <locale>
 #include <mutex>
 #include <numbers>
 #include <sstream>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -106,6 +108,21 @@ GpuBuildCapabilities gpu_build_capabilities() {
 
 namespace {
 
+namespace {
+
+constexpr int kCurveLutSamples = 256;
+
+struct LutTextureCacheEntry final {
+  int lattice_size{0};
+  pl_tex texture{nullptr};
+};
+
+struct CurvesTextureCacheEntry final {
+  pl_tex texture{nullptr};
+};
+
+} // namespace
+
 struct LibplaceboState final {
   mutable std::mutex mutex;
   GpuCapabilities capabilities;
@@ -113,6 +130,10 @@ struct LibplaceboState final {
   pl_gpu gpu{nullptr};
   pl_renderer renderer{nullptr};
   pl_swapchain swapchain{nullptr};
+  pl_swapchain secondary_swapchain{nullptr};
+  bool last_secondary_present_succeeded{false};
+  std::unordered_map<std::string, LutTextureCacheEntry> lut_texture_cache;
+  std::unordered_map<std::string, CurvesTextureCacheEntry> curves_texture_cache;
 #if defined(_WIN32) && defined(PL_HAVE_D3D11)
   pl_d3d11 d3d11{nullptr};
 #elif defined(__linux__) && defined(PL_HAVE_VULKAN)
@@ -121,6 +142,19 @@ struct LibplaceboState final {
 
   ~LibplaceboState() {
     std::scoped_lock lock(mutex);
+    for (auto& [key, entry] : lut_texture_cache) {
+      if (entry.texture != nullptr) {
+        pl_tex_destroy(gpu, &entry.texture);
+      }
+    }
+    for (auto& [key, entry] : curves_texture_cache) {
+      if (entry.texture != nullptr) {
+        pl_tex_destroy(gpu, &entry.texture);
+      }
+    }
+    if (secondary_swapchain != nullptr) {
+      pl_swapchain_destroy(&secondary_swapchain);
+    }
     if (swapchain != nullptr) {
       pl_swapchain_destroy(&swapchain);
     }
@@ -259,6 +293,259 @@ struct OpacityHookState final {
   result.components = parameters->components;
   result.rect = parameters->rect;
   return result;
+}
+
+[[nodiscard]] pl_fmt lut3d_format(pl_gpu gpu) {
+  const auto required = static_cast<pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR);
+  return pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, required);
+}
+
+[[nodiscard]] pl_fmt curves_format(pl_gpu gpu) {
+  const auto required = static_cast<pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR);
+  return pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, required);
+}
+
+[[nodiscard]] pl_tex get_or_create_lut_texture(LibplaceboState& state, const Lut3D& lut,
+                                               const std::string& cache_key) {
+  auto& entry = state.lut_texture_cache[cache_key];
+  if (entry.texture != nullptr && entry.lattice_size == lut.size) {
+    return entry.texture;
+  }
+  if (entry.texture != nullptr) {
+    pl_tex_destroy(state.gpu, &entry.texture);
+    entry.texture = nullptr;
+  }
+  const pl_fmt format = lut3d_format(state.gpu);
+  if (format == nullptr || lut.size < 2 || lut.lattice.empty()) {
+    return nullptr;
+  }
+  const int width = lut.size * lut.size;
+  const int height = lut.size;
+  std::vector<float> packed(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4U);
+  for (int blue = 0; blue < lut.size; ++blue) {
+    for (int green = 0; green < lut.size; ++green) {
+      for (int red = 0; red < lut.size; ++red) {
+        const std::size_t lattice_index =
+            static_cast<std::size_t>(red) +
+            (static_cast<std::size_t>(green) * static_cast<std::size_t>(lut.size)) +
+            (static_cast<std::size_t>(blue) * static_cast<std::size_t>(lut.size) *
+             static_cast<std::size_t>(lut.size));
+        const std::size_t atlas_x = static_cast<std::size_t>(red) +
+                                    (static_cast<std::size_t>(green) *
+                                     static_cast<std::size_t>(lut.size));
+        const std::size_t pixel_index =
+            (static_cast<std::size_t>(blue) * static_cast<std::size_t>(width) + atlas_x) * 4U;
+        packed[pixel_index + 0U] = lut.lattice[lattice_index][0];
+        packed[pixel_index + 1U] = lut.lattice[lattice_index][1];
+        packed[pixel_index + 2U] = lut.lattice[lattice_index][2];
+        packed[pixel_index + 3U] = 1.0F;
+      }
+    }
+  }
+  pl_tex_params params{};
+  params.w = width;
+  params.h = height;
+  params.format = format;
+  params.sampleable = true;
+  params.host_writable = true;
+  params.initial_data = packed.data();
+  entry.texture = pl_tex_create(state.gpu, &params);
+  entry.lattice_size = lut.size;
+  return entry.texture;
+}
+
+[[nodiscard]] pl_tex get_or_create_curves_texture(LibplaceboState& state, const ColorCurves& curves,
+                                                  const std::string& cache_key) {
+  auto& entry = state.curves_texture_cache[cache_key];
+  if (entry.texture != nullptr) {
+    return entry.texture;
+  }
+  const pl_fmt format = curves_format(state.gpu);
+  if (format == nullptr) {
+    return nullptr;
+  }
+  std::vector<float> packed(static_cast<std::size_t>(kCurveLutSamples) * 4U * 4U, 0.0F);
+  const auto bake_channel = [&](const std::vector<CurvePoint>& points, const int row) {
+    for (int sample = 0; sample < kCurveLutSamples; ++sample) {
+      const float input =
+          kCurveLutSamples > 1
+              ? static_cast<float>(sample) / static_cast<float>(kCurveLutSamples - 1)
+              : 0.0F;
+      const float mapped =
+          static_cast<float>(evaluate_curve(points, static_cast<double>(input)));
+      packed[(static_cast<std::size_t>(row) * static_cast<std::size_t>(kCurveLutSamples) * 4U) +
+             (static_cast<std::size_t>(sample) * 4U)] = mapped;
+    }
+  };
+  bake_channel(curves.red, 0);
+  bake_channel(curves.green, 1);
+  bake_channel(curves.blue, 2);
+  bake_channel(curves.luma, 3);
+  pl_tex_params params{};
+  params.w = kCurveLutSamples;
+  params.h = 4;
+  params.format = format;
+  params.sampleable = true;
+  params.host_writable = true;
+  params.initial_data = packed.data();
+  entry.texture = pl_tex_create(state.gpu, &params);
+  return entry.texture;
+}
+
+struct ColorGradePassState final {
+  std::string header;
+  std::string body;
+  std::vector<std::string> descriptor_names;
+  std::vector<pl_shader_desc> descriptors;
+};
+
+[[nodiscard]] pl_hook_res color_grade_hook(void* private_data, const pl_hook_params* parameters) {
+  const auto* pass_state = static_cast<const ColorGradePassState*>(private_data);
+  pl_custom_shader shader{};
+  shader.description = "Video Editor color grade";
+  shader.header = pass_state->header.c_str();
+  shader.body = pass_state->body.c_str();
+  shader.input = PL_SHADER_SIG_COLOR;
+  shader.output = PL_SHADER_SIG_COLOR;
+  shader.descriptors = pass_state->descriptors.data();
+  shader.num_descriptors = static_cast<int>(pass_state->descriptors.size());
+  if (!pl_shader_custom(parameters->sh, &shader)) {
+    pl_hook_res failed{};
+    failed.failed = true;
+    return failed;
+  }
+  pl_hook_res result{};
+  result.output = PL_HOOK_SIG_COLOR;
+  result.sh = parameters->sh;
+  result.repr = parameters->repr;
+  result.color = parameters->color;
+  result.components = parameters->components;
+  result.rect = parameters->rect;
+  return result;
+}
+
+[[nodiscard]] bool build_color_grade_pass(LibplaceboState& state, const GpuColorGrade& grade,
+                                          ColorGradePassState& pass_state) {
+  pass_state.header =
+      "vec3 ve_unpremultiply(vec4 c) {\n"
+      "  float a = max(c.a, 1.0e-6);\n"
+      "  return clamp(c.rgb / a, 0.0, 1.0);\n"
+      "}\n"
+      "float ve_curve_sample(sampler2D curves, int row, float x) {\n"
+      "  const float n = 256.0;\n"
+      "  float u = (x * (n - 1.0) + 0.5) / n;\n"
+      "  float v = (float(row) + 0.5) / 4.0;\n"
+      "  return texture(curves, vec2(u, v)).r;\n"
+      "}\n"
+      "vec3 ve_map_domain(vec3 c, vec3 dmin, vec3 dmax) {\n"
+      "  return clamp((c - dmin) / (dmax - dmin), 0.0, 1.0);\n"
+      "}\n"
+      "vec3 ve_lut_fetch(sampler2D atlas, float lut_size, vec3 index) {\n"
+      "  vec2 atlas_size = vec2(lut_size * lut_size, lut_size);\n"
+      "  float x = index.r + index.g * lut_size;\n"
+      "  float y = index.b;\n"
+      "  vec2 uv = (vec2(x, y) + 0.5) / atlas_size;\n"
+      "  return texture(atlas, uv).rgb;\n"
+      "}\n"
+      "vec3 ve_sample_lut3d(sampler2D atlas, float lut_size, vec3 mapped) {\n"
+      "  float scale = lut_size - 1.0;\n"
+      "  vec3 scaled = mapped * scale;\n"
+      "  vec3 base = floor(scaled);\n"
+      "  vec3 frac = scaled - base;\n"
+      "  base = clamp(base, vec3(0.0), vec3(lut_size - 2.0));\n"
+      "  vec3 c000 = ve_lut_fetch(atlas, lut_size, base + vec3(0.0, 0.0, 0.0));\n"
+      "  vec3 c100 = ve_lut_fetch(atlas, lut_size, base + vec3(1.0, 0.0, 0.0));\n"
+      "  vec3 c010 = ve_lut_fetch(atlas, lut_size, base + vec3(0.0, 1.0, 0.0));\n"
+      "  vec3 c110 = ve_lut_fetch(atlas, lut_size, base + vec3(1.0, 1.0, 0.0));\n"
+      "  vec3 c001 = ve_lut_fetch(atlas, lut_size, base + vec3(0.0, 0.0, 1.0));\n"
+      "  vec3 c101 = ve_lut_fetch(atlas, lut_size, base + vec3(1.0, 0.0, 1.0));\n"
+      "  vec3 c011 = ve_lut_fetch(atlas, lut_size, base + vec3(0.0, 1.0, 1.0));\n"
+      "  vec3 c111 = ve_lut_fetch(atlas, lut_size, base + vec3(1.0, 1.0, 1.0));\n"
+      "  if (frac.r >= frac.g) {\n"
+      "    if (frac.g >= frac.b) {\n"
+      "      return mix(mix(mix(c000, c100, frac.r), c110, frac.g), c111, frac.b);\n"
+      "    } else if (frac.r >= frac.b) {\n"
+      "      return mix(mix(mix(c000, c100, frac.r), c101, frac.b), c111, frac.g);\n"
+      "    }\n"
+      "    return mix(mix(mix(c000, c001, frac.b), c101, frac.r), c111, frac.g);\n"
+      "  }\n"
+      "  if (frac.g >= frac.b) {\n"
+      "    return mix(mix(mix(c000, c010, frac.g), c110, frac.r), c111, frac.b);\n"
+      "  } else if (frac.r >= frac.b) {\n"
+      "    return mix(mix(mix(c000, c010, frac.g), c011, frac.b), c111, frac.r);\n"
+      "  }\n"
+      "  return mix(mix(mix(c000, c001, frac.b), c011, frac.g), c111, frac.r);\n"
+      "}\n"
+      "vec3 ve_apply_curves(sampler2D curves, vec3 rgb) {\n"
+      "  vec3 curved = vec3(\n"
+      "    ve_curve_sample(curves, 0, rgb.r),\n"
+      "    ve_curve_sample(curves, 1, rgb.g),\n"
+      "    ve_curve_sample(curves, 2, rgb.b));\n"
+      "  float luma = dot(curved, vec3(0.2126, 0.7152, 0.0722));\n"
+      "  float adjusted = ve_curve_sample(curves, 3, luma);\n"
+      "  if (luma > 0.0) {\n"
+      "    curved *= (adjusted / luma);\n"
+      "  } else {\n"
+      "    curved = vec3(adjusted);\n"
+      "  }\n"
+      "  return clamp(curved, 0.0, 1.0);\n"
+      "}\n";
+
+  std::ostringstream body;
+  body.imbue(std::locale::classic());
+  body.precision(17);
+  body << "vec3 rgb = ve_unpremultiply(color);\n";
+
+  int lut_index = 0;
+  int curves_index = 0;
+  for (const GpuColorGradeOp& op : grade.ops) {
+    if (op.kind == GpuColorGradeOp::Kind::Lut) {
+      if (op.lut == nullptr) {
+        return false;
+      }
+      const pl_tex texture = get_or_create_lut_texture(state, *op.lut, op.lut_cache_key);
+      if (texture == nullptr) {
+        return false;
+      }
+      const std::string name = "lut" + std::to_string(lut_index);
+      pass_state.descriptor_names.push_back(name);
+      pl_shader_desc descriptor{};
+      descriptor.desc.name = pass_state.descriptor_names.back().c_str();
+      descriptor.desc.type = PL_DESC_SAMPLED_TEX;
+      descriptor.binding.object = texture;
+      descriptor.binding.sample_mode = PL_TEX_SAMPLE_NEAREST;
+      descriptor.binding.address_mode = PL_TEX_ADDRESS_CLAMP;
+      pass_state.descriptors.push_back(descriptor);
+
+      body << "{\n"
+           << "  vec3 mapped = ve_map_domain(rgb, vec3(" << op.lut->domain_min[0] << ", "
+           << op.lut->domain_min[1] << ", " << op.lut->domain_min[2] << "), vec3("
+           << op.lut->domain_max[0] << ", " << op.lut->domain_max[1] << ", "
+           << op.lut->domain_max[2] << "));\n"
+           << "  rgb = ve_sample_lut3d(" << name << ", float(" << op.lut->size << "), mapped);\n"
+           << "}\n";
+      ++lut_index;
+    } else {
+      const pl_tex texture = get_or_create_curves_texture(state, op.curves, op.curves_cache_key);
+      if (texture == nullptr) {
+        return false;
+      }
+      const std::string name = "curves" + std::to_string(curves_index);
+      pass_state.descriptor_names.push_back(name);
+      pl_shader_desc descriptor{};
+      descriptor.desc.name = pass_state.descriptor_names.back().c_str();
+      descriptor.desc.type = PL_DESC_SAMPLED_TEX;
+      descriptor.binding.object = texture;
+      descriptor.binding.sample_mode = PL_TEX_SAMPLE_LINEAR;
+      descriptor.binding.address_mode = PL_TEX_ADDRESS_CLAMP;
+      pass_state.descriptors.push_back(descriptor);
+      body << "rgb = ve_apply_curves(" << name << ", rgb);\n";
+      ++curves_index;
+    }
+  }
+  body << "color.rgb = rgb * color.a;\n";
+  pass_state.body = body.str();
+  return true;
 }
 
 [[nodiscard]] pl_rect2df mapped_crop(const GpuLayer& layer, const int output_width,
@@ -589,6 +876,91 @@ RenderResult<GpuImage> GpuRenderer::upload(const VideoFrame& frame) {
   storage->duration = frame.duration;
   storage->color = frame.color;
   storage->alpha_mode = frame.alpha_mode;
+  return RenderResult<GpuImage>::success(GpuImage(std::move(storage)));
+}
+
+RenderResult<GpuImage> GpuRenderer::apply_color_grade(const GpuImage& source,
+                                                      const GpuColorGrade& grade) {
+  if (grade.empty()) {
+    return RenderResult<GpuImage>::success(source);
+  }
+  const auto state = implementation_ ? implementation_->state : nullptr;
+  if (!state) {
+    return RenderResult<GpuImage>::failure(
+        {.code = RenderErrorCode::GpuUnavailable, .message = "GPU renderer has no state"});
+  }
+  if (!source.storage_ || source.storage_->texture == nullptr) {
+    return RenderResult<GpuImage>::failure(
+        {.code = RenderErrorCode::GpuInvalidFrame,
+         .message = "GPU color grade requires a valid source image"});
+  }
+  std::scoped_lock lock(state->mutex);
+  if (!state->capabilities.available()) {
+    return RenderResult<GpuImage>::failure(unavailable_error(state->capabilities));
+  }
+  if (source.storage_->device.get() != state.get()) {
+    return RenderResult<GpuImage>::failure(
+        {.code = RenderErrorCode::GpuInvalidFrame,
+         .message = "GPU color grade source must be owned by this renderer device"});
+  }
+
+  ColorGradePassState pass_state;
+  if (!build_color_grade_pass(*state, grade, pass_state)) {
+    return RenderResult<GpuImage>::failure(
+        {.code = RenderErrorCode::GpuRenderFailed,
+         .message = "GPU could not prepare LUT/curves textures for color grading"});
+  }
+
+  pl_tex output_texture =
+      create_render_target(state->gpu, source.width(), source.height(), true);
+  if (output_texture == nullptr) {
+    if (detect_device_loss(*state, "allocating a color grade target")) {
+      return RenderResult<GpuImage>::failure(unavailable_error(state->capabilities));
+    }
+    return RenderResult<GpuImage>::failure(
+        {.code = RenderErrorCode::GpuRenderFailed,
+         .message = "GPU could not allocate a color grade target"});
+  }
+
+  pl_frame source_frame =
+      make_frame(source.storage_->texture, source.width(), source.height());
+  pl_frame target_frame = make_frame(output_texture, source.width(), source.height());
+
+  pl_hook hook{};
+  hook.stages = PL_HOOK_PRE_OUTPUT;
+  hook.input = PL_HOOK_SIG_COLOR;
+  hook.priv = &pass_state;
+  hook.hook = &color_grade_hook;
+  hook.signature = 0x5645434f4c4f5244ULL;
+  const pl_hook* hooks[]{&hook};
+
+  pl_render_params params = pl_render_default_params;
+  params.upscaler = &pl_filter_bilinear;
+  params.downscaler = &pl_filter_bilinear;
+  params.background = PL_CLEAR_SKIP;
+  params.border = PL_CLEAR_SKIP;
+  params.hooks = hooks;
+  params.num_hooks = 1;
+
+  if (!pl_render_image(state->renderer, &source_frame, &target_frame, &params)) {
+    pl_tex_destroy(state->gpu, &output_texture);
+    if (detect_device_loss(*state, "applying GPU LUT/curves color grade")) {
+      return RenderResult<GpuImage>::failure(unavailable_error(state->capabilities));
+    }
+    return RenderResult<GpuImage>::failure(
+        {.code = RenderErrorCode::GpuRenderFailed,
+         .message = "libplacebo failed to apply GPU LUT/curves color grade"});
+  }
+
+  auto storage = std::make_shared<GpuImage::Storage>();
+  storage->device = state;
+  storage->texture = output_texture;
+  storage->width = source.width();
+  storage->height = source.height();
+  storage->timestamp = source.timestamp();
+  storage->duration = source.duration();
+  storage->color = source.color();
+  storage->alpha_mode = source.alpha_mode();
   return RenderResult<GpuImage>::success(GpuImage(std::move(storage)));
 }
 
@@ -1377,6 +1749,9 @@ GpuCapabilities GpuRenderer::capabilities() const {
 }
 
 RenderResult<GpuImage> GpuRenderer::upload(const VideoFrame&) {
+  return RenderResult<GpuImage>::failure(unavailable_error(capabilities()));
+}
+RenderResult<GpuImage> GpuRenderer::apply_color_grade(const GpuImage&, const GpuColorGrade&) {
   return RenderResult<GpuImage>::failure(unavailable_error(capabilities()));
 }
 RenderResult<GpuImage> GpuRenderer::composite(std::span<const GpuImage>, int, int, edit::Time,

@@ -1,14 +1,18 @@
 // SPDX-License-Identifier: MPL-2.0
 #pragma once
 
+#include "video_editor/render_engine/color_curves.h"
 #include "video_editor/render_engine/cpu_renderer.h"
 #include "video_editor/render_engine/frame.h"
+#include "video_editor/render_engine/gpu_color_grade.h"
+#include "video_editor/render_engine/lut3d.h"
 
 #include <cstdint>
 #include <memory>
 #include <optional>
 #include <span>
 #include <string>
+#include <vector>
 
 namespace video_editor::render {
 
@@ -118,6 +122,11 @@ public:
   // premultiplied RGBA float32. NativeGpu import is intentionally not yet
   // enabled because it requires API-specific synchronization ownership.
   [[nodiscard]] RenderResult<GpuImage> upload(const VideoFrame& frame);
+
+  // Applies 3D LUT and/or 1D RGB+luma curves on the GPU to match the CPU oracle.
+  // Returns the input image unchanged when grade is empty.
+  [[nodiscard]] RenderResult<GpuImage> apply_color_grade(const GpuImage& source,
+                                                         const GpuColorGrade& grade);
 
   // Composites same-device layers bottom-to-top with premultiplied source-over
   // and bilinear scaling into a lifetime-owned GPU texture.

@@ -24,10 +24,15 @@ public:
                                                      edit::Time time, const PreviewProfile& profile,
                                                      std::uint64_t request_epoch) const;
 
+  // Test hook: true when the most recent request_frame applied LUT/curves on the GPU
+  // and skipped CPU preprocess for at least one clip layer.
+  [[nodiscard]] bool last_skipped_cpu_lut_curves() const noexcept;
+
 private:
   std::shared_ptr<FrameProvider> provider_;
   std::shared_ptr<GpuRenderer> renderer_;
   std::atomic<std::uint64_t> epoch_{0};
+  mutable std::atomic<bool> last_skipped_cpu_lut_curves_{false};
 };
 
 } // namespace video_editor::render

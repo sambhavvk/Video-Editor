@@ -3,6 +3,7 @@
 
 #include "video_editor/edit_model/timeline_editor.h"
 #include "video_editor/render_engine/frame.h"
+#include "video_editor/render_engine/gpu_color_grade.h"
 
 #include <algorithm>
 #include <atomic>
@@ -101,7 +102,13 @@ struct ActiveTransitionInfo final {
                                                               const PreviewProfile& profile);
 
 void apply_clip_visual_effects(CpuFrame& frame, edit::Clip& clip, edit::Time local_time,
-                               const PreviewProfile& profile);
+                               const PreviewProfile& profile, bool skip_lut_curves = false);
+
+void apply_clip_lut_curves_effects(CpuFrame& frame, const std::vector<edit::Effect>& effects,
+                                   edit::Time local_time);
+
+[[nodiscard]] GpuColorGrade extract_gpu_color_grade(const std::vector<edit::Effect>& effects,
+                                                    edit::Time local_time);
 
 [[nodiscard]] std::optional<ActiveTransitionInfo>
 active_transition_for_track(const edit::Sequence& sequence, const edit::Track& track,

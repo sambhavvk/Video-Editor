@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "video_editor/render_engine/cpu_renderer.h"
-#include "video_editor/edit_model/effect_evaluator.h"
-#include "video_editor/render_engine/bitmap_glyphs.h"
+#include "video_editor/render_engine/gpu_color_grade.h"
+
 #include "video_editor/render_engine/color_curves.h"
 #include "video_editor/render_engine/lut3d.h"
+#include "video_editor/edit_model/effect_evaluator.h"
+#include "video_editor/edit_model/model.h"
 #include "video_editor/render_engine/text_shaper.h"
 
 #include <algorithm>
@@ -521,13 +523,14 @@ render_clip_source(const edit::Clip& clip, const edit::Sequence& sequence, const
 }
 
 [[nodiscard]] RenderResult<std::shared_ptr<CpuFrame>>
-render_track_clip_over_baseline(const edit::Clip& clip, const edit::Sequence& sequence,
-                                const edit::Time time, const PreviewProfile& profile,
+render_track_clip_over_baseline(const edit::Project& project, const edit::Clip& clip,
+                                const edit::Sequence& sequence, const edit::Time time,
+                                const int depth, const PreviewProfile& profile,
                                 const std::uint64_t request_epoch, FrameProvider& provider,
                                 const CpuRenderer& renderer, const CpuFrame& baseline) {
   auto rendered = clone_frame(baseline);
-  auto source =
-      render_clip_source(clip, sequence, time, profile, request_epoch, provider, renderer);
+  auto source = render_clip_source(project, clip, sequence, time, depth, profile, request_epoch,
+                                   provider, renderer);
   if (!source) {
     return RenderResult<std::shared_ptr<CpuFrame>>::failure(*source.error);
   }
@@ -557,7 +560,8 @@ bool clip_has_unsupported_gpu_effects(const std::vector<edit::Effect>& effects) 
       return false;
     }
     return effect.type != "video.color" && effect.type != "video.gaussian_blur" &&
-           effect.type != "video.crop";
+           effect.type != "video.crop" && effect.type != "video.lut" &&
+           effect.type != "video.curves";
   });
 }
 
@@ -593,7 +597,7 @@ std::shared_ptr<CpuFrame> rasterize_title_frame(const edit::Clip& clip,
 }
 
 void apply_clip_visual_effects(CpuFrame& frame, edit::Clip& clip, const edit::Time local_time,
-                               const PreviewProfile& profile) {
+                               const PreviewProfile& profile, const bool skip_lut_curves) {
   for (const auto& effect : clip.effects) {
     if (!effect.enabled || !effect.known) {
       continue;
@@ -605,9 +609,13 @@ void apply_clip_visual_effects(CpuFrame& frame, edit::Clip& clip, const edit::Ti
         apply_box_blur(frame, effect_number(effect, "radius", local_time).value_or(0.0));
       }
     } else if (effect.type == "video.lut") {
-      apply_lut(frame, effect, local_time);
+      if (!skip_lut_curves) {
+        apply_lut(frame, effect, local_time);
+      }
     } else if (effect.type == "video.curves") {
-      apply_curves(frame, effect, local_time);
+      if (!skip_lut_curves) {
+        apply_curves(frame, effect, local_time);
+      }
     } else if (effect.type == "video.crop") {
       const double left = effect_number(effect, "left", local_time).value_or(0.0);
       const double top = effect_number(effect, "top", local_time).value_or(0.0);
@@ -624,6 +632,63 @@ void apply_clip_visual_effects(CpuFrame& frame, edit::Clip& clip, const edit::Ti
       }
     }
   }
+}
+
+void apply_clip_lut_curves_effects(CpuFrame& frame, const std::vector<edit::Effect>& effects,
+                                   const edit::Time local_time) {
+  for (const auto& effect : effects) {
+    if (!effect.enabled || !effect.known) {
+      continue;
+    }
+    if (effect.type == "video.lut") {
+      apply_lut(frame, effect, local_time);
+    } else if (effect.type == "video.curves") {
+      apply_curves(frame, effect, local_time);
+    }
+  }
+}
+
+GpuColorGrade extract_gpu_color_grade(const std::vector<edit::Effect>& effects,
+                                      const edit::Time local_time) {
+  GpuColorGrade grade;
+  for (const auto& effect : effects) {
+    if (!effect.enabled || !effect.known) {
+      continue;
+    }
+    if (effect.type == "video.lut") {
+      const auto path = effect_string(effect, "path", local_time);
+      if (!path || path->empty()) {
+        continue;
+      }
+      const Lut3D* lut = cached_lut_for_path(std::filesystem::path{*path});
+      if (lut == nullptr) {
+        continue;
+      }
+      grade.ops.push_back(GpuColorGradeOp{.kind = GpuColorGradeOp::Kind::Lut,
+                                          .lut = lut,
+                                          .lut_cache_key = std::filesystem::path{*path}
+                                                               .lexically_normal()
+                                                               .string(),
+                                          .curves_cache_key = {}});
+    } else if (effect.type == "video.curves") {
+      const auto red = effect_string(effect, "red", local_time).value_or("0,0;1,1");
+      const auto green = effect_string(effect, "green", local_time).value_or("0,0;1,1");
+      const auto blue = effect_string(effect, "blue", local_time).value_or("0,0;1,1");
+      const auto luma = effect_string(effect, "luma", local_time).value_or("0,0;1,1");
+      const auto curves = parse_color_curves(red, green, blue, luma);
+      if (!curves) {
+        continue;
+      }
+      grade.ops.push_back(GpuColorGradeOp{
+          .kind = GpuColorGradeOp::Kind::Curves,
+          .lut = nullptr,
+          .lut_cache_key = {},
+          .curves = *curves,
+          .curves_cache_key = red + '\0' + green + '\0' + blue + '\0' + luma,
+      });
+    }
+  }
+  return grade;
 }
 
 std::optional<ActiveTransitionInfo> active_transition_for_track(const edit::Sequence& sequence,
@@ -704,58 +769,14 @@ RenderResult<VideoFrame> CpuRenderer::request_frame(const edit::TimelineSnapshot
         {.code = RenderErrorCode::InvalidTime, .message = "cannot render negative timeline time"});
   }
 
-  const int width = scaled_dimension(sequence->width, profile.scale);
-  const int height = scaled_dimension(sequence->height, profile.scale);
-  auto output = std::make_shared<CpuFrame>(width, height);
-  output->clear(0.0F, 0.0F, 0.0F, 1.0F);
-
-  for (const edit::Track& track : sequence->tracks) {
-    if (track.kind != edit::TrackKind::Video || track.muted || !track.visible) {
-      continue;
-    }
-    const auto transition = active_transition_for_track(*sequence, track, time);
-    if (transition.has_value()) {
-      auto outgoing =
-          render_track_clip_over_baseline(*transition->outgoing, *sequence, time, profile,
-                                          request_epoch, *provider_, *this, *output);
-      if (!outgoing) {
-        return RenderResult<VideoFrame>::failure(*outgoing.error);
-      }
-      auto incoming =
-          render_track_clip_over_baseline(*transition->incoming, *sequence, time, profile,
-                                          request_epoch, *provider_, *this, *output);
-      if (!incoming) {
-        return RenderResult<VideoFrame>::failure(*incoming.error);
-      }
-      const edit::Time cut_time = transition->incoming->timeline_range.start;
-      if (transition->transition->kind == edit::TransitionKind::CrossDissolve) {
-        const float factor = saturate(time_ratio(time - transition->transition->range.start,
-                                                 transition->transition->range.duration));
-        output = blend_frames(**outgoing.value, **incoming.value, factor);
-      } else if (time < cut_time) {
-        const float factor = saturate(time_ratio(time - transition->transition->range.start,
-                                                 cut_time - transition->transition->range.start));
-        output = blend_frames(**outgoing.value, *black_frame_like(**outgoing.value), factor);
-      } else {
-        const float factor =
-            saturate(time_ratio(time - cut_time, transition->transition->range.end() - cut_time));
-        output = blend_frames(*black_frame_like(**incoming.value), **incoming.value, factor);
-      }
-      continue;
-    }
-    for (const edit::Clip& clip : track.clips) {
-      if (!clip.timeline_range.contains(time)) {
-        continue;
-      }
-      auto source =
-          render_clip_source(clip, *sequence, time, profile, request_epoch, *provider_, *this);
-      if (!source) {
-        return RenderResult<VideoFrame>::failure(*source.error);
-      }
-      composite(*source.value->frame, *output, source.value->clip, sequence->width,
-                sequence->height);
-    }
+  auto rendered = render_sequence_frame(snapshot.project(), *sequence, time, 0, profile,
+                                        request_epoch, *provider_, *this);
+  if (!rendered) {
+    return RenderResult<VideoFrame>::failure(*rendered.error);
   }
+  const auto output = std::move(*rendered.value);
+  const int width = output->width();
+  const int height = output->height();
 
   const edit::Time frame_duration = sequence->frame_rate.frameTime();
   VideoFrame frame{

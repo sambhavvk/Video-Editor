@@ -2,6 +2,7 @@
 #include "video_editor/render_engine/gpu_timeline_renderer.h"
 
 #include "video_editor/render_engine/cpu_renderer.h"
+#include "video_editor/edit_model/model.h"
 
 #include <algorithm>
 #include <cmath>
@@ -30,8 +31,19 @@ namespace {
        .message = "GPU timeline request belongs to a stale epoch"});
 }
 
+[[nodiscard]] RenderResult<GpuLayer> stale_layer() {
+  return RenderResult<GpuLayer>::failure(
+      {.code = RenderErrorCode::StaleRequest,
+       .message = "GPU timeline request belongs to a stale epoch"});
+}
+
 [[nodiscard]] RenderResult<GpuImage> unsupported_timeline(std::string message) {
   return RenderResult<GpuImage>::failure(
+      {.code = RenderErrorCode::GpuUnsupportedTimeline, .message = std::move(message)});
+}
+
+[[nodiscard]] RenderResult<GpuLayer> unsupported_layer(std::string message) {
+  return RenderResult<GpuLayer>::failure(
       {.code = RenderErrorCode::GpuUnsupportedTimeline, .message = std::move(message)});
 }
 
@@ -63,11 +75,19 @@ namespace {
   };
 }
 
+[[nodiscard]] RenderResult<GpuImage> render_sequence_gpu_image(
+    const edit::Project& project, const edit::Sequence& sequence, const edit::Time time,
+    const int depth, const PreviewProfile& profile, const std::uint64_t request_epoch,
+    FrameProvider& provider, const std::function<std::uint64_t()>& current_epoch,
+    GpuRenderer& renderer, bool& skipped_cpu_lut_curves);
+
 [[nodiscard]] RenderResult<GpuLayer>
-build_gpu_layer(const edit::Clip& clip, const edit::Sequence& sequence, const edit::Time time,
+build_gpu_layer(const edit::Project& project, const edit::Clip& clip,
+                const edit::Sequence& sequence, const edit::Time time, const int depth,
                 const PreviewProfile& profile, const std::uint64_t request_epoch, const int width,
                 const int height, FrameProvider& provider,
-                const std::function<std::uint64_t()>& current_epoch, GpuRenderer& renderer) {
+                const std::function<std::uint64_t()>& current_epoch, GpuRenderer& renderer,
+                bool& skipped_cpu_lut_curves) {
   if (clip_has_unsupported_gpu_effects(clip.effects)) {
     return RenderResult<GpuLayer>::failure(
         {.code = RenderErrorCode::GpuUnsupportedTimeline,
@@ -109,16 +129,37 @@ build_gpu_layer(const edit::Clip& clip, const edit::Sequence& sequence, const ed
            .message = "GPU timeline request was superseded during decoding"});
     }
     pixels = std::make_shared<CpuFrame>(**decoded.value);
-    apply_clip_visual_effects(*pixels, mutable_clip, local_time, profile);
+    apply_clip_visual_effects(*pixels, mutable_clip, local_time, profile, use_gpu_color_grade);
   }
 
   const edit::Time frame_duration = sequence.frame_rate.frameTime();
-  auto uploaded = renderer.upload(make_video_frame(pixels, time, frame_duration));
-  if (!uploaded) {
-    return RenderResult<GpuLayer>::failure(*uploaded.error);
+  GpuImage graded_image;
+  if (use_gpu_color_grade) {
+    auto uploaded = renderer.upload(make_video_frame(pixels, time, frame_duration));
+    if (!uploaded) {
+      return RenderResult<GpuLayer>::failure(*uploaded.error);
+    }
+    auto graded = renderer.apply_color_grade(*uploaded.value, gpu_grade);
+    if (graded) {
+      graded_image = std::move(*graded.value);
+      skipped_cpu_lut_curves = true;
+    } else {
+      apply_clip_lut_curves_effects(*pixels, clip.effects, local_time);
+      auto fallback_upload = renderer.upload(make_video_frame(pixels, time, frame_duration));
+      if (!fallback_upload) {
+        return RenderResult<GpuLayer>::failure(*fallback_upload.error);
+      }
+      graded_image = std::move(*fallback_upload.value);
+    }
+  } else {
+    auto uploaded = renderer.upload(make_video_frame(pixels, time, frame_duration));
+    if (!uploaded) {
+      return RenderResult<GpuLayer>::failure(*uploaded.error);
+    }
+    graded_image = std::move(*uploaded.value);
   }
   return RenderResult<GpuLayer>::success(
-      GpuLayer{.image = std::move(*uploaded.value),
+      GpuLayer{.image = std::move(graded_image),
                .transform = mutable_clip.transform,
                .blend_mode = clip.blend_mode});
 }
@@ -145,15 +186,16 @@ composite_layers(GpuRenderer& renderer, const std::span<const GpuLayer> layers, 
 
 [[nodiscard]] RenderResult<GpuImage>
 render_transition_track(GpuRenderer& renderer, FrameProvider& provider,
-                        const edit::Sequence& sequence, const ActiveTransitionInfo& transition,
-                        const edit::Time time, const PreviewProfile& profile,
+                        const edit::Project& project, const edit::Sequence& sequence,
+                        const ActiveTransitionInfo& transition, const edit::Time time,
+                        const int depth, const PreviewProfile& profile,
                         const std::uint64_t request_epoch, const int width, const int height,
                         const std::function<std::uint64_t()>& current_epoch,
-                        const GpuImage* baseline) {
+                        const GpuImage* baseline, bool& skipped_cpu_lut_curves) {
   const edit::Time frame_duration = sequence.frame_rate.frameTime();
   auto outgoing_layer =
-      build_gpu_layer(*transition.outgoing, sequence, time, profile, request_epoch, width, height,
-                      provider, current_epoch, renderer);
+      build_gpu_layer(project, *transition.outgoing, sequence, time, depth, profile, request_epoch,
+                      width, height, provider, current_epoch, renderer, skipped_cpu_lut_curves);
   if (!outgoing_layer) {
     return RenderResult<GpuImage>::failure(*outgoing_layer.error);
   }
@@ -161,8 +203,8 @@ render_transition_track(GpuRenderer& renderer, FrameProvider& provider,
     return stale();
   }
   auto incoming_layer =
-      build_gpu_layer(*transition.incoming, sequence, time, profile, request_epoch, width, height,
-                      provider, current_epoch, renderer);
+      build_gpu_layer(project, *transition.incoming, sequence, time, depth, profile, request_epoch,
+                      width, height, provider, current_epoch, renderer, skipped_cpu_lut_curves);
   if (!incoming_layer) {
     return RenderResult<GpuImage>::failure(*incoming_layer.error);
   }
@@ -238,10 +280,15 @@ std::uint64_t GpuTimelineRenderer::current_epoch() const noexcept {
   return epoch_.load(std::memory_order_acquire);
 }
 
+bool GpuTimelineRenderer::last_skipped_cpu_lut_curves() const noexcept {
+  return last_skipped_cpu_lut_curves_.load(std::memory_order_acquire);
+}
+
 RenderResult<GpuImage> GpuTimelineRenderer::request_frame(const edit::TimelineSnapshot& snapshot,
                                                           const edit::Time time,
                                                           const PreviewProfile& profile,
                                                           const std::uint64_t request_epoch) const {
+  last_skipped_cpu_lut_curves_.store(false, std::memory_order_release);
   if (request_epoch != current_epoch()) {
     return stale();
   }
@@ -262,6 +309,8 @@ RenderResult<GpuImage> GpuTimelineRenderer::request_frame(const edit::TimelineSn
   const int height = scaled_dimension(sequence->height, profile.scale);
   const edit::Time frame_duration = sequence->frame_rate.frameTime();
   const auto current_epoch_fn = [this]() { return current_epoch(); };
+  bool skipped_cpu_lut_curves = false;
+  const edit::Project& project = snapshot.project();
 
   std::optional<GpuImage> accumulator;
   for (const edit::Track& track : sequence->tracks) {
@@ -271,10 +320,11 @@ RenderResult<GpuImage> GpuTimelineRenderer::request_frame(const edit::TimelineSn
 
     const auto transition = active_transition_for_track(*sequence, track, time);
     if (transition.has_value()) {
-      auto rendered = render_transition_track(*renderer_, *provider_, *sequence, *transition, time,
-                                            profile, request_epoch, width, height,
+      auto rendered = render_transition_track(*renderer_, *provider_, project, *sequence, *transition,
+                                            time, 0, profile, request_epoch, width, height,
                                             current_epoch_fn,
-                                            accumulator.has_value() ? &*accumulator : nullptr);
+                                            accumulator.has_value() ? &*accumulator : nullptr,
+                                            skipped_cpu_lut_curves);
       if (request_epoch != current_epoch()) {
         return stale();
       }
@@ -295,8 +345,8 @@ RenderResult<GpuImage> GpuTimelineRenderer::request_frame(const edit::TimelineSn
             "GPU timeline preview does not yet support enabled clip effects of this type");
       }
       auto layer =
-          build_gpu_layer(clip, *sequence, time, profile, request_epoch, width, height, *provider_,
-                          current_epoch_fn, *renderer_);
+          build_gpu_layer(project, clip, *sequence, time, 0, profile, request_epoch, width, height,
+                          *provider_, current_epoch_fn, *renderer_, skipped_cpu_lut_curves);
       if (request_epoch != current_epoch()) {
         return stale();
       }
@@ -325,6 +375,9 @@ RenderResult<GpuImage> GpuTimelineRenderer::request_frame(const edit::TimelineSn
   if (!accumulator.has_value()) {
     return composite_layers(*renderer_, {}, width, height, sequence->width, sequence->height, time,
                             frame_duration, nullptr);
+  }
+  if (skipped_cpu_lut_curves) {
+    last_skipped_cpu_lut_curves_.store(true, std::memory_order_release);
   }
   return RenderResult<GpuImage>::success(std::move(*accumulator));
 }
