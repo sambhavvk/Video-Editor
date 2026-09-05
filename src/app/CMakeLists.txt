@@ -36,6 +36,7 @@ target_link_libraries(
     video_editor::proxy_service
     video_editor::media_cache
     VideoEditor::ExportService
+    VideoEditor::Interchange
     video_editor::transcription_service
     Qt6::Network
     Qt6::Concurrent)

@@ -630,6 +630,10 @@ void EditorWindow::createActions() {
   auto* import = create(QStringLiteral("importMedia"), tr("Import Media…"),
                         tr("Import video, audio, or images"), QKeySequence{tr("Ctrl+I")});
   import->setIcon(style()->standardIcon(QStyle::SP_DialogOpenButton));
+  create(QStringLiteral("importOtio"), tr("Import OpenTimelineIO…"),
+         tr("Import an OpenTimelineIO JSON timeline into this project"));
+  create(QStringLiteral("exportOtio"), tr("Export OpenTimelineIO…"),
+         tr("Export the current sequence as OpenTimelineIO JSON"));
   create(QStringLiteral("manageMediaCache"), tr("Manage Media Cache…"),
          tr("Review cache use and set the media cache budget"));
   auto* exportAction = create(QStringLiteral("export"), tr("Export Video…"),
@@ -841,6 +845,9 @@ void EditorWindow::createMenus() {
   file->addAction(action(QStringLiteral("saveProjectAs")));
   file->addSeparator();
   file->addAction(action(QStringLiteral("importMedia")));
+  file->addAction(action(QStringLiteral("importOtio")));
+  file->addAction(action(QStringLiteral("exportOtio")));
+  file->addSeparator();
   file->addAction(action(QStringLiteral("manageMediaCache")));
   file->addAction(action(QStringLiteral("export")));
   file->addSeparator();

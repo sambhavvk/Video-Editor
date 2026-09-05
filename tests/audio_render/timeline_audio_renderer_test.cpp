@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "video_editor/audio_render/original_audio_registry.h"
 #include "video_editor/audio_render/timeline_audio_renderer.h"
+#include "video_editor/audio_render/track_dsp_chain.h"
 
 #include <gtest/gtest.h>
 

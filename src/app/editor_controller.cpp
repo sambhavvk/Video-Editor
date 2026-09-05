@@ -20,8 +20,10 @@
 #include "video_editor/desktop_ui/editor_window.hpp"
 #include "video_editor/desktop_ui/panel_widgets.hpp"
 #include "video_editor/desktop_ui/program_viewer.hpp"
+#include "video_editor/desktop_ui/scope_widget.hpp"
 #include "video_editor/desktop_ui/timeline_widget.hpp"
 #include "video_editor/export_service/export_service.h"
+#include "video_editor/interchange/otio.h"
 #include "video_editor/job_service/job_id.h"
 #include "video_editor/job_service/protocol.h"
 #include "video_editor/media_cache/cache_store.h"
@@ -984,6 +986,10 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::saveProjectAs);
   connect(&window_, &desktop_ui::EditorWindow::importMediaRequested, this,
           &EditorController::chooseMedia);
+  connect(&window_, &desktop_ui::EditorWindow::importOtioRequested, this,
+          &EditorController::chooseOtioImport);
+  connect(&window_, &desktop_ui::EditorWindow::exportOtioRequested, this,
+          &EditorController::chooseOtioExport);
   connect(&window_, &desktop_ui::EditorWindow::mediaActivated, this,
           &EditorController::loadSourceAsset);
   connect(&window_, &desktop_ui::EditorWindow::mediaInsertRequested, this,
@@ -1974,6 +1980,96 @@ void EditorController::chooseCaptionExport() {
   if (!path.isEmpty()) {
     (void)exportCaptionFile(pathFromQString(path));
   }
+}
+
+void EditorController::chooseOtioImport() {
+  const QString path = QFileDialog::getOpenFileName(
+      &window_, tr("Import OpenTimelineIO"), {},
+      tr("OpenTimelineIO JSON (*.otio *.json);;All files (*)"));
+  if (!path.isEmpty()) {
+    (void)importOtioFile(pathFromQString(path));
+  }
+}
+
+void EditorController::chooseOtioExport() {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    window_.showTransientMessage(tr("There is no active sequence to export"));
+    return;
+  }
+  const QString path = QFileDialog::getSaveFileName(
+      &window_, tr("Export OpenTimelineIO"), QStringLiteral("timeline.otio"),
+      tr("OpenTimelineIO JSON (*.otio *.json);;All files (*)"));
+  if (!path.isEmpty()) {
+    (void)exportOtioFile(pathFromQString(path));
+  }
+}
+
+bool EditorController::importOtioFile(const std::filesystem::path& source) {
+  QFile file(qStringFromPath(source));
+  if (!file.open(QIODevice::ReadOnly)) {
+    showError(tr("Could not import OpenTimelineIO"), file.errorString());
+    return false;
+  }
+  const QByteArray contents = file.readAll();
+  interchange::OtioReport report;
+  const auto imported = interchange::import_otio_json(
+      std::string_view(contents.constData(), static_cast<std::size_t>(contents.size())), &report);
+  if (!imported) {
+    showError(tr("Could not import OpenTimelineIO"), QString::fromStdString(imported.error()));
+    return false;
+  }
+
+  const std::string gesture = "import-otio:" + edit::EntityId::generate().toString();
+  std::vector<edit::EditCommand> commands;
+  commands.reserve(imported.value().assets.size() + imported.value().sequences.size());
+  for (const edit::Asset& asset : imported.value().assets) {
+    commands.push_back({.operation = edit::AddAssetCommand{.asset = asset}, .coalescing_key = gesture});
+  }
+  for (const edit::Sequence& sequence : imported.value().sequences) {
+    commands.push_back(
+        {.operation = edit::AddSequenceCommand{.sequence = sequence}, .coalescing_key = gesture});
+  }
+  if (!applyBatch(std::move(commands), tr("Could not import OpenTimelineIO"))) {
+    return false;
+  }
+
+  QString message = tr("Imported %1 sequence(s) and %2 asset(s) from OpenTimelineIO")
+                        .arg(imported.value().sequences.size())
+                        .arg(imported.value().assets.size());
+  if (!report.skipped.empty()) {
+    message += tr(" (%1 item(s) skipped)").arg(report.skipped.size());
+  }
+  window_.showTransientMessage(message);
+  return true;
+}
+
+bool EditorController::exportOtioFile(const std::filesystem::path& destination) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    showError(tr("Could not export OpenTimelineIO"), tr("The project has no active sequence."));
+    return false;
+  }
+  const auto project = editor_->projectAt(editor_->revision());
+  interchange::OtioReport report;
+  const auto exported = interchange::export_otio_json(*project, sequence->id, &report);
+  if (!exported) {
+    showError(tr("Could not export OpenTimelineIO"), QString::fromStdString(exported.error()));
+    return false;
+  }
+
+  QFile file(qStringFromPath(destination));
+  if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+    showError(tr("Could not export OpenTimelineIO"), file.errorString());
+    return false;
+  }
+  const QByteArray payload = QByteArray::fromStdString(exported.value());
+  if (file.write(payload) != payload.size()) {
+    showError(tr("Could not export OpenTimelineIO"), file.errorString());
+    return false;
+  }
+  window_.showTransientMessage(tr("OpenTimelineIO exported"));
+  return true;
 }
 
 bool EditorController::importCaptionFile(const std::filesystem::path& source) {

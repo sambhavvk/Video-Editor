@@ -4,6 +4,10 @@ if(TARGET video_editor_edit_model AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/edit_m
   add_subdirectory(edit_model)
 endif()
 
+if(TARGET video_editor_interchange AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/interchange/CMakeLists.txt")
+  add_subdirectory(interchange)
+endif()
+
 if(TARGET video_editor_caption_service AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/caption_service/CMakeLists.txt")
   add_subdirectory(caption_service)
 endif()

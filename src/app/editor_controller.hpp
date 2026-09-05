@@ -218,6 +218,8 @@ private slots:
   void chooseCaptionFile();
   void chooseEmbeddedCaptionExtraction();
   void chooseCaptionExport();
+  void chooseOtioImport();
+  void chooseOtioExport();
   void insertAsset(const QString& assetId);
   void loadSourceAsset(const QString& assetId);
   void insertLoadedSource(edit::InsertMode mode);

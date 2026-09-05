@@ -479,7 +479,7 @@ TEST(ProjectCodecTest, DeclaredVersionTwoCaptionDefaultsUpgradeToCanonicalV3) {
   EXPECT_EQ(style.alignment, edit::CaptionAlignment::Center);
   EXPECT_DOUBLE_EQ(style.vertical_position, 0.9);
   EXPECT_DOUBLE_EQ(style.safe_margin, 0.05);
-  EXPECT_EQ(serialize_project(decoded.value())[1], std::byte{0x03});
+  EXPECT_EQ(serialize_project(decoded.value())[1], std::byte{0x04});
 }
 
 TEST(ProjectCodecTest, SerializationIsDeterministic) {
@@ -493,7 +493,7 @@ TEST(ProjectCodecTest, SerializationIsDeterministic) {
   EXPECT_EQ(serialize_project(decoded.value()), first);
   ASSERT_GE(first.size(), 4U);
   EXPECT_EQ(first[0], std::byte{0x08});
-  EXPECT_EQ(first[1], std::byte{0x03});
+  EXPECT_EQ(first[1], std::byte{0x04});
   EXPECT_EQ(first[2], std::byte{0x10});
   EXPECT_EQ(first[3], std::byte{0x01});
 }
@@ -603,7 +603,7 @@ TEST(ProjectCodecTest, UpgradesGenuineVersionOneTitleClipAndLeavesMediaClipsTitl
   const auto reserialized = serialize_project(decoded.value());
   ASSERT_GE(reserialized.size(), 4U);
   EXPECT_EQ(reserialized[0], std::byte{0x08});
-  EXPECT_EQ(reserialized[1], std::byte{0x03});
+  EXPECT_EQ(reserialized[1], std::byte{0x04});
   EXPECT_EQ(reserialized[2], std::byte{0x10});
   EXPECT_EQ(reserialized[3], std::byte{0x01});
 }

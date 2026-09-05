@@ -71,11 +71,11 @@ Linux first-beta packaging is Flatpak. Store identity, immutable checksummed sou
 
 | Capability | Status |
 | --- | --- |
-| Nested/compound timelines and multicam | Deferred |
-| Stabilization, tracking, and video scopes | Deferred |
+| Nested/compound timelines and multicam | Partial | Schema v4 stores `NestedSequence` clips and `nested_sequence_id`; validation rejects cycles and depth > 8. CPU/GPU preview, nested audio, sequence tabs, and **Nest selected clips** are implemented. Multicam and OTIO flatten remain deferred. |
+| Stabilization and tracking | Deferred |
 | Arbitrary audio buses, surround delivery, HDR mastering | Deferred |
-| Motion compositing and render queues | Deferred |
-| OTIO/XML/EDL interchange and public plugins | Deferred |
+| Motion compositing and render queues | Partial | Sequential FIFO export queue is implemented in Deliver: one encode at a time, durable per-job snapshots, cancel/remove queued jobs, and checkpoint sidecar persistence across restart. Parallel encodes and motion compositing remain deferred. |
+| OTIO/XML/EDL interchange and public plugins | Partial | First-party OTIO JSON import/export in `video_editor_interchange` (tracks, clips, gaps, markers, nested stacks, media URIs). File menu: Import/Export OpenTimelineIO. Effects export as `metadata.video_editor`; unknown vendor plugins skip with report. XML/EDL and public plugins remain deferred. |
 | Collaboration, accounts, cloud sync, and hosted features | Deferred |
 | macOS, ARM64, and generative media | Deferred |
 | Signed Windows MSI and Windows GPU/codec matrix | Deferred until after the Linux-first public beta |

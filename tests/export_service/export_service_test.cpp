@@ -3,6 +3,8 @@
 #include "video_editor/audio_render/original_audio_registry.h"
 #include "video_editor/export_service/export_service.h"
 #include "video_editor/media_codec/encoder_capabilities.h"
+#include "video_editor/media_codec/probe.h"
+#include "video_editor/media_codec/subtitle_extract.h"
 #include "video_editor/render_engine/frame.h"
 
 extern "C" {

@@ -44,6 +44,7 @@ if(VIDEO_EDITOR_BUILD_TESTS)
 endif()
 
 add_subdirectory(src/edit_model)
+add_subdirectory(src/interchange)
 add_subdirectory(src/project_codec)
 add_subdirectory(src/project_store)
 

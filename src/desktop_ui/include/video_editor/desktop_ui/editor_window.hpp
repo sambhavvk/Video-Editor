@@ -134,6 +134,8 @@ signals:
   void saveProjectRequested();
   void saveProjectAsRequested();
   void importMediaRequested();
+  void exportOtioRequested();
+  void importOtioRequested();
   void manageMediaCacheRequested();
   void exportConfirmed(const QString& destination, const QString& presetId);
   void undoRequested();
