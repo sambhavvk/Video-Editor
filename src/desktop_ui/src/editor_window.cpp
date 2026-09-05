@@ -234,8 +234,42 @@ void EditorWindow::setTimelineView(qint64 duration, qint64 timeScale,
                          std::move(markers), std::move(gaps));
 }
 
+void EditorWindow::setSequenceTabs(const QVector<SequenceTabView>& tabs) {
+  if (sequence_tab_bar_ == nullptr) {
+    return;
+  }
+  QSignalBlocker blocker(sequence_tab_bar_);
+  while (sequence_tab_bar_->count() > 0) {
+    sequence_tab_bar_->removeTab(0);
+  }
+  int active_index = 0;
+  for (int index = 0; index < tabs.size(); ++index) {
+    const auto& tab = tabs.at(index);
+    sequence_tab_bar_->addTab(tab.displayName);
+    sequence_tab_bar_->setTabToolTip(index, tab.displayName);
+    sequence_tab_bar_->setTabData(index, tab.id);
+    const QString accessible = tab.displayName.isEmpty() ? tr("Sequence tab") : tab.displayName;
+    sequence_tab_bar_->setTabText(index, tab.displayName);
+    if (auto* tab_button = sequence_tab_bar_->tabButton(index, QTabBar::LeftSide)) {
+      tab_button->setAccessibleName(accessible);
+    }
+    if (tabs.at(index).active) {
+      active_index = index;
+    }
+  }
+  if (sequence_tab_bar_->count() > 0) {
+    sequence_tab_bar_->setCurrentIndex(active_index);
+  }
+}
+
 void EditorWindow::showTransientMessage(const QString& message, int timeoutMs) {
   statusBar()->showMessage(message, timeoutMs);
+}
+
+void EditorWindow::setAudioSyncStatus(const QString& text) {
+  if (av_sync_label_ != nullptr) {
+    av_sync_label_->setText(text);
+  }
 }
 
 void EditorWindow::showExportDialog(const QString& presetId) {
@@ -441,6 +475,14 @@ void EditorWindow::createCentralArea() {
   timelineLayout->setContentsMargins(0, 0, 0, 0);
   timelineLayout->setSpacing(0);
 
+  sequence_tab_bar_ = new QTabBar(timelineArea);
+  sequence_tab_bar_->setObjectName(QStringLiteral("sequenceTabBar"));
+  sequence_tab_bar_->setAccessibleName(tr("Sequence tabs"));
+  sequence_tab_bar_->setAccessibleDescription(tr("Switch between project sequences"));
+  sequence_tab_bar_->setExpanding(false);
+  sequence_tab_bar_->setDrawBase(true);
+  timelineLayout->addWidget(sequence_tab_bar_);
+
   precision_trim_ = new QFrame(timelineArea);
   precision_trim_->setObjectName(QStringLiteral("precisionTrimPanel"));
   precision_trim_->setAccessibleName(tr("Precision trim controls"));
@@ -603,6 +645,8 @@ void EditorWindow::createActions() {
          QKeySequence{Qt::Key_Delete});
   create(QStringLiteral("rippleDelete"), tr("Ripple Delete"),
          tr("Delete the selection and close the gap"), QKeySequence{tr("Shift+Delete")});
+  auto* nestSelectedClips = create(QStringLiteral("nestSelectedClips"), tr("Nest Selected Clips"),
+                                   tr("Create a nested sequence from the selected clips"));
 
   auto* previous = create(QStringLiteral("previousFrame"), tr("Previous Frame"),
                           tr("Move one frame backward"), QKeySequence{Qt::Key_Comma});
@@ -811,6 +855,7 @@ void EditorWindow::createMenus() {
   edit->addAction(action(QStringLiteral("splitClip")));
   edit->addAction(action(QStringLiteral("deleteSelection")));
   edit->addAction(action(QStringLiteral("rippleDelete")));
+  edit->addAction(action(QStringLiteral("nestSelectedClips")));
   edit->addSeparator();
   edit->addAction(action(QStringLiteral("commandPalette")));
 
@@ -832,6 +877,8 @@ void EditorWindow::createMenus() {
   timelineMenu->addAction(action(QStringLiteral("zoomInTimeline")));
   timelineMenu->addAction(action(QStringLiteral("zoomOutTimeline")));
   timelineMenu->addAction(action(QStringLiteral("zoomFitTimeline")));
+  timelineMenu->addSeparator();
+  timelineMenu->addAction(action(QStringLiteral("nestSelectedClips")));
   timelineMenu->addSeparator();
   for (const auto* id : {"tool.select", "tool.rippleTrim", "tool.overwriteTrim", "tool.roll",
                          "tool.slip", "tool.slide"}) {
@@ -983,6 +1030,17 @@ void EditorWindow::connectControllerSurface() {
           &EditorWindow::rippleInsertFromSource);
   connect(source_viewer_, &ProgramViewer::overwriteInsertRequested, this,
           &EditorWindow::overwriteInsertFromSource);
+  connect(action(QStringLiteral("nestSelectedClips")), &QAction::triggered, this,
+          &EditorWindow::nestSelectedClipsRequested);
+  connect(sequence_tab_bar_, &QTabBar::currentChanged, this, [this](const int index) {
+    if (sequence_tab_bar_ == nullptr || index < 0 || index >= sequence_tab_bar_->count()) {
+      return;
+    }
+    const QString sequence_id = sequence_tab_bar_->tabData(index).toString();
+    if (!sequence_id.isEmpty()) {
+      emit sequenceActivated(sequence_id);
+    }
+  });
   connect(timeline_, &TimelineWidget::seekRequested, this, &EditorWindow::seekRequested);
   connect(effects_panel_, &EffectsPanelWidget::effectAddRequested, this,
           &EditorWindow::effectAddRequested);

@@ -159,6 +159,7 @@ struct Clip final {
   Time fade_out{};
   std::vector<Effect> effects;
   std::optional<Title> title;
+  std::optional<EntityId> nested_sequence_id;
   friend bool operator==(const Clip&, const Clip&) = default;
 };
 

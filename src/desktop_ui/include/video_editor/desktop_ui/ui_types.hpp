@@ -75,6 +75,12 @@ struct TimelineTrackView {
   bool targeted{true};
 };
 
+struct SequenceTabView {
+  QString id;
+  QString displayName;
+  bool active{false};
+};
+
 // Marker and gap identities are presentation values.  A gap key is scoped to the
 // revision that produced this view and must be resolved by the controller again
 // before it edits the model.

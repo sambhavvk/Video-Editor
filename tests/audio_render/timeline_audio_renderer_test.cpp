@@ -599,5 +599,155 @@ TEST(TimelineAudioRenderer, StatefulTrackDspIsInvariantToContiguousRequestPartit
   }
 }
 
+TEST(TimelineAudioRenderer, ClipEqChangesSamplesVersusBypass) {
+  auto timeline = make_timeline();
+  auto clip = audio_clip(timeline.ramp_asset_id, 0, 0, 256);
+  clip.audio_pan = 0.0;
+  auto eq = audio_effect("audio.eq");
+  eq.parameters[std::string(kEqFrequencyHz)] = {
+      .id = std::string(kEqFrequencyHz), .value = 1'000.0, .keyframes = {}};
+  eq.parameters[std::string(kEqQuality)] = {
+      .id = std::string(kEqQuality), .value = 0.707, .keyframes = {}};
+  eq.parameters[std::string(kEqGainDb)] = {
+      .id = std::string(kEqGainDb), .value = 12.0, .keyframes = {}};
+  clip.effects.push_back(std::move(eq));
+  const auto registry = registry_for(timeline);
+  TimelineAudioRenderer renderer(registry);
+  const auto baseline =
+      renderer.render(snapshot(timeline, {audio_track({[&] {
+                          auto bypass = audio_clip(timeline.ramp_asset_id, 0, 0, 256);
+                          bypass.audio_pan = 0.0;
+                          return bypass;
+                        }()})}),
+                      {.start_sample = 0, .sample_count = 256});
+  const auto processed =
+      renderer.render(snapshot(timeline, {audio_track({clip})}), {.start_sample = 0, .sample_count = 256});
+  ASSERT_TRUE(baseline) << baseline.error().message;
+  ASSERT_TRUE(processed) << processed.error().message;
+  EXPECT_NE(processed.value().channel(0)[128], baseline.value().channel(0)[128]);
+}
+
+TEST(TimelineAudioRenderer, ClipThenTrackDspRunsInOrder) {
+  auto timeline = make_timeline();
+  auto clip = audio_clip(timeline.constant_asset_id, 0, 0, 32);
+  clip.audio_pan = 0.0;
+  clip.audio_gain_db = 18.0;
+  auto clip_limiter = audio_effect("audio.limiter");
+  clip_limiter.parameters[std::string(kLimiterCeilingDb)] = {
+      .id = std::string(kLimiterCeilingDb), .value = -6.0206, .keyframes = {}};
+  clip.effects.push_back(std::move(clip_limiter));
+  edit::Track track = audio_track({clip});
+  auto track_eq = audio_effect("audio.eq");
+  track_eq.parameters[std::string(kEqFrequencyHz)] = {
+      .id = std::string(kEqFrequencyHz), .value = 1'000.0, .keyframes = {}};
+  track_eq.parameters[std::string(kEqQuality)] = {
+      .id = std::string(kEqQuality), .value = 0.707, .keyframes = {}};
+  track_eq.parameters[std::string(kEqGainDb)] = {
+      .id = std::string(kEqGainDb), .value = 0.0, .keyframes = {}};
+  track.effects.push_back(std::move(track_eq));
+  const auto registry = registry_for(timeline);
+  TimelineAudioRenderer renderer(registry);
+  auto hot_clip = audio_clip(timeline.constant_asset_id, 0, 0, 32);
+  hot_clip.audio_pan = 0.0;
+  hot_clip.audio_gain_db = 18.0;
+  const auto unprocessed =
+      renderer.render(snapshot(timeline, {audio_track({hot_clip})}), {.start_sample = 0, .sample_count = 32});
+  const auto clip_and_track = renderer.render(snapshot(timeline, {track}), {.start_sample = 0, .sample_count = 32});
+  ASSERT_TRUE(unprocessed) << unprocessed.error().message;
+  ASSERT_TRUE(clip_and_track) << clip_and_track.error().message;
+  EXPECT_GT(unprocessed.value().channel(0)[16], 0.7F);
+  EXPECT_NEAR(clip_and_track.value().channel(0)[16], 0.5F, 0.05F);
+  EXPECT_LT(clip_and_track.value().channel(0)[16], unprocessed.value().channel(0)[16]);
+}
+
+TEST(TimelineAudioRenderer, StatefulClipDspIsInvariantToContiguousRequestPartitioning) {
+  auto timeline = make_timeline();
+  auto clip = audio_clip(timeline.constant_asset_id, 0, 0, 2'400);
+  clip.audio_pan = 0.0;
+  auto eq = audio_effect("audio.eq");
+  eq.parameters[std::string(kEqFrequencyHz)] = {
+      .id = std::string(kEqFrequencyHz), .value = 1'000.0, .keyframes = {}};
+  eq.parameters[std::string(kEqQuality)] = {
+      .id = std::string(kEqQuality), .value = 0.707, .keyframes = {}};
+  eq.parameters[std::string(kEqGainDb)] = {
+      .id = std::string(kEqGainDb), .value = 3.0, .keyframes = {}};
+  auto limiter = audio_effect("audio.limiter");
+  limiter.parameters[std::string(kLimiterCeilingDb)] = {
+      .id = std::string(kLimiterCeilingDb), .value = -1.0, .keyframes = {}};
+  clip.effects = {limiter, eq};
+  const auto frozen = snapshot(timeline, {audio_track({clip})});
+  const auto registry = registry_for(timeline);
+
+  TimelineAudioRenderer whole_renderer(registry);
+  const auto whole = whole_renderer.render(frozen, {.start_sample = 0, .sample_count = 2'400});
+  ASSERT_TRUE(whole) << whole.error().message;
+
+  TimelineAudioRenderer partitioned_renderer(registry);
+  const auto first =
+      partitioned_renderer.render(frozen, {.start_sample = 0, .sample_count = 1'200});
+  const auto second =
+      partitioned_renderer.render(frozen, {.start_sample = 1'200, .sample_count = 1'200});
+  ASSERT_TRUE(first) << first.error().message;
+  ASSERT_TRUE(second) << second.error().message;
+  for (std::size_t index = 0; index < 1'200; ++index) {
+    EXPECT_FLOAT_EQ(first.value().channel(0)[index], whole.value().channel(0)[index]);
+    EXPECT_FLOAT_EQ(second.value().channel(0)[index], whole.value().channel(0)[index + 1'200]);
+  }
+}
+
+TEST(TimelineAudioRenderer, DisabledAndUnknownClipEffectsAreSkipped) {
+  auto timeline = make_timeline();
+  auto baseline_clip = audio_clip(timeline.constant_asset_id, 0, 0, 32);
+  baseline_clip.audio_pan = 0.0;
+  auto disabled = audio_effect("audio.limiter");
+  disabled.enabled = false;
+  disabled.parameters[std::string(kLimiterCeilingDb)] = {
+      .id = std::string(kLimiterCeilingDb), .value = -20.0, .keyframes = {}};
+  auto unknown = audio_effect("audio.mystery");
+  auto clip = baseline_clip;
+  clip.effects = {disabled, unknown};
+  const auto registry = registry_for(timeline);
+  TimelineAudioRenderer renderer(registry);
+  const auto baseline = renderer.render(snapshot(timeline, {audio_track({baseline_clip})}),
+                                        {.start_sample = 0, .sample_count = 32});
+  const auto skipped = renderer.render(snapshot(timeline, {audio_track({clip})}),
+                                       {.start_sample = 0, .sample_count = 32});
+  ASSERT_TRUE(baseline) << baseline.error().message;
+  ASSERT_TRUE(skipped) << skipped.error().message;
+  EXPECT_TRUE(std::ranges::equal(baseline.value().channel(0), skipped.value().channel(0)));
+  EXPECT_TRUE(std::ranges::equal(baseline.value().channel(1), skipped.value().channel(1)));
+}
+
+TEST(TimelineAudioRenderer, NestedSequenceContributedAudioAndGapIsSilent) {
+  auto timeline = make_timeline();
+  edit::Sequence child;
+  child.name = "Nested audio";
+  child.audio_sample_rate = kTimelineAudioSampleRate;
+  child.tracks = {audio_track({audio_clip(timeline.ramp_asset_id, 0, 100, 200)})};
+  const edit::EntityId child_id = child.id;
+  timeline.project.sequences.push_back(child);
+
+  edit::Track video_track;
+  video_track.kind = edit::TrackKind::Video;
+  edit::Clip nest;
+  nest.kind = edit::ClipKind::NestedSequence;
+  nest.timeline_range = edit::TimeRange(edit::Time(50, kTimelineAudioSampleRate),
+                                        edit::Time(300, kTimelineAudioSampleRate));
+  nest.source_range = edit::TimeRange(edit::Time(0, kTimelineAudioSampleRate),
+                                      edit::Time(300, kTimelineAudioSampleRate));
+  nest.nested_sequence_id = child_id;
+  video_track.clips.push_back(nest);
+
+  const auto registry = registry_for(timeline);
+  TimelineAudioRenderer renderer(registry);
+  const auto result = renderer.render(snapshot(timeline, {video_track}),
+                                      {.start_sample = 0, .sample_count = 400});
+  ASSERT_TRUE(result) << result.error().message;
+  expect_silence(result.value(), 0);
+  expect_silence(result.value(), 49);
+  EXPECT_GT(std::abs(result.value().channel(0)[100]), 0.0F);
+  expect_silence(result.value(), 350);
+}
+
 } // namespace
 } // namespace video_editor::audio_render

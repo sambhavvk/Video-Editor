@@ -219,6 +219,20 @@ void encodeClipTitle(const edit::Clip& value, wire::Clip* output, std::string_vi
   }
 }
 
+void encodeClipNestedSequence(const edit::Clip& value, wire::Clip* output, std::string_view path) {
+  if (value.kind == edit::ClipKind::NestedSequence) {
+    require(value.nested_sequence_id.has_value(), CodecErrorCode::InvalidField,
+            childPath(path, "nested_sequence_id"),
+            "nested sequence clips require nested_sequence_id");
+    encodeId(*value.nested_sequence_id, output->mutable_nested_sequence_id(),
+             childPath(path, "nested_sequence_id"));
+  } else {
+    require(!value.nested_sequence_id.has_value(), CodecErrorCode::InvalidField,
+            childPath(path, "nested_sequence_id"),
+            "only nested sequence clips may reference a nested sequence");
+  }
+}
+
 [[nodiscard]] wire::TransitionKind encodeTransitionKind(const edit::TransitionKind value,
                                                         std::string_view path) {
   if (value == edit::TransitionKind::CrossDissolve) {
@@ -398,6 +412,8 @@ void encodeTransform(const edit::Transform& value, wire::Transform* output, std:
     return wire::CLIP_KIND_AUDIO;
   case edit::ClipKind::Title:
     return wire::CLIP_KIND_TITLE;
+  case edit::ClipKind::NestedSequence:
+    return wire::CLIP_KIND_NESTED_SEQUENCE;
   }
   fail(CodecErrorCode::InvalidField, "clip.kind", "unknown clip kind");
 }
@@ -498,6 +514,7 @@ void encodeClip(const edit::Clip& value, wire::Clip* output, std::string_view pa
                  ids);
   }
   encodeClipTitle(value, output, path);
+  encodeClipNestedSequence(value, output, path);
 }
 
 void encodeTrack(const edit::Track& value, wire::Track* output, std::string_view path,
@@ -786,6 +803,19 @@ void assignDecodedTitle(const wire::Clip& value, const std::uint32_t declared_sc
   }
 }
 
+void assignDecodedNestedSequence(const wire::Clip& value, std::string_view path, edit::Clip& result) {
+  if (result.kind == edit::ClipKind::NestedSequence) {
+    requirePresent(value.has_nested_sequence_id(), childPath(path, "nested_sequence_id"));
+    result.nested_sequence_id =
+        decodeId(value.nested_sequence_id(), childPath(path, "nested_sequence_id"));
+  } else {
+    require(!value.has_nested_sequence_id(), CodecErrorCode::InvalidField,
+            childPath(path, "nested_sequence_id"),
+            "only nested sequence clips may reference a nested sequence");
+    result.nested_sequence_id.reset();
+  }
+}
+
 [[nodiscard]] edit::TransitionKind decodeTransitionKind(const wire::TransitionKind value,
                                                         std::string_view path) {
   switch (value) {
@@ -916,6 +946,63 @@ void reject_v3_fields_in_declared_older(const wire::ProjectSnapshot& snapshot) {
              "declared schema older than v3 cannot contain caption style fields");
       }
       ++caption_index;
+    }
+    ++sequence_index;
+  }
+}
+
+void reject_v4_fields_in_declared_older(const wire::ProjectSnapshot& snapshot) {
+  if (snapshot.schema_version() >= 4U) {
+    return;
+  }
+  if (!snapshot.project().bins().empty()) {
+    fail(CodecErrorCode::InvalidField, indexedPath("project", "bins", 0),
+         "declared schema older than v4 cannot contain media bins");
+  }
+  std::size_t asset_index = 0;
+  for (const auto& asset : snapshot.project().assets()) {
+    const auto asset_path = indexedPath("project", "assets", asset_index++);
+    if (asset.has_bin_id()) {
+      fail(CodecErrorCode::InvalidField, childPath(asset_path, "bin_id"),
+           "declared schema older than v4 cannot contain asset bin fields");
+    }
+    if (asset.has_display_title()) {
+      fail(CodecErrorCode::InvalidField, childPath(asset_path, "display_title"),
+           "declared schema older than v4 cannot contain asset metadata fields");
+    }
+    if (!asset.tags().empty()) {
+      fail(CodecErrorCode::InvalidField, childPath(asset_path, "tags"),
+           "declared schema older than v4 cannot contain asset metadata fields");
+    }
+    if (asset.has_notes()) {
+      fail(CodecErrorCode::InvalidField, childPath(asset_path, "notes"),
+           "declared schema older than v4 cannot contain asset metadata fields");
+    }
+    if (asset.has_rating()) {
+      fail(CodecErrorCode::InvalidField, childPath(asset_path, "rating"),
+           "declared schema older than v4 cannot contain asset metadata fields");
+    }
+  }
+  std::size_t sequence_index = 0;
+  for (const auto& sequence : snapshot.project().sequences()) {
+    std::size_t track_index = 0;
+    for (const auto& track : sequence.tracks()) {
+      std::size_t clip_index = 0;
+      for (const auto& clip : track.clips()) {
+        const auto clip_path = indexedPath(indexedPath(indexedPath("project", "sequences", sequence_index),
+                                                      "tracks", track_index),
+                                           "clips", clip_index);
+        if (clip.kind() == wire::CLIP_KIND_NESTED_SEQUENCE) {
+          fail(CodecErrorCode::InvalidField, childPath(clip_path, "kind"),
+               "declared schema older than v4 cannot contain nested sequence clips");
+        }
+        if (clip.has_nested_sequence_id()) {
+          fail(CodecErrorCode::InvalidField, childPath(clip_path, "nested_sequence_id"),
+               "declared schema older than v4 cannot contain nested sequence fields");
+        }
+        ++clip_index;
+      }
+      ++track_index;
     }
     ++sequence_index;
   }
@@ -1198,6 +1285,8 @@ decodeMetadata(const google::protobuf::RepeatedPtrField<wire::StringEntry>& entr
     return edit::ClipKind::Audio;
   case wire::CLIP_KIND_TITLE:
     return edit::ClipKind::Title;
+  case wire::CLIP_KIND_NESTED_SEQUENCE:
+    return edit::ClipKind::NestedSequence;
   case wire::CLIP_KIND_UNSPECIFIED:
     break;
   default:
@@ -1289,7 +1378,8 @@ decodeMetadata(const google::protobuf::RepeatedPtrField<wire::StringEntry>& entr
   result.id = decodeId(value.id(), childPath(path, "id"), &ids);
   result.kind = decodeClipKind(value.kind(), childPath(path, "kind"));
   result.asset_id = decodeId(value.asset_id(), childPath(path, "asset_id"), nullptr,
-                             result.kind == edit::ClipKind::Title);
+                             result.kind == edit::ClipKind::Title ||
+                                 result.kind == edit::ClipKind::NestedSequence);
   result.name = value.name();
   result.timeline_range = decodeRange(value.timeline_range(), childPath(path, "timeline_range"));
   result.source_range = decodeRange(value.source_range(), childPath(path, "source_range"));
@@ -1317,6 +1407,7 @@ decodeMetadata(const google::protobuf::RepeatedPtrField<wire::StringEntry>& entr
     result.effects.push_back(decodeEffect(effect, indexedPath(path, "effects", index++), ids));
   }
   assignDecodedTitle(value, declared_schema_version, path, result);
+  assignDecodedNestedSequence(value, path, result);
   return result;
 }
 

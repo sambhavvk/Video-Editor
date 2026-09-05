@@ -100,12 +100,15 @@ public:
   void setProjectDisplayName(const QString& displayName);
   void setProjectDirty(bool dirty);
   void setMediaItems(const QVector<MediaItemView>& items);
+  void setMediaBins(const QVector<MediaBinView>& bins);
   void setTimelineView(qint64 duration, qint64 timeScale, QVector<TimelineTrackView> tracks,
                        QVector<TimelineClipView> clips);
   void setTimelineView(qint64 duration, qint64 timeScale, QVector<TimelineTrackView> tracks,
                        QVector<TimelineClipView> clips, QVector<TimelineMarkerView> markers,
                        QVector<TimelineGapView> gaps);
+  void setSequenceTabs(const QVector<SequenceTabView>& tabs);
   void showTransientMessage(const QString& message, int timeoutMs = 4000);
+  void setAudioSyncStatus(const QString& text);
   void showExportDialog(const QString& presetId = {});
   void focusInspector();
 
@@ -177,7 +180,9 @@ signals:
                                          const QPointF& outgoing);
   void pickWhiteBalanceRequested();
   void effectLutBrowseRequested(const QString& effectId, const QString& parameterId);
+  void sequenceActivated(const QString& sequenceId);
   void addTitleRequested();
+  void nestSelectedClipsRequested();
   void transitionActivated(const QString& transitionId);
   void transitionDurationEdited(const QString& transitionId, qint64 duration);
   void transitionRemoved(const QString& transitionId);

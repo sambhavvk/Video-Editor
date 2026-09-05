@@ -489,6 +489,28 @@ decode_requested_samples(const OriginalAudioMedia& media,
   return Result::failure(make_error(code, std::move(message)));
 }
 
+constexpr int kMaximumNestedSequenceDepth = 8;
+
+[[nodiscard]] edit::Time source_time_for(const edit::Clip& clip, const edit::Time timeline_time) {
+  edit::Time offset = timeline_time - clip.timeline_range.start;
+  offset = offset.scaled(clip.playback_rate.numerator(), clip.playback_rate.denominator(),
+                           edit::RoundingMode::NearestTiesEven);
+  return clip.reversed ? clip.source_range.end() - offset : clip.source_range.start + offset;
+}
+
+[[nodiscard]] std::int64_t nested_child_sample_at(const edit::Clip& clip,
+                                                  const std::int64_t timeline_sample) {
+  const edit::Time timeline_time(timeline_sample, kTimelineAudioSampleRate);
+  if (!clip.timeline_range.contains(timeline_time)) {
+    return -1;
+  }
+  const edit::Time child_time = source_time_for(clip, timeline_time);
+  if (!clip.source_range.contains(child_time)) {
+    return -1;
+  }
+  return child_time.rescaledTo(kTimelineAudioSampleRate, edit::RoundingMode::Floor).value();
+}
+
 } // namespace
 
 class TimelineAudioRenderer::Impl final {
@@ -557,68 +579,38 @@ TrackMeterSnapshot TimelineAudioRenderer::trackMetersAt(const std::int64_t sampl
   return stale;
 }
 
-AudioRenderResult TimelineAudioRenderer::render(const edit::TimelineSnapshot& snapshot,
-                                                const AudioRenderRequest& request) const {
-  if (!impl_->originals) {
-    return request_error(AudioRenderErrorCode::InvalidRequest,
-                         "an original-media provider is required");
-  }
-  if (request.sample_count > static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max()) ||
-      request.start_sample > std::numeric_limits<std::int64_t>::max() -
-                                 static_cast<std::int64_t>(request.sample_count)) {
-    return request_error(AudioRenderErrorCode::InvalidRequest,
-                         "requested audio sample range overflows int64");
-  }
-  if (is_cancelled(request.cancellation)) {
-    return request_error(AudioRenderErrorCode::Cancelled, "audio render was cancelled");
-  }
-
-  audio::AudioBlock output(
-      {.sample_rate = kTimelineAudioSampleRate, .channels = kTimelineAudioChannels},
-      request.start_sample, request.sample_count);
-  if (request.sample_count == 0U) {
-    return Result::success(std::move(output));
-  }
-
-  const edit::Sequence& sequence = snapshot.sequence();
-  if (sequence.audio_sample_rate != kTimelineAudioSampleRate) {
+AudioRenderResult TimelineAudioRenderer::Impl::mix_sequence_audio(
+    Impl& impl, const edit::Project& project,
+    const edit::Sequence& sequence, const edit::Revision revision,
+    const AudioRenderRequest& request, audio::AudioBlock& output, const int depth,
+    const bool collect_meters, TrackMeterSnapshot* meter_snapshot) {
+  if (depth > kMaximumNestedSequenceDepth) {
     return request_error(AudioRenderErrorCode::InvalidTimeline,
-                         "beta timeline audio must use a 48 kHz master sample rate");
+                         "nested sequence depth exceeds the supported limit");
   }
-
-  // DSP stages carry history across adjacent pulls. Serialize access to the
-  // renderer-owned sessions and reset on a seek/revision discontinuity so
-  // contiguous block rendering is equivalent to one larger request.
-  std::lock_guard dsp_lock(impl_->dsp_mutex);
 
   const bool has_solo =
       std::any_of(sequence.tracks.begin(), sequence.tracks.end(), [](const edit::Track& track) {
         return track.kind == edit::TrackKind::Audio && track.solo;
       });
-  TrackMeterSnapshot meter_snapshot;
-  meter_snapshot.version = impl_->meter_version + 1U;
-  meter_snapshot.revision = snapshot.revision();
-  meter_snapshot.start_sample = request.start_sample;
-  meter_snapshot.end_sample =
-      request.start_sample + static_cast<std::int64_t>(request.sample_count);
-  meter_snapshot.stale = false;
-  const auto audio_track_count = static_cast<std::size_t>(
-      std::count_if(sequence.tracks.begin(), sequence.tracks.end(),
-                    [](const edit::Track& track) { return track.kind == edit::TrackKind::Audio; }));
-  meter_snapshot.tracks.reserve(audio_track_count);
+  if (collect_meters && meter_snapshot != nullptr) {
+    const auto audio_track_count = static_cast<std::size_t>(std::count_if(
+        sequence.tracks.begin(), sequence.tracks.end(),
+        [](const edit::Track& track) { return track.kind == edit::TrackKind::Audio; }));
+    meter_snapshot->tracks.reserve(audio_track_count);
+  }
   for (const edit::Track& track : sequence.tracks) {
     if (track.kind != edit::TrackKind::Audio) {
       continue;
     }
     const bool audible = !track.muted && (!has_solo || track.solo);
-    if (!audible) {
-      meter_snapshot.tracks.push_back({.track_id = track.id, .active = false});
+    if (collect_meters && meter_snapshot != nullptr && !audible) {
+      meter_snapshot->tracks.push_back({.track_id = track.id, .active = false});
       continue;
     }
-    // Render this track into a temporary block so track-level DSP (EQ,
-    // compressor, denoise, limiter) can be applied to the isolated track mix
-    // before summing into the master output. This preserves correct filter
-    // state and prevents one track's DSP from affecting another.
+    if (!audible) {
+      continue;
+    }
     audio::AudioBlock track_output(
         {.sample_rate = kTimelineAudioSampleRate, .channels = kTimelineAudioChannels},
         request.start_sample, request.sample_count);

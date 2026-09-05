@@ -24,6 +24,8 @@
 namespace video_editor::render {
 namespace {
 
+constexpr int kMaximumNestedSequenceDepth = 8;
+
 int scaled_dimension(const std::uint32_t value, const PreviewScale scale) {
   const int divisor = scale == PreviewScale::Full ? 1 : scale == PreviewScale::Half ? 2 : 4;
   return std::max(1, static_cast<int>(value) / divisor);
@@ -488,12 +490,55 @@ void composite(const CpuFrame& source, CpuFrame& destination, const edit::Clip& 
   return frame;
 }
 
-[[nodiscard]] RenderResult<RenderedClip>
-render_clip_source(const edit::Clip& clip, const edit::Sequence& sequence, const edit::Time time,
-                   const PreviewProfile& profile, const std::uint64_t request_epoch,
-                   FrameProvider& provider, const CpuRenderer& renderer) {
+[[nodiscard]] std::shared_ptr<CpuFrame> black_frame_like(const CpuFrame& source);
+
+[[nodiscard]] RenderResult<std::shared_ptr<CpuFrame>>
+render_sequence_frame(const edit::Project& project, const edit::Sequence& sequence,
+                      const edit::Time time, const int depth, const PreviewProfile& profile,
+                      const std::uint64_t request_epoch, FrameProvider& provider,
+                      const CpuRenderer& renderer);
+
+[[nodiscard]] RenderResult<RenderedClip> render_clip_source(
+    const edit::Project& project, const edit::Clip& clip, const edit::Sequence& sequence,
+    const edit::Time time, const int depth, const PreviewProfile& profile,
+    const std::uint64_t request_epoch, FrameProvider& provider, const CpuRenderer& renderer) {
   if (clip.kind == edit::ClipKind::Title) {
     auto frame = std::make_shared<CpuFrame>(*detail_rasterize_title_frame(clip, sequence, profile));
+    RenderedClip rendered{.frame = std::move(frame), .clip = clip};
+    apply_visual_effects(rendered, time - clip.timeline_range.start, profile);
+    return RenderResult<RenderedClip>::success(std::move(rendered));
+  }
+  if (clip.kind == edit::ClipKind::NestedSequence) {
+    if (depth >= kMaximumNestedSequenceDepth) {
+      return RenderResult<RenderedClip>::failure(
+          {.code = RenderErrorCode::InvalidSnapshot,
+           .message = "nested sequence depth exceeds the supported limit"});
+    }
+    if (!clip.nested_sequence_id.has_value()) {
+      return RenderResult<RenderedClip>::failure(
+          {.code = RenderErrorCode::InvalidSnapshot,
+           .message = "nested sequence clip is missing nested_sequence_id"});
+    }
+    const edit::Sequence* child = edit::findSequence(project, *clip.nested_sequence_id);
+    if (child == nullptr) {
+      return RenderResult<RenderedClip>::failure(
+          {.code = RenderErrorCode::InvalidSnapshot,
+           .message = "nested sequence clip references a missing sequence"});
+    }
+    const edit::Time child_time = source_time_for(clip, time);
+    std::shared_ptr<CpuFrame> frame;
+    if (!clip.source_range.contains(child_time)) {
+      frame = std::make_shared<CpuFrame>(scaled_dimension(child->width, profile.scale),
+                                         scaled_dimension(child->height, profile.scale));
+      frame->clear(0.0F, 0.0F, 0.0F, 1.0F);
+    } else {
+      auto child_frame = render_sequence_frame(project, *child, child_time, depth + 1, profile,
+                                               request_epoch, provider, renderer);
+      if (!child_frame) {
+        return RenderResult<RenderedClip>::failure(*child_frame.error);
+      }
+      frame = std::move(*child_frame.value);
+    }
     RenderedClip rendered{.frame = std::move(frame), .clip = clip};
     apply_visual_effects(rendered, time - clip.timeline_range.start, profile);
     return RenderResult<RenderedClip>::success(std::move(rendered));
@@ -536,6 +581,72 @@ render_track_clip_over_baseline(const edit::Project& project, const edit::Clip& 
   }
   composite(*source.value->frame, *rendered, source.value->clip, sequence.width, sequence.height);
   return RenderResult<std::shared_ptr<CpuFrame>>::success(std::move(rendered));
+}
+
+[[nodiscard]] RenderResult<std::shared_ptr<CpuFrame>>
+render_sequence_frame(const edit::Project& project, const edit::Sequence& sequence,
+                      const edit::Time time, const int depth, const PreviewProfile& profile,
+                      const std::uint64_t request_epoch, FrameProvider& provider,
+                      const CpuRenderer& renderer) {
+  if (depth > kMaximumNestedSequenceDepth) {
+    return RenderResult<std::shared_ptr<CpuFrame>>::failure(
+        {.code = RenderErrorCode::InvalidSnapshot,
+         .message = "nested sequence depth exceeds the supported limit"});
+  }
+
+  const int width = scaled_dimension(sequence.width, profile.scale);
+  const int height = scaled_dimension(sequence.height, profile.scale);
+  auto output = std::make_shared<CpuFrame>(width, height);
+  output->clear(0.0F, 0.0F, 0.0F, 1.0F);
+
+  for (const edit::Track& track : sequence.tracks) {
+    if (track.kind != edit::TrackKind::Video || track.muted || !track.visible) {
+      continue;
+    }
+    const auto transition = active_transition_for_track(sequence, track, time);
+    if (transition.has_value()) {
+      auto outgoing = render_track_clip_over_baseline(
+          project, *transition->outgoing, sequence, time, depth, profile, request_epoch, provider,
+          renderer, *output);
+      if (!outgoing) {
+        return RenderResult<std::shared_ptr<CpuFrame>>::failure(*outgoing.error);
+      }
+      auto incoming = render_track_clip_over_baseline(
+          project, *transition->incoming, sequence, time, depth, profile, request_epoch, provider,
+          renderer, *output);
+      if (!incoming) {
+        return RenderResult<std::shared_ptr<CpuFrame>>::failure(*incoming.error);
+      }
+      const edit::Time cut_time = transition->incoming->timeline_range.start;
+      if (transition->transition->kind == edit::TransitionKind::CrossDissolve) {
+        const float factor = saturate(time_ratio(time - transition->transition->range.start,
+                                                 transition->transition->range.duration));
+        output = blend_frames(**outgoing.value, **incoming.value, factor);
+      } else if (time < cut_time) {
+        const float factor = saturate(time_ratio(time - transition->transition->range.start,
+                                                 cut_time - transition->transition->range.start));
+        output = blend_frames(**outgoing.value, *black_frame_like(**outgoing.value), factor);
+      } else {
+        const float factor =
+            saturate(time_ratio(time - cut_time, transition->transition->range.end() - cut_time));
+        output = blend_frames(*black_frame_like(**incoming.value), **incoming.value, factor);
+      }
+      continue;
+    }
+    for (const edit::Clip& clip : track.clips) {
+      if (!clip.timeline_range.contains(time)) {
+        continue;
+      }
+      auto source = render_clip_source(project, clip, sequence, time, depth, profile,
+                                       request_epoch, provider, renderer);
+      if (!source) {
+        return RenderResult<std::shared_ptr<CpuFrame>>::failure(*source.error);
+      }
+      composite(*source.value->frame, *output, source.value->clip, sequence.width, sequence.height);
+    }
+  }
+
+  return RenderResult<std::shared_ptr<CpuFrame>>::success(std::move(output));
 }
 
 [[nodiscard]] std::shared_ptr<CpuFrame> black_frame_like(const CpuFrame& source) {

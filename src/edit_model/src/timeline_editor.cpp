@@ -84,7 +84,8 @@ void sortClips(Track& track) {
 [[nodiscard]] bool trackAccepts(const Track& track, const Clip& clip) noexcept {
   switch (track.kind) {
   case TrackKind::Video:
-    return clip.kind == ClipKind::Video || clip.kind == ClipKind::Title;
+    return clip.kind == ClipKind::Video || clip.kind == ClipKind::Title ||
+           clip.kind == ClipKind::NestedSequence;
   case TrackKind::Audio:
     return clip.kind == ClipKind::Audio;
   case TrackKind::Caption:
@@ -117,6 +118,9 @@ constexpr double kMaximumRotationMagnitude = 36'000.0;
 constexpr double kMinimumAudioGainDb = -96.0;
 constexpr double kMaximumAudioGainDb = 24.0;
 constexpr std::size_t kMaximumTrackNameBytes = 256;
+constexpr std::size_t kMaximumBinNameBytes = 256;
+constexpr int kMaximumNestedSequenceDepth = 8;
+constexpr int kMaximumAssetRating = 5;
 
 [[nodiscard]] bool validUtf8(std::string_view text) noexcept {
   std::size_t index = 0;
@@ -161,6 +165,183 @@ constexpr std::size_t kMaximumTrackNameBytes = 256;
     index += continuation_count + 1;
   }
   return true;
+}
+
+[[nodiscard]] bool validateTags(const std::vector<std::string>& tags) {
+  std::unordered_set<std::string> seen;
+  for (const auto& tag : tags) {
+    if (tag.empty() || !validUtf8(tag) || !seen.insert(tag).second) {
+      return false;
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] bool binHasChildBins(const Project& project, const EntityId bin_id) {
+  return std::any_of(project.bins.begin(), project.bins.end(), [&](const MediaBin& bin) {
+    return bin.parent_id == bin_id;
+  });
+}
+
+[[nodiscard]] bool binHasAssignedAssets(const Project& project, const EntityId bin_id) {
+  return std::any_of(project.assets.begin(), project.assets.end(), [&](const Asset& asset) {
+    return asset.bin_id == bin_id;
+  });
+}
+
+[[nodiscard]] bool binParentCreatesCycle(const Project& project, const EntityId bin_id,
+                                         const EntityId new_parent) {
+  auto current = new_parent;
+  while (!current.isNil()) {
+    if (current == bin_id) {
+      return true;
+    }
+    const auto* parent_bin = findBin(project, current);
+    if (parent_bin == nullptr || !parent_bin->parent_id.has_value()) {
+      return false;
+    }
+    current = *parent_bin->parent_id;
+  }
+  return false;
+}
+
+[[nodiscard]] std::optional<EditError> validateBinName(const std::string& name) {
+  if (name.empty() || name.size() > kMaximumBinNameBytes || !validUtf8(name)) {
+    return error(EditErrorCode::InvalidArgument, "bin name is empty, invalid UTF-8, or too long");
+  }
+  return std::nullopt;
+}
+
+[[nodiscard]] std::optional<EditError> validateBinParent(const Project& project,
+                                                           const MediaBin& bin) {
+  if (!bin.parent_id.has_value()) {
+    return std::nullopt;
+  }
+  if (bin.parent_id->isNil()) {
+    return error(EditErrorCode::InvalidArgument, "bin parent id cannot be nil");
+  }
+  const auto* parent = findBin(project, *bin.parent_id);
+  if (parent == nullptr) {
+    return error(EditErrorCode::EntityNotFound, "bin parent was not found");
+  }
+  if (parent->kind != MediaBinKind::Folder) {
+    return error(EditErrorCode::InvalidArgument, "only folder bins may contain child bins");
+  }
+  if (binParentCreatesCycle(project, bin.id, *bin.parent_id)) {
+    return error(EditErrorCode::InvalidArgument, "bin parent assignment creates a cycle");
+  }
+  return std::nullopt;
+}
+
+[[nodiscard]] bool nestedSequencePathReturnsTo(const Project& project, const EntityId from_sequence,
+                                               const EntityId target_sequence, const int depth,
+                                               std::unordered_set<EntityId>& visiting) {
+  if (depth > kMaximumNestedSequenceDepth) {
+    return false;
+  }
+  if (from_sequence == target_sequence) {
+    return true;
+  }
+  if (!visiting.insert(from_sequence).second) {
+    return false;
+  }
+  const auto* sequence = findSequence(project, from_sequence);
+  if (sequence == nullptr) {
+    return false;
+  }
+  for (const auto& track : sequence->tracks) {
+    for (const auto& clip : track.clips) {
+      if (clip.kind != ClipKind::NestedSequence || !clip.nested_sequence_id.has_value()) {
+        continue;
+      }
+      if (nestedSequencePathReturnsTo(project, *clip.nested_sequence_id, target_sequence,
+                                      depth + 1, visiting)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+[[nodiscard]] int nestedSequenceMaxDepth(const Project& project, const EntityId sequence_id,
+                                         const int depth, std::unordered_set<EntityId>& visiting) {
+  if (depth > kMaximumNestedSequenceDepth) {
+    return depth;
+  }
+  if (!visiting.insert(sequence_id).second) {
+    return depth;
+  }
+  const auto* sequence = findSequence(project, sequence_id);
+  if (sequence == nullptr) {
+    return depth;
+  }
+  int max_child = depth;
+  for (const auto& track : sequence->tracks) {
+    for (const auto& clip : track.clips) {
+      if (clip.kind != ClipKind::NestedSequence || !clip.nested_sequence_id.has_value()) {
+        continue;
+      }
+      max_child = std::max(max_child, nestedSequenceMaxDepth(project, *clip.nested_sequence_id,
+                                                             depth + 1, visiting));
+    }
+  }
+  return max_child;
+}
+
+[[nodiscard]] std::optional<EditError> validateNestedSequenceClip(const Project& project,
+                                                                  const EntityId parent_sequence_id,
+                                                                  const Clip& clip) {
+  if (!clip.nested_sequence_id.has_value() || clip.nested_sequence_id->isNil()) {
+    return error(EditErrorCode::InvalidArgument,
+                 "nested sequence clips require nested_sequence_id");
+  }
+  if (findSequence(project, *clip.nested_sequence_id) == nullptr) {
+    return error(EditErrorCode::EntityNotFound, "nested sequence was not found");
+  }
+  std::unordered_set<EntityId> visiting;
+  if (nestedSequencePathReturnsTo(project, *clip.nested_sequence_id, parent_sequence_id, 0,
+                                  visiting)) {
+    return error(EditErrorCode::InvalidArgument, "nested sequence reference creates a cycle");
+  }
+  visiting.clear();
+  if (nestedSequenceMaxDepth(project, *clip.nested_sequence_id, 1, visiting) >
+      kMaximumNestedSequenceDepth) {
+    return error(EditErrorCode::InvalidArgument,
+                 "nested sequence depth exceeds the supported limit");
+  }
+  return std::nullopt;
+}
+
+[[nodiscard]] std::optional<EditError> validateAssetMetadata(const Asset& asset) {
+  if (!validUtf8(asset.display_title) || !validUtf8(asset.notes)) {
+    return error(EditErrorCode::InvalidArgument, "asset metadata must be valid UTF-8");
+  }
+  if (asset.rating < 0 || asset.rating > kMaximumAssetRating) {
+    return error(EditErrorCode::InvalidArgument, "asset rating must be between 0 and 5");
+  }
+  if (!validateTags(asset.tags)) {
+    return error(EditErrorCode::InvalidArgument, "asset tags must be unique and non-empty UTF-8");
+  }
+  if (asset.bin_id.has_value() && asset.bin_id->isNil()) {
+    return error(EditErrorCode::InvalidArgument, "asset bin id cannot be nil");
+  }
+  return std::nullopt;
+}
+
+[[nodiscard]] std::optional<EditError> validateBin(const Project& project, const MediaBin& bin) {
+  if (bin.id.isNil()) {
+    return error(EditErrorCode::InvalidArgument, "bin id cannot be nil");
+  }
+  if (const auto issue = validateBinName(bin.name)) {
+    return issue;
+  }
+  if (const auto issue = validateBinParent(project, bin)) {
+    return issue;
+  }
+  if (bin.kind == MediaBinKind::Smart && binHasChildBins(project, bin.id)) {
+    return error(EditErrorCode::InvalidArgument, "smart bins cannot contain child bins");
+  }
+  return std::nullopt;
 }
 
 [[nodiscard]] std::optional<EditError> validateTrackName(std::string_view name) {
@@ -374,6 +555,19 @@ constexpr std::size_t kMaximumTrackNameBytes = 256;
   if (clip.kind == ClipKind::Title) {
     return true;
   }
+  if (clip.kind == ClipKind::NestedSequence) {
+    if (!clip.nested_sequence_id.has_value()) {
+      return false;
+    }
+    const auto* child = findSequence(project, *clip.nested_sequence_id);
+    if (child == nullptr) {
+      return false;
+    }
+    const auto child_duration = sequenceDuration(*child);
+    const auto source_duration = sourceDeltaForTimelineDelta(clip, timeline_duration);
+    return clip.reversed ? child_duration - clip.source_range.end() >= source_duration
+                         : clip.source_range.start >= source_duration;
+  }
   const auto* asset = findAsset(project, clip.asset_id);
   if (asset == nullptr) {
     return false;
@@ -387,6 +581,19 @@ constexpr std::size_t kMaximumTrackNameBytes = 256;
                                         const Time timeline_duration) {
   if (clip.kind == ClipKind::Title) {
     return true;
+  }
+  if (clip.kind == ClipKind::NestedSequence) {
+    if (!clip.nested_sequence_id.has_value()) {
+      return false;
+    }
+    const auto* child = findSequence(project, *clip.nested_sequence_id);
+    if (child == nullptr) {
+      return false;
+    }
+    const auto child_duration = sequenceDuration(*child);
+    const auto source_duration = sourceDeltaForTimelineDelta(clip, timeline_duration);
+    return clip.reversed ? clip.source_range.start >= source_duration
+                         : child_duration - clip.source_range.end() >= source_duration;
   }
   const auto* asset = findAsset(project, clip.asset_id);
   if (asset == nullptr) {
@@ -494,12 +701,32 @@ validateTransition(const Project& project, const Sequence& sequence, const Trans
     if (!clip.title) {
       return error(EditErrorCode::InvalidArgument, "title clips require a title payload");
     }
+    if (clip.nested_sequence_id.has_value()) {
+      return error(EditErrorCode::InvalidArgument,
+                   "title clips cannot reference a nested sequence");
+    }
     if (const auto issue = validateTitle(*clip.title)) {
+      return issue;
+    }
+  } else if (clip.kind == ClipKind::NestedSequence) {
+    if (!clip.asset_id.isNil()) {
+      return error(EditErrorCode::InvalidArgument,
+                   "nested sequence clips cannot reference an asset");
+    }
+    if (clip.title) {
+      return error(EditErrorCode::InvalidArgument,
+                   "nested sequence clips cannot carry a title payload");
+    }
+    if (const auto issue = validateNestedSequenceClip(project, parent_sequence.id, clip)) {
       return issue;
     }
   } else {
     if (clip.title) {
       return error(EditErrorCode::InvalidArgument, "only title clips may carry a title payload");
+    }
+    if (clip.nested_sequence_id.has_value()) {
+      return error(EditErrorCode::InvalidArgument,
+                   "only nested sequence clips may reference a nested sequence");
     }
     const auto* asset = findAsset(project, clip.asset_id);
     if (asset == nullptr) {

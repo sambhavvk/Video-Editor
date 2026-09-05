@@ -271,6 +271,8 @@ private slots:
   void applyWhiteBalanceSample(int frameX, int frameY);
   void browseEffectLut(const QString& effectId, const QString& parameterId);
   void addTitleClip();
+  void nestSelectedClips();
+  void setActiveSequence(const edit::EntityId& sequence_id);
   void setTransitionSelection(const QString& transitionId);
   void updateTransitionDuration(const QString& transitionId, qint64 duration);
   void removeTransition(const QString& transitionId);
@@ -451,7 +453,9 @@ private:
   void refreshViews();
   void refreshMediaView();
   void refreshTimelineView();
+  void refreshSequenceTabs();
   void refreshInspectorView();
+  void refreshViewerOverlay();
   void refreshMixerView();
   void refreshCaptionView();
   void refreshTranscriptionState();

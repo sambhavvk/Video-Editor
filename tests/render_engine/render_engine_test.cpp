@@ -961,6 +961,72 @@ TEST(CpuRenderer, LumaCurveLiftsMidtones) {
   EXPECT_GT(frame->pixel(0, 0)[2], 0.5F);
 }
 
+TEST(CpuRenderer, NestedSequenceRendersChildTitleMatchingDirectChild) {
+  edit::Project project;
+  edit::Sequence child;
+  child.width = 8;
+  child.height = 8;
+  child.frame_rate = edit::Rate(30, 1);
+  edit::Track child_track;
+  child_track.kind = edit::TrackKind::Video;
+  edit::Clip title;
+  title.kind = edit::ClipKind::Title;
+  title.name = "Nested title";
+  title.timeline_range = {edit::Time(0, 1), edit::Time(2, 1)};
+  title.source_range = {edit::Time{}, edit::Time(2, 1)};
+  title.title = edit::Title{.text = "NEST"};
+  child_track.clips.push_back(title);
+  child.tracks.push_back(child_track);
+  const edit::EntityId child_id = child.id;
+  project.sequences.push_back(child);
+
+  edit::Sequence parent;
+  parent.width = 8;
+  parent.height = 8;
+  parent.frame_rate = edit::Rate(30, 1);
+  edit::Track parent_track;
+  parent_track.kind = edit::TrackKind::Video;
+  edit::Clip nest;
+  nest.kind = edit::ClipKind::NestedSequence;
+  nest.timeline_range = {edit::Time(0, 1), edit::Time(2, 1)};
+  nest.source_range = {edit::Time(0, 1), edit::Time(2, 1)};
+  nest.nested_sequence_id = child_id;
+  parent_track.clips.push_back(nest);
+  parent.tracks.push_back(parent_track);
+  const edit::EntityId parent_id = parent.id;
+  project.sequences.push_back(parent);
+
+  edit::TimelineEditor editor(project);
+  auto parent_snapshot = editor.snapshot(parent_id, editor.revision());
+  auto child_snapshot = editor.snapshot(child_id, editor.revision());
+  ASSERT_TRUE(parent_snapshot);
+  ASSERT_TRUE(child_snapshot);
+
+  auto provider = std::make_shared<SolidProvider>();
+  CpuRenderer renderer(provider);
+  renderer.begin_epoch(11);
+  const edit::Time sample_time(1, 2);
+  const auto nested = renderer.request_frame(parent_snapshot.value(), sample_time, {}, 11);
+  const auto direct = renderer.request_frame(child_snapshot.value(), sample_time, {}, 11);
+  ASSERT_TRUE(nested);
+  ASSERT_TRUE(direct);
+  const auto nested_frame = std::get<std::shared_ptr<const CpuFrame>>(nested.value->storage);
+  const auto direct_frame = std::get<std::shared_ptr<const CpuFrame>>(direct.value->storage);
+  ASSERT_EQ(nested_frame->width(), direct_frame->width());
+  ASSERT_EQ(nested_frame->height(), direct_frame->height());
+  for (int y = 0; y < nested_frame->height(); ++y) {
+    for (int x = 0; x < nested_frame->width(); ++x) {
+      const auto nested_pixel = nested_frame->pixel(x, y);
+      const auto direct_pixel = direct_frame->pixel(x, y);
+      for (std::size_t channel = 0; channel < 4U; ++channel) {
+        EXPECT_NEAR(nested_pixel[channel], direct_pixel[channel], 1.0e-4F)
+            << "pixel " << x << ',' << y << " channel " << channel;
+      }
+    }
+  }
+  EXPECT_GT(nested_frame->pixel(2, 2)[3], 0.0F);
+}
+
 TEST(CpuRenderer, AppliesColorBeforeLutInEffectOrder) {
   const auto asset_id = edit::EntityId::generate();
   const auto cube_path = write_temp_cube(identity_cube_contents(2));

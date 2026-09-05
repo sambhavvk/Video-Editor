@@ -1533,5 +1533,56 @@ void EditorControllerTest::rippleInsertVideoMidClipStillFails() {
   QCOMPARE(videoTrackAt(project->sequences.front(), 0)->clips.size(), 1U);
 }
 
+void EditorControllerTest::nestSelectedClipsOpensChildSequence() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString frame_path = directory.filePath(QStringLiteral("nest-frame.ppm"));
+  writePpmFrame(frame_path, 16, 10);
+
+  QSettings settings(directory.filePath(QStringLiteral("nest-ui.ini")), QSettings::IniFormat);
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+  controller.importPaths({frame_path});
+  QTRY_COMPARE_WITH_TIMEOUT(
+      controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
+  window.mediaActivated(window.mediaBin()->items().front().id);
+  window.rippleInsertFromSource();
+
+  const auto before = controller.editor().projectAt(controller.editor().revision());
+  const QString clip_id =
+      QString::fromStdString(before->sequences.front().tracks.front().clips.front().id.toString());
+  window.timeline()->clipSelectionChanged({clip_id}, clip_id);
+  window.action(QStringLiteral("nestSelectedClips"))->trigger();
+
+  const auto after = controller.editor().projectAt(controller.editor().revision());
+  QCOMPARE(after->sequences.size(), 2U);
+  const video_editor::edit::Sequence* child = nullptr;
+  const video_editor::edit::Sequence* parent = nullptr;
+  for (const auto& sequence : after->sequences) {
+    if (sequence.name == "Nested sequence") {
+      child = &sequence;
+    } else {
+      parent = &sequence;
+    }
+  }
+  QVERIFY(child != nullptr);
+  QVERIFY(parent != nullptr);
+  QVERIFY(!child->tracks.empty());
+  QCOMPARE(child->tracks.front().clips.front().timeline_range.start, video_editor::edit::Time{});
+  const auto nested_it = std::find_if(
+      parent->tracks.begin(), parent->tracks.end(), [](const video_editor::edit::Track& track) {
+        return track.kind == video_editor::edit::TrackKind::Video;
+      });
+  QVERIFY(nested_it != parent->tracks.end());
+  QVERIFY(std::any_of(nested_it->clips.begin(), nested_it->clips.end(),
+                      [](const video_editor::edit::Clip& clip) {
+                        return clip.kind == video_editor::edit::ClipKind::NestedSequence;
+                      }));
+  auto* tabs = window.findChild<QTabBar*>(QStringLiteral("sequenceTabBar"));
+  QVERIFY(tabs != nullptr);
+  QCOMPARE(tabs->count(), 2);
+  QCOMPARE(tabs->tabText(tabs->currentIndex()), QStringLiteral("Nested sequence"));
+}
+
 QTEST_MAIN(EditorControllerTest)
 #include "editor_controller_test.moc"

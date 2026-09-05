@@ -13,6 +13,8 @@
 namespace video_editor::render {
 namespace {
 
+constexpr int kMaximumNestedSequenceDepth = 8;
+
 [[nodiscard]] int scaled_dimension(const std::uint32_t value, const PreviewScale scale) {
   const int divisor = scale == PreviewScale::Full ? 1 : scale == PreviewScale::Half ? 2 : 4;
   return std::max(1, static_cast<int>(value) / divisor);
@@ -98,7 +100,8 @@ build_gpu_layer(const edit::Project& project, const edit::Clip& clip,
     return RenderResult<GpuLayer>::failure(
         {.code = RenderErrorCode::GpuUnsupportedTimeline, .message = std::move(diagnostic)});
   }
-  if (clip.kind != edit::ClipKind::Video && clip.kind != edit::ClipKind::Title) {
+  if (clip.kind != edit::ClipKind::Video && clip.kind != edit::ClipKind::Title &&
+      clip.kind != edit::ClipKind::NestedSequence) {
     return RenderResult<GpuLayer>::failure(
         {.code = RenderErrorCode::GpuUnsupportedTimeline,
          .message = "GPU timeline preview does not yet support this clip kind"});
@@ -106,10 +109,46 @@ build_gpu_layer(const edit::Project& project, const edit::Clip& clip,
 
   edit::Clip mutable_clip = clip;
   const edit::Time local_time = time - clip.timeline_range.start;
+  const GpuColorGrade gpu_grade = extract_gpu_color_grade(clip.effects, local_time);
+  const bool use_gpu_color_grade = !gpu_grade.empty();
   std::shared_ptr<CpuFrame> pixels;
   if (clip.kind == edit::ClipKind::Title) {
     pixels = rasterize_title_frame(clip, sequence, profile);
-    apply_clip_visual_effects(*pixels, mutable_clip, local_time, profile);
+    apply_clip_visual_effects(*pixels, mutable_clip, local_time, profile, use_gpu_color_grade);
+  } else if (clip.kind == edit::ClipKind::NestedSequence) {
+    if (depth >= kMaximumNestedSequenceDepth) {
+      return unsupported_layer("nested sequence depth exceeds the supported limit");
+    }
+    if (!clip.nested_sequence_id.has_value()) {
+      return unsupported_layer("nested sequence clip is missing nested_sequence_id");
+    }
+    const edit::Sequence* child = edit::findSequence(project, *clip.nested_sequence_id);
+    if (child == nullptr) {
+      return unsupported_layer("nested sequence clip references a missing sequence");
+    }
+    const edit::Time child_time = source_time_for(clip, time);
+    if (!clip.source_range.contains(child_time)) {
+      pixels = std::make_shared<CpuFrame>(scaled_dimension(child->width, profile.scale),
+                                          scaled_dimension(child->height, profile.scale));
+      pixels->clear(0.0F, 0.0F, 0.0F, 1.0F);
+    } else {
+      auto child_image =
+          render_sequence_gpu_image(project, *child, child_time, depth + 1, profile, request_epoch,
+                                    provider, current_epoch, renderer, skipped_cpu_lut_curves);
+      if (request_epoch != current_epoch()) {
+        return stale_layer();
+      }
+      if (!child_image) {
+        return RenderResult<GpuLayer>::failure(*child_image.error);
+      }
+      auto child_cpu = renderer.download(*child_image.value);
+      if (!child_cpu) {
+        return RenderResult<GpuLayer>::failure(*child_cpu.error);
+      }
+      pixels = std::make_shared<CpuFrame>(
+          *std::get<std::shared_ptr<const CpuFrame>>(child_cpu.value->storage));
+    }
+    apply_clip_visual_effects(*pixels, mutable_clip, local_time, profile, use_gpu_color_grade);
   } else {
     AssetFrameRequest request{
         .asset_id = clip.asset_id,
@@ -257,6 +296,86 @@ render_transition_track(GpuRenderer& renderer, FrameProvider& provider,
             cpu_timeline_time_ratio(time - cut_time, transition.transition->range.end() - cut_time)));
   }
   return upload_cpu_result(renderer, blended_pixels, time, frame_duration);
+}
+
+[[nodiscard]] RenderResult<GpuImage> render_sequence_gpu_image(
+    const edit::Project& project, const edit::Sequence& sequence, const edit::Time time,
+    const int depth, const PreviewProfile& profile, const std::uint64_t request_epoch,
+    FrameProvider& provider, const std::function<std::uint64_t()>& current_epoch,
+    GpuRenderer& renderer, bool& skipped_cpu_lut_curves) {
+  if (depth > kMaximumNestedSequenceDepth) {
+    return unsupported_timeline("nested sequence depth exceeds the supported limit");
+  }
+
+  const int width = scaled_dimension(sequence.width, profile.scale);
+  const int height = scaled_dimension(sequence.height, profile.scale);
+  const edit::Time frame_duration = sequence.frame_rate.frameTime();
+
+  std::optional<GpuImage> accumulator;
+  for (const edit::Track& track : sequence.tracks) {
+    if (track.kind != edit::TrackKind::Video || track.muted || !track.visible) {
+      continue;
+    }
+
+    const auto transition = active_transition_for_track(sequence, track, time);
+    if (transition.has_value()) {
+      auto rendered = render_transition_track(renderer, provider, project, sequence, *transition,
+                                              time, depth, profile, request_epoch, width, height,
+                                              current_epoch,
+                                              accumulator.has_value() ? &*accumulator : nullptr,
+                                              skipped_cpu_lut_curves);
+      if (request_epoch != current_epoch()) {
+        return stale();
+      }
+      if (!rendered) {
+        return rendered;
+      }
+      accumulator = std::move(*rendered.value);
+      continue;
+    }
+
+    std::vector<GpuLayer> track_layers;
+    for (const edit::Clip& clip : track.clips) {
+      if (!clip.timeline_range.contains(time)) {
+        continue;
+      }
+      if (clip_has_unsupported_gpu_effects(clip.effects)) {
+        return unsupported_timeline(
+            "GPU timeline preview does not yet support enabled clip effects of this type");
+      }
+      auto layer = build_gpu_layer(project, clip, sequence, time, depth, profile, request_epoch,
+                                   width, height, provider, current_epoch, renderer,
+                                   skipped_cpu_lut_curves);
+      if (request_epoch != current_epoch()) {
+        return stale();
+      }
+      if (!layer) {
+        return RenderResult<GpuImage>::failure(*layer.error);
+      }
+      track_layers.push_back(std::move(*layer.value));
+    }
+    if (track_layers.empty()) {
+      continue;
+    }
+
+    auto rendered =
+        composite_layers(renderer, track_layers, width, height, sequence.width, sequence.height,
+                         time, frame_duration,
+                         accumulator.has_value() ? &*accumulator : nullptr);
+    if (request_epoch != current_epoch()) {
+      return stale();
+    }
+    if (!rendered) {
+      return rendered;
+    }
+    accumulator = std::move(*rendered.value);
+  }
+
+  if (!accumulator.has_value()) {
+    return composite_layers(renderer, {}, width, height, sequence.width, sequence.height, time,
+                            frame_duration, nullptr);
+  }
+  return RenderResult<GpuImage>::success(std::move(*accumulator));
 }
 
 } // namespace

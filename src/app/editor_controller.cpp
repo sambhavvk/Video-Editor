@@ -1119,6 +1119,15 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::applyWhiteBalanceSample);
   connect(&window_, &desktop_ui::EditorWindow::addTitleRequested, this,
           &EditorController::addTitleClip);
+  connect(&window_, &desktop_ui::EditorWindow::nestSelectedClipsRequested, this,
+          &EditorController::nestSelectedClips);
+  connect(&window_, &desktop_ui::EditorWindow::sequenceActivated, this,
+          [this](const QString& sequenceId) {
+            const auto parsed = parseId(sequenceId);
+            if (parsed.has_value()) {
+              setActiveSequence(*parsed);
+            }
+          });
   connect(&window_, &desktop_ui::EditorWindow::transitionActivated, this,
           [this](const QString& transitionId) { setTransitionSelection(transitionId); });
   connect(&window_, &desktop_ui::EditorWindow::transitionDurationEdited, this,
@@ -1149,10 +1158,24 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::selectAudioOutputDevice);
   connect(window_.audioMixer(), &desktop_ui::AudioMixerWidget::calibrateOutputLatencyRequested, this,
           &EditorController::calibrateOutputLatency);
+  connect(window_.audioMixer(), &desktop_ui::AudioMixerWidget::bufferSizeChanged, this,
+          &EditorController::setAudioBufferSize);
   connect(window_.audioMixer(), &desktop_ui::AudioMixerWidget::normalizationTargetChanged, this,
           &EditorController::setNormalizationTarget);
   connect(window_.timeline(), &desktop_ui::TimelineWidget::clipActivated, this,
-          [this](const QString& clipId) { setClipSelection({clipId}, clipId); });
+          [this](const QString& clipId) {
+            const edit::Sequence* sequence = currentSequence();
+            const auto parsed = parseId(clipId);
+            if (sequence != nullptr && parsed.has_value()) {
+              const edit::Clip* clip = edit::findClip(*sequence, *parsed);
+              if (clip != nullptr && clip->kind == edit::ClipKind::NestedSequence &&
+                  clip->nested_sequence_id.has_value()) {
+                setActiveSequence(*clip->nested_sequence_id);
+                return;
+              }
+            }
+            setClipSelection({clipId}, clipId);
+          });
   connect(window_.timeline(), &desktop_ui::TimelineWidget::clipInspectorRequested, this,
           [this](const QString& clipId) {
             setClipSelection({clipId}, clipId);
@@ -5846,6 +5869,231 @@ void EditorController::addTitleClip() {
               tr("Could not add a title"));
 }
 
+void EditorController::setActiveSequence(const edit::EntityId& sequence_id) {
+  if (!editor_) {
+    return;
+  }
+  const auto project = editor_->projectAt(editor_->revision());
+  const edit::Sequence* sequence = edit::findSequence(*project, sequence_id);
+  if (sequence == nullptr) {
+    return;
+  }
+  active_sequence_id_ = sequence_id;
+  const qint64 limit = timelineValue(edit::sequenceDuration(*sequence));
+  playhead_ = std::clamp(playhead_, 0LL, limit);
+  refreshViews();
+  requestPreview(PreviewRequestPolicy::Replace);
+}
+
+void EditorController::refreshSequenceTabs() {
+  if (!editor_) {
+    return;
+  }
+  const auto project = editor_->projectAt(editor_->revision());
+  QVector<desktop_ui::SequenceTabView> tabs;
+  tabs.reserve(static_cast<qsizetype>(project->sequences.size()));
+  for (const edit::Sequence& sequence : project->sequences) {
+    tabs.push_back({
+        .id = QString::fromStdString(sequence.id.toString()),
+        .displayName = QString::fromStdString(sequence.name),
+        .active = !active_sequence_id_.isNil() && sequence.id == active_sequence_id_,
+    });
+  }
+  if (active_sequence_id_.isNil() && !project->sequences.empty()) {
+    tabs.front().active = true;
+  }
+  window_.setSequenceTabs(tabs);
+}
+
+void EditorController::nestSelectedClips() {
+  const edit::Sequence* parent = currentSequence();
+  if (parent == nullptr) {
+    return;
+  }
+  const auto selected = selectedClipIds();
+  if (selected.empty()) {
+    window_.showTransientMessage(tr("Select one or more clips to nest"));
+    return;
+  }
+
+  struct CopiedClip final {
+    edit::Clip clip;
+    edit::TrackKind track_kind{edit::TrackKind::Video};
+    std::size_t track_ordinal{0};
+  };
+
+  const auto track_ordinal = [](const edit::Sequence& sequence, const edit::EntityId track_id,
+                                const edit::TrackKind kind) -> std::optional<std::size_t> {
+    std::size_t ordinal = 0;
+    for (const edit::Track& track : sequence.tracks) {
+      if (track.kind != kind) {
+        continue;
+      }
+      if (track.id == track_id) {
+        return ordinal;
+      }
+      ++ordinal;
+    }
+    return std::nullopt;
+  };
+
+  std::vector<CopiedClip> copied_clips;
+  copied_clips.reserve(selected.size());
+  std::unordered_set<edit::EntityId> remove_ids;
+  edit::Time min_start;
+  edit::Time max_end;
+  bool have_range = false;
+  edit::EntityId parent_video_track_id;
+
+  for (const edit::EntityId& selected_id : selected) {
+    if (remove_ids.contains(selected_id)) {
+      continue;
+    }
+    const std::vector<edit::EntityId> participants = expandLinkedSelection(*parent, {selected_id});
+    remove_ids.insert(participants.begin(), participants.end());
+    for (const edit::EntityId& participant : participants) {
+      const edit::Clip* clip = edit::findClip(*parent, participant);
+      if (clip == nullptr) {
+        continue;
+      }
+      const edit::Track* track = nullptr;
+      for (const edit::Track& candidate : parent->tracks) {
+        if (std::any_of(candidate.clips.begin(), candidate.clips.end(),
+                        [&participant](const edit::Clip& item) { return item.id == participant; })) {
+          track = &candidate;
+          break;
+        }
+      }
+      if (track == nullptr) {
+        continue;
+      }
+      if (track->locked) {
+        window_.showTransientMessage(tr("Cannot nest clips on locked tracks"));
+        return;
+      }
+      const auto ordinal = track_ordinal(*parent, track->id, track->kind);
+      if (!ordinal.has_value()) {
+        continue;
+      }
+      if (track->kind == edit::TrackKind::Video && parent_video_track_id.isNil()) {
+        parent_video_track_id = track->id;
+      }
+      edit::Clip copied = *clip;
+      copied.id = edit::EntityId::generate();
+      if (!have_range) {
+        min_start = copied.timeline_range.start;
+        max_end = copied.timeline_range.end();
+        have_range = true;
+      } else {
+        min_start = std::min(min_start, copied.timeline_range.start);
+        max_end = std::max(max_end, copied.timeline_range.end());
+      }
+      copied_clips.push_back(
+          {.clip = std::move(copied), .track_kind = track->kind, .track_ordinal = *ordinal});
+    }
+  }
+
+  if (copied_clips.empty() || !have_range) {
+    window_.showTransientMessage(tr("Select one or more clips to nest"));
+    return;
+  }
+  if (parent_video_track_id.isNil()) {
+    for (const edit::Track& track : parent->tracks) {
+      if (track.kind == edit::TrackKind::Video && !track.locked) {
+        parent_video_track_id = track.id;
+        break;
+      }
+    }
+  }
+  if (parent_video_track_id.isNil()) {
+    window_.showTransientMessage(tr("No unlocked video track for the nested clip"));
+    return;
+  }
+
+  edit::Sequence child;
+  child.name = "Nested sequence";
+  child.frame_rate = parent->frame_rate;
+  child.width = parent->width;
+  child.height = parent->height;
+  child.audio_sample_rate = parent->audio_sample_rate;
+  const edit::EntityId child_id = child.id;
+
+  const auto ensure_child_track = [&child](const edit::TrackKind kind,
+                                           const std::size_t ordinal) -> edit::EntityId {
+    std::size_t seen = 0;
+    for (const edit::Track& track : child.tracks) {
+      if (track.kind != kind) {
+        continue;
+      }
+      if (seen == ordinal) {
+        return track.id;
+      }
+      ++seen;
+    }
+    while (seen <= ordinal) {
+      edit::Track track;
+      track.kind = kind;
+      if (kind == edit::TrackKind::Video) {
+        track.name = "V" + std::to_string(seen + 1);
+      } else if (kind == edit::TrackKind::Audio) {
+        track.name = "A" + std::to_string(seen + 1);
+      } else {
+        track.name = "C" + std::to_string(seen + 1);
+      }
+      child.tracks.push_back(std::move(track));
+      if (seen == ordinal) {
+        return child.tracks.back().id;
+      }
+      ++seen;
+    }
+    return {};
+  };
+
+  std::map<std::pair<edit::TrackKind, std::size_t>, edit::EntityId> child_track_ids;
+  for (CopiedClip& entry : copied_clips) {
+    const auto key = std::make_pair(entry.track_kind, entry.track_ordinal);
+    if (!child_track_ids.contains(key)) {
+      child_track_ids[key] = ensure_child_track(entry.track_kind, entry.track_ordinal);
+    }
+    entry.clip.timeline_range = edit::TimeRange(entry.clip.timeline_range.start - min_start,
+                                                entry.clip.timeline_range.duration);
+    for (edit::Track& track : child.tracks) {
+      if (track.id == child_track_ids[key]) {
+        track.clips.push_back(std::move(entry.clip));
+        break;
+      }
+    }
+  }
+
+  const edit::Time combined_duration = max_end - min_start;
+  edit::Clip nest;
+  nest.kind = edit::ClipKind::NestedSequence;
+  nest.name = child.name;
+  nest.timeline_range = edit::TimeRange(min_start, combined_duration);
+  nest.source_range = edit::TimeRange(edit::Time{}, combined_duration);
+  nest.nested_sequence_id = child_id;
+
+  std::vector<edit::EditCommand> commands;
+  commands.reserve(remove_ids.size() + 2U);
+  commands.push_back({.operation = edit::AddSequenceCommand{.sequence = std::move(child)},
+                      .coalescing_key = {}});
+  for (const edit::EntityId& clip_id : remove_ids) {
+    commands.push_back({.operation = edit::RemoveClipCommand{.sequence_id = parent->id,
+                                                             .clip_id = clip_id,
+                                                             .ripple = false,
+                                                             .include_linked = false},
+                        .coalescing_key = {}});
+  }
+  commands.push_back({.operation = edit::InsertClipCommand{.sequence_id = parent->id,
+                                                           .track_id = parent_video_track_id,
+                                                           .clip = std::move(nest),
+                                                           .mode = edit::InsertMode::RejectOverlap},
+                      .coalescing_key = {}});
+  if (applyBatch(std::move(commands), tr("Could not nest the selected clips"))) {
+    setActiveSequence(child_id);
+  }
+}
+
 void EditorController::setTransitionSelection(const QString& transitionId) {
   selected_transition_id_ = parseId(transitionId);
 }
@@ -7036,6 +7284,7 @@ void EditorController::refreshTimelineView() {
                                            static_cast<qint64>(timeline_time_scale_) * 10);
   window_.setTimelineView(duration, timeline_time_scale_, std::move(tracks), std::move(clips),
                           std::move(markers), std::move(gaps));
+  refreshSequenceTabs();
   window_.timeline()->setSnapResolver([this](const desktop_ui::TimelineSnapRequest& request) {
     const edit::Sequence* current = currentSequence();
     if (current == nullptr) {
@@ -8049,7 +8298,15 @@ const edit::Sequence* EditorController::currentSequence() const {
     return nullptr;
   }
   const auto project = editor_->projectAt(editor_->revision());
-  return project->sequences.empty() ? nullptr : &project->sequences.front();
+  if (project->sequences.empty()) {
+    return nullptr;
+  }
+  if (!active_sequence_id_.isNil()) {
+    if (const edit::Sequence* active = edit::findSequence(*project, active_sequence_id_)) {
+      return active;
+    }
+  }
+  return &project->sequences.front();
 }
 
 const edit::Asset* EditorController::assetByTextId(const QString& text) const {
