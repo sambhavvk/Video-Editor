@@ -293,6 +293,23 @@ struct CaptionProposalView final {
   bool rejected{false};
 };
 
+enum class ExportJobStateView {
+  Queued,
+  Running,
+  Failed,
+  Succeeded,
+};
+
+struct ExportJobView final {
+  QString id;
+  QString destinationDisplay;
+  QString presetLabel;
+  ExportJobStateView state{ExportJobStateView::Queued};
+  int progressPercent{0};
+  std::uint64_t revision{0};
+  bool staleRevisionWarning{false};
+};
+
 } // namespace video_editor::desktop_ui
 
 Q_DECLARE_METATYPE(video_editor::desktop_ui::Workspace)

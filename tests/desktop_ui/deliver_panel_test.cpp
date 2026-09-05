@@ -5,11 +5,15 @@
 #include <QComboBox>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QProgressBar>
+#include <QPushButton>
 #include <QToolButton>
 #include <QTest>
 
 using video_editor::desktop_ui::DeliverPanelWidget;
+using video_editor::desktop_ui::ExportJobStateView;
+using video_editor::desktop_ui::ExportJobView;
 
 class DeliverPanelWidgetTest final : public QObject {
   Q_OBJECT
@@ -19,6 +23,7 @@ private slots:
   void updatesPresetNotesWhenPresetChanges();
   void usesCreatorReadyDefaults();
   void exposesRunningStateAndSummaries();
+  void setExportJobsPopulatesQueueList();
 };
 
 void DeliverPanelWidgetTest::loadsAllPlatformPresets() {
@@ -77,6 +82,41 @@ void DeliverPanelWidgetTest::exposesRunningStateAndSummaries() {
   QVERIFY(progress->isVisible());
   QCOMPARE(progress->value(), 50);
   QCOMPARE(button->text(), QStringLiteral("Cancel export"));
+}
+
+void DeliverPanelWidgetTest::setExportJobsPopulatesQueueList() {
+  DeliverPanelWidget panel;
+  panel.show();
+  QApplication::processEvents();
+
+  auto* list = panel.findChild<QListWidget*>(QStringLiteral("exportJobList"));
+  auto* remove_button = panel.findChild<QPushButton*>(QStringLiteral("removeQueuedExportButton"));
+  QVERIFY(list != nullptr);
+  QVERIFY(remove_button != nullptr);
+
+  QVector<ExportJobView> jobs;
+  ExportJobView running;
+  running.id = QStringLiteral("running-job");
+  running.destinationDisplay = QStringLiteral("/tmp/running.mkv");
+  running.presetLabel = QStringLiteral("master.ffv1");
+  running.state = ExportJobStateView::Running;
+  running.progressPercent = 42;
+  jobs.push_back(running);
+
+  ExportJobView queued;
+  queued.id = QStringLiteral("queued-job");
+  queued.destinationDisplay = QStringLiteral("/tmp/queued.mkv");
+  queued.presetLabel = QStringLiteral("master.ffv1");
+  queued.state = ExportJobStateView::Queued;
+  jobs.push_back(queued);
+  panel.setExportJobs(jobs);
+
+  QCOMPARE(list->count(), 2);
+  QVERIFY(list->parentWidget()->isVisible());
+  list->setCurrentRow(1);
+  QApplication::processEvents();
+  QVERIFY(remove_button->isEnabled());
+  QCOMPARE(list->item(1)->data(Qt::UserRole).toString(), QStringLiteral("queued-job"));
 }
 
 QTEST_MAIN(DeliverPanelWidgetTest)

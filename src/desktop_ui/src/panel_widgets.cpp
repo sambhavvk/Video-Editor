@@ -14,7 +14,7 @@
 #include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QGroupBox>
-#include <QHBoxLayout>
+#include <QHash>
 #include <QHeaderView>
 #include <QIcon>
 #include <QLabel>
@@ -31,9 +31,12 @@
 #include <QSlider>
 #include <QSpinBox>
 #include <QStackedWidget>
+#include <QStandardItemModel>
 #include <QStyle>
+#include <QSplitter>
 #include <QTableWidget>
 #include <QToolButton>
+#include <QTreeWidget>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -406,6 +409,10 @@ InspectorWidget::InspectorWidget(QWidget* parent) : QWidget(parent) {
   addField(tr("Scale"), QStringLiteral("scale"), QStringLiteral(" %"), -100'000, 2'000, 100, 1);
   addField(tr("Rotation"), QStringLiteral("rotation"), QStringLiteral("°"), -36000, 36000, 0, 0.1);
   addField(tr("Opacity"), QStringLiteral("opacity"), QStringLiteral(" %"), 0, 100, 100, 1);
+  addField(tr("Crop left"), QStringLiteral("cropLeft"), QStringLiteral(" %"), 0, 99.99, 0, 0.1);
+  addField(tr("Crop top"), QStringLiteral("cropTop"), QStringLiteral(" %"), 0, 99.99, 0, 0.1);
+  addField(tr("Crop right"), QStringLiteral("cropRight"), QStringLiteral(" %"), 0, 99.99, 0, 0.1);
+  addField(tr("Crop bottom"), QStringLiteral("cropBottom"), QStringLiteral(" %"), 0, 99.99, 0, 0.1);
   editorLayout->addWidget(essential);
 
   auto* audio = new QGroupBox(tr("Clip audio"), editor);
@@ -543,14 +550,6 @@ InspectorWidget::InspectorWidget(QWidget* parent) : QWidget(parent) {
                    0.1);
   addAdvancedField(tr("Anchor Y"), QStringLiteral("anchorY"), QStringLiteral(" %"), 0, 100, 50,
                    0.1);
-  addAdvancedField(tr("Crop left"), QStringLiteral("cropLeft"), QStringLiteral(" %"), 0, 99.99, 0,
-                   0.1);
-  addAdvancedField(tr("Crop top"), QStringLiteral("cropTop"), QStringLiteral(" %"), 0, 99.99, 0,
-                   0.1);
-  addAdvancedField(tr("Crop right"), QStringLiteral("cropRight"), QStringLiteral(" %"), 0, 99.99, 0,
-                   0.1);
-  addAdvancedField(tr("Crop bottom"), QStringLiteral("cropBottom"), QStringLiteral(" %"), 0, 99.99,
-                   0, 0.1);
   auto* blend = new QComboBox(advanced);
   blend->setObjectName(QStringLiteral("inspector.blendMode"));
   blend->setAccessibleName(tr("Blend mode"));
@@ -1077,10 +1076,15 @@ EffectsPanelWidget::EffectsPanelWidget(QWidget* parent) : QWidget(parent) {
       {QStringLiteral("video.lut"), tr("LUT"), tr("Video"), true},
       {QStringLiteral("video.crop"), tr("Crop"), tr("Video"), true},
       {QStringLiteral("video.gaussian_blur"), tr("Gaussian Blur"), tr("Video"), true},
+      {QStringLiteral("audio.eq"), tr("Parametric EQ"), tr("Audio"), false},
+      {QStringLiteral("audio.compressor"), tr("Compressor"), tr("Audio"), false},
+      {QStringLiteral("audio.dialogue_denoise"), tr("Dialogue Noise Reduction"), tr("Audio"), false},
+      {QStringLiteral("audio.limiter"), tr("Limiter"), tr("Audio"), false},
   });
 
   connect(search_, &QLineEdit::textChanged, this, &EffectsPanelWidget::applyFilter);
-  connect(list_, &QListWidget::itemDoubleClicked, this, [this] { activateCurrent(); });
+  // itemActivated covers Enter and double-click. Do not also connect
+  // itemDoubleClicked — on Linux both fire for a double-click and the effect is added twice.
   connect(list_, &QListWidget::itemActivated, this, [this] { activateCurrent(); });
 }
 
@@ -2546,6 +2550,22 @@ DeliverPanelWidget::DeliverPanelWidget(QWidget* parent) : QWidget(parent) {
   layout->addWidget(preset_notes_);
   layout->addStretch();
 
+  auto* queueGroup = new QGroupBox(tr("Export queue"), this);
+  auto* queueLayout = new QVBoxLayout(queueGroup);
+  export_job_list_ = new QListWidget(queueGroup);
+  export_job_list_->setObjectName(QStringLiteral("exportJobList"));
+  export_job_list_->setAccessibleName(tr("Export queue"));
+  export_job_list_->setSelectionMode(QAbstractItemView::SingleSelection);
+  queueLayout->addWidget(export_job_list_);
+
+  remove_queued_export_ = new QPushButton(tr("Remove from queue"), queueGroup);
+  remove_queued_export_->setObjectName(QStringLiteral("removeQueuedExportButton"));
+  remove_queued_export_->setAccessibleName(tr("Remove selected export from queue"));
+  remove_queued_export_->setEnabled(false);
+  queueLayout->addWidget(remove_queued_export_);
+  queueGroup->setVisible(false);
+  layout->addWidget(queueGroup);
+
   export_progress_ = new QProgressBar(this);
   export_progress_->setObjectName(QStringLiteral("exportProgress"));
   export_progress_->setAccessibleName(tr("Export progress"));
@@ -2565,6 +2585,18 @@ DeliverPanelWidget::DeliverPanelWidget(QWidget* parent) : QWidget(parent) {
 
   connect(browse_button_, &QToolButton::clicked, this,
           &DeliverPanelWidget::destinationBrowseRequested);
+  connect(export_job_list_, &QListWidget::itemSelectionChanged, this,
+          &DeliverPanelWidget::refreshExportJobSelection);
+  connect(remove_queued_export_, &QPushButton::clicked, this, [this] {
+    const QList<QListWidgetItem*> selected = export_job_list_->selectedItems();
+    if (selected.isEmpty()) {
+      return;
+    }
+    const QString job_id = selected.front()->data(Qt::UserRole).toString();
+    if (!job_id.isEmpty()) {
+      emit cancelQueuedExportRequested(job_id);
+    }
+  });
   connect(caption_mode_, &QComboBox::currentIndexChanged, this, [this] {
     const auto mode = captionModeKey();
     sidecar_format_->setEnabled(mode == QStringLiteral("sidecar") ||
@@ -2700,8 +2732,68 @@ void DeliverPanelWidget::setExportRunning(const bool running, const int percent)
                                             : tr("Export video master"));
 }
 
+void DeliverPanelWidget::setExportJobs(const QVector<ExportJobView>& jobs) {
+  if (export_job_list_ == nullptr) {
+    return;
+  }
+  export_job_list_->clear();
+  if (jobs.isEmpty()) {
+    if (auto* group = export_job_list_->parentWidget()) {
+      group->setVisible(false);
+    }
+    remove_queued_export_->setEnabled(false);
+    return;
+  }
+  if (auto* group = export_job_list_->parentWidget()) {
+    group->setVisible(true);
+  }
+  for (const ExportJobView& job : jobs) {
+    QString label;
+    switch (job.state) {
+    case ExportJobStateView::Queued:
+      label = tr("Queued · %1 · %2").arg(job.presetLabel, job.destinationDisplay);
+      break;
+    case ExportJobStateView::Running:
+      label = tr("Running · %1% · %2 · %3")
+                  .arg(job.progressPercent)
+                  .arg(job.presetLabel, job.destinationDisplay);
+      break;
+    case ExportJobStateView::Failed:
+      label = tr("Failed · %1 · %2").arg(job.presetLabel, job.destinationDisplay);
+      break;
+    case ExportJobStateView::Succeeded:
+      label = tr("Succeeded · %1 · %2").arg(job.presetLabel, job.destinationDisplay);
+      break;
+    }
+    if (job.staleRevisionWarning) {
+      label += tr(" · older snapshot");
+    }
+    auto* item = new QListWidgetItem(label, export_job_list_);
+    item->setData(Qt::UserRole, job.id);
+    item->setData(Qt::UserRole + 1, static_cast<int>(job.state));
+  }
+  refreshExportJobSelection();
+}
+
+void DeliverPanelWidget::refreshExportJobSelection() {
+  if (export_job_list_ == nullptr || remove_queued_export_ == nullptr) {
+    return;
+  }
+  const QList<QListWidgetItem*> selected = export_job_list_->selectedItems();
+  bool can_remove = false;
+  if (!selected.isEmpty()) {
+    const auto state = static_cast<ExportJobStateView>(selected.front()->data(Qt::UserRole + 1).toInt());
+    can_remove = state == ExportJobStateView::Queued;
+  }
+  remove_queued_export_->setEnabled(can_remove);
+}
+
 QString DeliverPanelWidget::captionModeKey() const {
   return caption_mode_->currentData().toString();
+}
+
+QString DeliverPanelWidget::creatorVideoCodecKey() const {
+  return video_codec_->currentData().toString();
 }
 
 QString DeliverPanelWidget::sidecarFormatKey() const {

@@ -43,6 +43,10 @@
 
 #include <QtConcurrent/QtConcurrentRun>
 
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QByteArray>
 #include <QCloseEvent>
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -69,12 +73,14 @@
 #include <QTimeZone>
 
 #include <algorithm>
+#include <map>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <limits>
 #include <numeric>
+#include <numbers>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -182,6 +188,45 @@ namespace {
 constexpr qint64 kUiTimescale = 48'000;
 constexpr std::size_t kPreviewCacheBytes = 256U * 1024U * 1024U;
 constexpr qint64 kModelNetworkReadBufferBytes = 1'048'576;
+
+[[nodiscard]] QRectF viewerOverlayBounds(const edit::Transform& transform, const double source_width,
+                                         const double source_height) {
+  if (source_width <= 0.0 || source_height <= 0.0) {
+    return {};
+  }
+  const double anchor_x = transform.anchor_x * (source_width - 1.0);
+  const double anchor_y = transform.anchor_y * (source_height - 1.0);
+  const double source_left = transform.crop_left * source_width;
+  const double source_right = (1.0 - transform.crop_right) * source_width;
+  const double source_top = transform.crop_top * source_height;
+  const double source_bottom = (1.0 - transform.crop_bottom) * source_height;
+  const double radians = transform.rotation_degrees * std::numbers::pi / 180.0;
+  const double cosine = std::cos(radians);
+  const double sine = std::sin(radians);
+
+  const auto map_corner = [&](const double source_x, const double source_y) {
+    const double unrotated_x = (source_x - anchor_x) * transform.scale.x;
+    const double unrotated_y = (source_y - anchor_y) * transform.scale.y;
+    const double delta_x = cosine * unrotated_x - sine * unrotated_y;
+    const double delta_y = sine * unrotated_x + cosine * unrotated_y;
+    return QPointF{transform.position.x + delta_x, transform.position.y + delta_y};
+  };
+
+  const QPointF corners[4] = {map_corner(source_left, source_top), map_corner(source_right, source_top),
+                              map_corner(source_right, source_bottom),
+                              map_corner(source_left, source_bottom)};
+  double min_x = corners[0].x();
+  double max_x = corners[0].x();
+  double min_y = corners[0].y();
+  double max_y = corners[0].y();
+  for (int index = 1; index < 4; ++index) {
+    min_x = std::min(min_x, corners[index].x());
+    max_x = std::max(max_x, corners[index].x());
+    min_y = std::min(min_y, corners[index].y());
+    max_y = std::max(max_y, corners[index].y());
+  }
+  return QRectF(QPointF{min_x, min_y}, QPointF{max_x, max_y});
+}
 
 [[nodiscard]] QString audioCalibratedLatencySettingsKey(const QString& deviceId) {
   return QStringLiteral("audio/calibratedLatencyFrames/") +
@@ -505,6 +550,22 @@ QString gpuActiveTitle(const render::GpuCapabilities& capabilities) {
     title += QObject::tr(" · present");
   }
   return title;
+}
+
+[[nodiscard]] bool gpuRendererUsable(const std::shared_ptr<render::GpuRenderer>& gpu) {
+  if (gpu == nullptr) {
+    return false;
+  }
+  const render::GpuCapabilities capabilities = gpu->capabilities();
+  return capabilities.available() && capabilities.offscreen_rendering;
+}
+
+[[nodiscard]] QString gpuCapabilitiesDiagnostic(const std::shared_ptr<render::GpuRenderer>& gpu) {
+  if (gpu == nullptr) {
+    return QObject::tr("GPU renderer creation returned no device");
+  }
+  const QString diagnostic = QString::fromStdString(gpu->capabilities().diagnostic);
+  return diagnostic.isEmpty() ? QObject::tr("GPU rendering is unavailable") : diagnostic;
 }
 
 [[nodiscard]] render::GpuOptions gpuOptionsForPresentation(
@@ -997,6 +1058,8 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           });
   connect(window_.deliverPanel(), &desktop_ui::DeliverPanelWidget::cancelRequested, this,
           &EditorController::cancelVideoExport);
+  connect(window_.deliverPanel(), &desktop_ui::DeliverPanelWidget::cancelQueuedExportRequested, this,
+          &EditorController::cancelQueuedExport);
   connect(window_.deliverPanel(), &desktop_ui::DeliverPanelWidget::destinationBrowseRequested, this,
           [this] {
             bool numeric = false;
@@ -1746,12 +1809,21 @@ void EditorController::installProject(edit::Project project, std::filesystem::pa
   caption_search_.clear();
   selected_clip_ids_.clear();
   active_clip_id_.reset();
+  active_sequence_id_ = {};
   selected_marker_id_.reset();
   selected_gap_key_.clear();
   timeline_time_scale_ = static_cast<std::uint32_t>(kUiTimescale);
   playhead_ = 0;
   media_paths_updated_on_install_ = reconstructMediaState();
+  migrateCacheMetadataToProject();
+  const auto installed = editor_->projectAt(editor_->revision());
+  if (!installed->sequences.empty()) {
+    active_sequence_id_ = installed->sequences.front().id;
+  }
+  clearExportQueueMemory();
   refreshViews();
+  loadExportQueueSidecar();
+  pumpExportQueue();
 }
 
 void EditorController::saveProject() {
@@ -2069,24 +2141,226 @@ void EditorController::cancelVideoExport() {
   window_.showTransientMessage(tr("Cancelling export…"));
 }
 
-bool EditorController::startVideoExport(const std::filesystem::path& destination,
-                                        const QString& presetId, const bool overwriteExisting) {
-  if (export_in_flight_) {
-    window_.showTransientMessage(tr("An export is already running"));
-    return false;
+std::size_t EditorController::exportQueueCount() const noexcept {
+  return static_cast<std::size_t>(std::count_if(
+      export_jobs_.begin(), export_jobs_.end(), [](const ExportJobRecord& job) {
+        return job.state == ExportJobState::Queued || job.state == ExportJobState::Running;
+      }));
+}
+
+std::size_t EditorController::queuedExportCount() const noexcept {
+  return static_cast<std::size_t>(std::count_if(
+      export_jobs_.begin(), export_jobs_.end(),
+      [](const ExportJobRecord& job) { return job.state == ExportJobState::Queued; }));
+}
+
+void EditorController::cancelQueuedExport(const QString& jobId) {
+  const auto found = std::find_if(export_jobs_.begin(), export_jobs_.end(),
+                                  [&](const ExportJobRecord& job) {
+                                    return job.job_id == jobId &&
+                                           job.state == ExportJobState::Queued;
+                                  });
+  if (found == export_jobs_.end()) {
+    return;
   }
+  removeExportJobSnapshot(found->snapshot_path);
+  export_jobs_.erase(found);
+  persistExportQueueSidecar();
+  refreshExportJobViews();
+  window_.showTransientMessage(tr("Removed queued export"));
+}
+
+std::optional<std::filesystem::path> EditorController::exportQueueSidecarPath() const {
+  if (!checkpoint_path_.has_value()) {
+    return std::nullopt;
+  }
+  const auto& checkpoint = *checkpoint_path_;
+  auto sidecar = checkpoint.parent_path() / (checkpoint.stem().string() + ".export-queue.json");
+  return sidecar;
+}
+
+std::filesystem::path EditorController::exportSnapshotDirectory() const {
+  if (checkpoint_path_.has_value()) {
+    return checkpoint_path_->parent_path() /
+           (checkpoint_path_->stem().string() + ".export-queue");
+  }
+  return pathFromQString(
+      QDir::temp().filePath(QStringLiteral("video-editor-export-queue")));
+}
+
+void EditorController::removeExportJobSnapshot(const std::filesystem::path& snapshot_path) const {
+  if (snapshot_path.empty()) {
+    return;
+  }
+  std::error_code ignored;
+  std::filesystem::remove(snapshot_path, ignored);
+}
+
+void EditorController::clearExportQueueMemory() {
+  export_jobs_.clear();
+  running_export_job_id_.clear();
+  refreshExportJobViews();
+}
+
+void EditorController::persistExportQueueSidecar() const {
+  const auto sidecar_path = exportQueueSidecarPath();
+  if (!sidecar_path.has_value()) {
+    return;
+  }
+  QJsonArray jobs;
+  for (const ExportJobRecord& job : export_jobs_) {
+    if (job.state == ExportJobState::Running) {
+      continue;
+    }
+    QJsonObject object;
+    object.insert(QStringLiteral("job_id"), job.job_id);
+    object.insert(QStringLiteral("bound_revision"),
+                  static_cast<qint64>(job.bound_revision));
+    object.insert(QStringLiteral("snapshot_path"), qStringFromPath(job.snapshot_path));
+    object.insert(QStringLiteral("destination"), qStringFromPath(job.destination));
+    object.insert(QStringLiteral("preset_id"), job.preset_id);
+    object.insert(QStringLiteral("options_b64"),
+                  QString::fromLatin1(
+                      QByteArray(job.options_bytes.data(),
+                                 static_cast<int>(job.options_bytes.size()))
+                          .toBase64()));
+    switch (job.state) {
+    case ExportJobState::Queued:
+      object.insert(QStringLiteral("state"), QStringLiteral("queued"));
+      break;
+    case ExportJobState::Failed:
+      object.insert(QStringLiteral("state"), QStringLiteral("failed"));
+      object.insert(QStringLiteral("error"), job.error);
+      break;
+    case ExportJobState::Running:
+      break;
+    }
+    jobs.append(object);
+  }
+  QJsonObject root;
+  root.insert(QStringLiteral("version"), 1);
+  root.insert(QStringLiteral("jobs"), jobs);
+  const QByteArray payload = QJsonDocument(root).toJson(QJsonDocument::Compact);
+
+  QSaveFile output(qStringFromPath(*sidecar_path));
+  if (!output.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
+      output.write(payload) != payload.size() || !output.commit()) {
+    return;
+  }
+}
+
+void EditorController::loadExportQueueSidecar() {
+  export_jobs_.clear();
+  running_export_job_id_.clear();
+  const auto sidecar_path = exportQueueSidecarPath();
+  if (!sidecar_path.has_value()) {
+    refreshExportJobViews();
+    return;
+  }
+  QFile file(qStringFromPath(*sidecar_path));
+  if (!file.open(QIODevice::ReadOnly)) {
+    refreshExportJobViews();
+    return;
+  }
+  const QJsonDocument document = QJsonDocument::fromJson(file.readAll());
+  if (!document.isObject()) {
+    refreshExportJobViews();
+    return;
+  }
+  const QJsonArray jobs = document.object().value(QStringLiteral("jobs")).toArray();
+  for (const QJsonValue& value : jobs) {
+    if (!value.isObject()) {
+      continue;
+    }
+    const QJsonObject object = value.toObject();
+    ExportJobRecord job;
+    job.job_id = object.value(QStringLiteral("job_id")).toString();
+    job.bound_revision =
+        static_cast<std::uint64_t>(object.value(QStringLiteral("bound_revision")).toInteger(0));
+    job.snapshot_path = pathFromQString(object.value(QStringLiteral("snapshot_path")).toString());
+    job.destination = pathFromQString(object.value(QStringLiteral("destination")).toString());
+    job.preset_id = object.value(QStringLiteral("preset_id")).toString();
+    const QByteArray options_bytes =
+        QByteArray::fromBase64(object.value(QStringLiteral("options_b64")).toString().toLatin1());
+    job.options_bytes.assign(options_bytes.constData(),
+                             static_cast<std::size_t>(options_bytes.size()));
+    const QString state = object.value(QStringLiteral("state")).toString();
+    if (state == QStringLiteral("failed")) {
+      job.state = ExportJobState::Failed;
+      job.error = object.value(QStringLiteral("error")).toString();
+    } else {
+      job.state = ExportJobState::Queued;
+    }
+    if (job.job_id.isEmpty() || job.snapshot_path.empty() || job.destination.empty() ||
+        job.options_bytes.empty()) {
+      continue;
+    }
+    if (!std::filesystem::exists(job.snapshot_path)) {
+      job.state = ExportJobState::Failed;
+      job.error = tr("Export snapshot is missing");
+    }
+    export_jobs_.push_back(std::move(job));
+  }
+  refreshExportJobViews();
+}
+
+void EditorController::refreshExportJobViews() {
+  if (!editor_) {
+    return;
+  }
+  QVector<desktop_ui::ExportJobView> views;
+  views.reserve(static_cast<qsizetype>(export_jobs_.size()));
+  const std::uint64_t current_revision = editor_->revision().value;
+  for (ExportJobRecord& job : export_jobs_) {
+    desktop_ui::ExportJobView view;
+    view.id = job.job_id;
+    view.destinationDisplay = qStringFromPath(job.destination);
+    view.presetLabel = job.preset_id;
+    view.revision = job.bound_revision;
+    view.progressPercent = job.progress_percent;
+    view.staleRevisionWarning =
+        current_revision > job.bound_revision && job.state == ExportJobState::Queued;
+    if (view.staleRevisionWarning && !job.stale_warning_shown) {
+      job.stale_warning_shown = true;
+      window_.showTransientMessage(
+          tr("Queued export will render the project snapshot captured at revision %1, not the "
+             "current timeline.")
+              .arg(job.bound_revision),
+          8'000);
+    }
+    switch (job.state) {
+    case ExportJobState::Queued:
+      view.state = desktop_ui::ExportJobStateView::Queued;
+      break;
+    case ExportJobState::Running:
+      view.state = desktop_ui::ExportJobStateView::Running;
+      break;
+    case ExportJobState::Failed:
+      view.state = desktop_ui::ExportJobStateView::Failed;
+      break;
+    }
+    views.push_back(view);
+  }
+  window_.deliverPanel()->setExportJobs(views);
+}
+
+EditorController::ExportRequestBuild EditorController::buildExportRequest(
+    const QString& presetId, const bool overwriteExisting) const {
+  ExportRequestBuild result;
   const edit::Sequence* sequence = currentSequence();
   if (sequence == nullptr || !sequenceHasClips(*sequence)) {
-    showError(tr("Could not export"), tr("Add at least one clip to the timeline first."));
-    return false;
+    result.error_title = tr("Could not export");
+    result.error_message = tr("Add at least one clip to the timeline first.");
+    return result;
   }
 
   bool numeric_preset = false;
   const auto parsed_preset = presetId.toInt(&numeric_preset);
   const bool legacy_prores = presetId == QStringLiteral("master.prores");
   if (numeric_preset && !isKnownPlatformPreset(parsed_preset)) {
-    showError(tr("Could not export"), tr("The selected export preset is not recognized."));
-    return false;
+    result.error_title = tr("Could not export");
+    result.error_message = tr("The selected export preset is not recognized.");
+    return result;
   }
   const auto platform = numeric_preset && isKnownPlatformPreset(parsed_preset)
                             ? static_cast<export_service::PlatformPreset>(parsed_preset)
@@ -2097,37 +2371,17 @@ bool EditorController::startVideoExport(const std::filesystem::path& destination
   const export_service::PresetInfo preset_details = export_service::preset_info(preset);
   const bool audio_only = platform == export_service::PlatformPreset::PodcastAudioOnly;
   if (!audio_only && !preset_details.available) {
-    showError(tr("Encoder unavailable"),
-              tr("The selected %1 encoder is not available in this build.")
-                  .arg(QString::fromStdString(preset_details.display_name)));
-    return false;
+    result.error_title = tr("Encoder unavailable");
+    result.error_message = tr("The selected %1 encoder is not available in this build.")
+                               .arg(QString::fromStdString(preset_details.display_name));
+    return result;
   }
 
   const auto project = editor_->projectAt(editor_->revision());
   if (!project) {
-    showError(tr("Could not export"), tr("The current project revision is unavailable."));
-    return false;
-  }
-  project_codec::ProjectBytes checkpoint_bytes;
-  try {
-    checkpoint_bytes = project_codec::serialize_project(*project);
-  } catch (const std::exception& exception) {
-    showError(tr("Could not export"), QString::fromStdString(exception.what()));
-    return false;
-  }
-
-  const auto checkpoint_path =
-      pathFromQString(QDir::temp().filePath(QStringLiteral("video-editor-export-%1.veproj")
-                                                .arg(QString::fromStdString(jobs::make_job_id()))));
-  {
-    QFile checkpoint_file(qStringFromPath(checkpoint_path));
-    if (!checkpoint_file.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
-        checkpoint_file.write(reinterpret_cast<const char*>(checkpoint_bytes.data()),
-                              static_cast<qint64>(checkpoint_bytes.size())) !=
-            static_cast<qint64>(checkpoint_bytes.size())) {
-      showError(tr("Could not export"), tr("The export checkpoint could not be written."));
-      return false;
-    }
+    result.error_title = tr("Could not export");
+    result.error_message = tr("The current project revision is unavailable.");
+    return result;
   }
 
   const auto panel = window_.deliverPanel();
@@ -2146,29 +2400,125 @@ bool EditorController::startVideoExport(const std::filesystem::path& destination
     options.set_video_quality(*video_quality);
   }
   options.set_prefer_hardware(panel->preferHardwareEncoder());
+  options.set_video_codec(panel->creatorVideoCodecKey().toStdString());
   options.set_include_audio(true);
   options.set_overwrite_existing(overwriteExisting);
   options.set_sequence_id(sequence->id.toString());
 
-  jobs::v1::JobSpec spec;
-  spec.set_job_id(jobs::make_job_id());
-  spec.set_kind(jobs::v1::JOB_KIND_EXPORT);
-  spec.set_project_revision(editor_->revision().value);
-  spec.set_project_checkpoint(utf8StringFromPath(checkpoint_path));
-  spec.set_output_uri(utf8StringFromPath(destination));
-  spec.set_preset_id("video-editor.export.creator.v1");
-  if (!options.SerializeToString(spec.mutable_options())) {
-    std::error_code ignored;
-    std::filesystem::remove(checkpoint_path, ignored);
-    showError(tr("Could not export"), tr("The export options could not be encoded."));
+  result.ok = true;
+  result.options = std::move(options);
+  result.bound_revision = editor_->revision().value;
+  result.sequence_id = sequence->id.toString();
+  return result;
+}
+
+bool EditorController::writeExportSnapshot(ExportJobRecord& record) const {
+  const auto project = editor_->projectAt(edit::Revision{.value = record.bound_revision});
+  if (!project) {
+    return false;
+  }
+  project_codec::ProjectBytes checkpoint_bytes;
+  try {
+    checkpoint_bytes = project_codec::serialize_project(*project);
+  } catch (...) {
     return false;
   }
 
-  export_checkpoint_path_ = checkpoint_path;
-  export_destination_ = destination;
+  const auto snapshot_directory = exportSnapshotDirectory();
+  std::error_code ignored;
+  std::filesystem::create_directories(snapshot_directory, ignored);
+  const auto snapshot_path =
+      snapshot_directory / (record.job_id.toStdString() + ".veproj");
+  {
+    QSaveFile checkpoint_file(qStringFromPath(snapshot_path));
+    if (!checkpoint_file.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
+        checkpoint_file.write(reinterpret_cast<const char*>(checkpoint_bytes.data()),
+                              static_cast<qint64>(checkpoint_bytes.size())) !=
+            static_cast<qint64>(checkpoint_bytes.size()) ||
+        !checkpoint_file.commit()) {
+      return false;
+    }
+  }
+  record.snapshot_path = snapshot_path;
+  return true;
+}
+
+bool EditorController::enqueueOrStartExport(ExportJobRecord record) {
+  if (export_in_flight_ && record.destination == export_destination_) {
+    showError(tr("Could not export"),
+              tr("An export is already writing to that destination."));
+    return false;
+  }
+  for (const ExportJobRecord& existing : export_jobs_) {
+    if (existing.destination == record.destination &&
+        (existing.state == ExportJobState::Queued || existing.state == ExportJobState::Running)) {
+      showError(tr("Could not export"),
+                tr("Another queued export already targets that destination."));
+      return false;
+    }
+  }
+
+  record.job_id = QString::fromStdString(jobs::make_job_id());
+  if (!writeExportSnapshot(record)) {
+    showError(tr("Could not export"), tr("The export checkpoint could not be written."));
+    return false;
+  }
+
+  if (export_in_flight_) {
+    record.state = ExportJobState::Queued;
+    export_jobs_.push_back(std::move(record));
+    persistExportQueueSidecar();
+    refreshExportJobViews();
+    window_.showTransientMessage(tr("Export queued"));
+    return true;
+  }
+
+  record.state = ExportJobState::Running;
+  export_jobs_.push_back(record);
+  return launchExportJob(export_jobs_.size() - 1);
+}
+
+bool EditorController::launchExportJob(const std::size_t job_index) {
+  if (job_index >= export_jobs_.size() || export_in_flight_) {
+    return false;
+  }
+  ExportJobRecord& record = export_jobs_[job_index];
+  if (record.state != ExportJobState::Running) {
+    record.state = ExportJobState::Running;
+  }
+
+  jobs::v1::ExportOptions options;
+  if (!options.ParseFromString(record.options_bytes)) {
+    record.state = ExportJobState::Failed;
+    record.error = tr("The export options could not be decoded.");
+    persistExportQueueSidecar();
+    refreshExportJobViews();
+    return false;
+  }
+
+  jobs::v1::JobSpec spec;
+  spec.set_job_id(record.job_id.toStdString());
+  spec.set_kind(jobs::v1::JOB_KIND_EXPORT);
+  spec.set_project_revision(record.bound_revision);
+  spec.set_project_checkpoint(utf8StringFromPath(record.snapshot_path));
+  spec.set_output_uri(utf8StringFromPath(record.destination));
+  spec.set_preset_id("video-editor.export.creator.v1");
+  if (!options.SerializeToString(spec.mutable_options())) {
+    record.state = ExportJobState::Failed;
+    record.error = tr("The export options could not be encoded.");
+    persistExportQueueSidecar();
+    refreshExportJobViews();
+    return false;
+  }
+
+  export_checkpoint_path_ = record.snapshot_path;
+  export_destination_ = record.destination;
   export_cancel_requested_ = false;
   export_in_flight_ = true;
+  running_export_job_id_ = record.job_id;
+  record.progress_percent = 0;
   window_.deliverPanel()->setExportRunning(true, 0);
+  refreshExportJobViews();
   window_.showTransientMessage(
       tr("Exporting full-quality video and 48 kHz audio from original media…"), 0);
 
@@ -2181,7 +2531,15 @@ bool EditorController::startVideoExport(const std::filesystem::path& destination
       if (job.state() == jobs::v1::JOB_STATE_RUNNING) {
         const int percent =
             std::clamp(static_cast<int>(std::lround(job.progress() * 100.0)), 0, 100);
+        const auto running_it = std::find_if(
+            export_jobs_.begin(), export_jobs_.end(), [&](const ExportJobRecord& job_record) {
+              return job_record.job_id == running_export_job_id_;
+            });
+        if (running_it != export_jobs_.end()) {
+          running_it->progress_percent = percent;
+        }
         window_.deliverPanel()->setExportRunning(true, percent);
+        refreshExportJobViews();
         const auto fallback = job.metadata().find("restarted_after_hardware_fallback");
         if (job.phase() == "hardware-fallback" ||
             (fallback != job.metadata().end() && fallback->second == "true")) {
@@ -2253,12 +2611,61 @@ bool EditorController::startVideoExport(const std::filesystem::path& destination
     export_session_ = nullptr;
     session->deleteLater();
     export_in_flight_ = false;
+    running_export_job_id_.clear();
     window_.deliverPanel()->setExportRunning(false, 0);
     clearExportCheckpoint();
+    if (job_index < export_jobs_.size()) {
+      export_jobs_[job_index].state = ExportJobState::Failed;
+      export_jobs_[job_index].error =
+          tr("The export worker request could not be started.");
+    }
+    persistExportQueueSidecar();
+    refreshExportJobViews();
     showError(tr("Could not export"), tr("The export worker request could not be started."));
     return false;
   }
+  persistExportQueueSidecar();
   return true;
+}
+
+void EditorController::pumpExportQueue() {
+  if (export_in_flight_) {
+    return;
+  }
+  for (std::size_t index = 0; index < export_jobs_.size(); ++index) {
+    ExportJobRecord& job = export_jobs_[index];
+    if (job.state != ExportJobState::Queued) {
+      continue;
+    }
+    if (job.destination == export_destination_) {
+      continue;
+    }
+    job.state = ExportJobState::Running;
+    if (launchExportJob(index)) {
+      return;
+    }
+    pumpExportQueue();
+    return;
+  }
+}
+
+bool EditorController::startVideoExport(const std::filesystem::path& destination,
+                                        const QString& presetId, const bool overwriteExisting) {
+  const ExportRequestBuild request = buildExportRequest(presetId, overwriteExisting);
+  if (!request.ok) {
+    showError(request.error_title, request.error_message);
+    return false;
+  }
+
+  ExportJobRecord record;
+  record.destination = destination;
+  record.preset_id = presetId;
+  record.bound_revision = request.bound_revision;
+  if (!request.options.SerializeToString(&record.options_bytes)) {
+    showError(tr("Could not export"), tr("The export options could not be encoded."));
+    return false;
+  }
+  return enqueueOrStartExport(std::move(record));
 }
 
 void EditorController::importPaths(const QStringList& paths) {
@@ -2599,6 +3006,28 @@ void EditorController::finishVideoExport(const VideoExportOutcome& outcome) {
   const QString output_display = qStringFromPath(export_destination_);
   clearExportCheckpoint();
   window_.deliverPanel()->setExportRunning(false, 0);
+
+  const auto running_it = std::find_if(
+      export_jobs_.begin(), export_jobs_.end(),
+      [&](const ExportJobRecord& job) { return job.job_id == running_export_job_id_; });
+  if (running_it != export_jobs_.end()) {
+    if (outcome.succeeded) {
+      removeExportJobSnapshot(running_it->snapshot_path);
+      export_jobs_.erase(running_it);
+    } else if (outcome.cancelled) {
+      removeExportJobSnapshot(running_it->snapshot_path);
+      export_jobs_.erase(running_it);
+    } else {
+      running_it->state = ExportJobState::Failed;
+      running_it->error = outcome.error;
+      running_it->progress_percent = 0;
+    }
+  }
+  running_export_job_id_.clear();
+  export_destination_.clear();
+  persistExportQueueSidecar();
+  refreshExportJobViews();
+
   if (outcome.succeeded) {
     const QString message = tr("Export complete · %1 video frames · %2 audio samples")
                                 .arg(outcome.frame_count)
@@ -2613,6 +3042,8 @@ void EditorController::finishVideoExport(const VideoExportOutcome& outcome) {
     showError(tr("Export failed"), outcome.error);
     emit videoExportFinished(false, output_display, outcome.error);
   }
+
+  pumpExportQueue();
 }
 
 void EditorController::clearExportCheckpoint() {
@@ -4953,12 +5384,6 @@ void EditorController::addEffect(const QString& effectId) {
     window_.showTransientMessage(tr("Transitions are added by dragging them between clips"));
     return;
   }
-  if (effectId.startsWith(QStringLiteral("audio."))) {
-    window_.showTransientMessage(
-        tr("Audio clip effects belong in the Audio Mixer. Open Audio Mixer to add EQ, compressor, "
-           "denoise, or limiter."));
-    return;
-  }
   const edit::Clip* clip = edit::findClip(*sequence, *active_clip_id_);
   if (clip == nullptr) {
     return;
@@ -4975,7 +5400,12 @@ void EditorController::addEffect(const QString& effectId) {
     }
     cacheLutFile(std::filesystem::path{path.toStdString()});
   }
-  if (clip->kind != edit::ClipKind::Video && clip->kind != edit::ClipKind::Title) {
+  if (effectId.startsWith(QStringLiteral("audio."))) {
+    if (clip->kind != edit::ClipKind::Audio) {
+      window_.showTransientMessage(tr("Select an audio clip for this effect"));
+      return;
+    }
+  } else if (clip->kind != edit::ClipKind::Video && clip->kind != edit::ClipKind::Title) {
     window_.showTransientMessage(tr("Select a video clip for this effect"));
     return;
   }
@@ -7072,11 +7502,13 @@ void EditorController::syncPreviewCacheIdentity() {
 }
 
 void EditorController::startGpuInitialization() {
-  if (gpu_fallback_latched_ || gpu_init_watcher_.isRunning() || gpu_init_started_) {
+  if (gpu_fallback_latched_ || gpu_init_watcher_.isRunning() || gpuRendererUsable(gpu_renderer_)) {
     return;
   }
   gpu_init_started_ = true;
+  gpu_offscreen_attempted_ = true;
   gpu_init_attach_generation_ = ++gpu_init_generation_;
+  SessionEventLog::instance().log_backend("gpuInit", "start offscreen");
   gpu_init_watcher_.setFuture(QtConcurrent::run([] {
     auto gpu = render::GpuRenderer::create();
     return std::shared_ptr<render::GpuRenderer>(std::move(gpu));
@@ -7130,26 +7562,52 @@ void EditorController::attachGpuRenderer(std::shared_ptr<render::GpuRenderer> gp
   if (gpu_fallback_latched_) {
     return;
   }
-  if (gpu == nullptr) {
-    gpu_fallback_latched_ = true;
-    gpu_renderer_.reset();
-    gpu_timeline_renderer_.reset();
-    window_.programViewer()->setTitle(tr("Program · CPU"));
+  if (gpuRendererUsable(gpu)) {
+    gpu_renderer_ = std::move(gpu);
+    gpu_timeline_renderer_ =
+        std::make_shared<render::GpuTimelineRenderer>(frame_provider_, gpu_renderer_);
+    if (preview_cache_) {
+      preview_cache_->clear();
+    }
+    const render::GpuCapabilities capabilities = gpu_renderer_->capabilities();
+    window_.programViewer()->setTitle(gpuReadyTitle(capabilities));
+    SessionEventLog::instance().log_backend(
+        "gpuInit",
+        std::string("success backend=") +
+            gpuBackendName(capabilities.backend).toStdString() +
+            (capabilities.presentation ? " present=1" : " present=0") +
+            (capabilities.diagnostic.empty() ? "" : " diagnostic=" + capabilities.diagnostic));
+    requestPreview();
     return;
   }
-  const render::GpuCapabilities capabilities = gpu->capabilities();
-  if (!capabilities.available() || !capabilities.offscreen_rendering) {
-    gpu_fallback_latched_ = true;
-    gpu_renderer_.reset();
-    gpu_timeline_renderer_.reset();
-    window_.programViewer()->setTitle(tr("Program · CPU"));
+
+  const QString diagnostic = gpuCapabilitiesDiagnostic(gpu);
+  SessionEventLog::instance().log_backend("gpuInit",
+                                          "unavailable " + diagnostic.toStdString());
+
+  if (gpuRendererUsable(gpu_renderer_)) {
+    window_.showTransientMessage(
+        tr("Native GPU presentation is unavailable; keeping offscreen GPU preview: %1")
+            .arg(diagnostic),
+        8'000);
+    window_.programViewer()->setTitle(gpuReadyTitle(gpu_renderer_->capabilities()));
     return;
   }
-  gpu_renderer_ = std::move(gpu);
-  gpu_timeline_renderer_ =
-      std::make_shared<render::GpuTimelineRenderer>(frame_provider_, gpu_renderer_);
-  window_.programViewer()->setTitle(gpuReadyTitle(capabilities));
-  requestPreview();
+
+  if (!gpu_offscreen_attempted_) {
+    window_.showTransientMessage(
+        tr("Native GPU presentation failed; retrying offscreen GPU preview: %1").arg(diagnostic),
+        8'000);
+    startGpuInitialization();
+    return;
+  }
+
+  gpu_fallback_latched_ = true;
+  gpu_renderer_.reset();
+  gpu_timeline_renderer_.reset();
+  window_.programViewer()->setTitle(tr("Program · CPU"));
+  window_.showTransientMessage(
+      tr("GPU preview unavailable; using the CPU renderer: %1").arg(diagnostic), 8'000);
 }
 
 void EditorController::requestPreview(const PreviewRequestPolicy policy) {
@@ -7254,6 +7712,8 @@ void EditorController::launchPreviewRequest() {
         gpu_timeline_renderer_.reset();
         gpu_renderer_.reset();
         window_.programViewer()->setTitle(tr("Program · CPU fallback"));
+        SessionEventLog::instance().log_backend(
+            "gpuPreview", "latched cpu: " + outcome.gpu_diagnostic.toStdString());
         window_.showTransientMessage(
             tr("GPU preview failed; using the CPU renderer for this session: %1")
                 .arg(outcome.gpu_diagnostic),
@@ -7264,6 +7724,10 @@ void EditorController::launchPreviewRequest() {
         window_.programViewer()->setTitle(gpuActiveTitle(capabilities));
         if (!gpu_status_announced_) {
           gpu_status_announced_ = true;
+          SessionEventLog::instance().log_backend(
+              "gpuPreview",
+              std::string("active backend=") + outcome.gpu_backend.toStdString() +
+                  (outcome.native_presented ? " present=1" : " present=0"));
           window_.showTransientMessage(
               tr("GPU preview active through libplacebo (%1)").arg(outcome.gpu_backend));
         }
@@ -7274,6 +7738,15 @@ void EditorController::launchPreviewRequest() {
         // was GPU-rendered.
         window_.programViewer()->setTitle(
             tr("Program · CPU frame · %1 GPU ready").arg(outcome.gpu_backend));
+        if (!gpu_frame_fallback_announced_) {
+          gpu_frame_fallback_announced_ = true;
+          SessionEventLog::instance().log_backend(
+              "gpuPreview", "cpu frame: " + outcome.gpu_diagnostic.toStdString());
+          window_.showTransientMessage(
+              tr("This frame used the CPU renderer (%1). GPU preview stays available.")
+                  .arg(outcome.gpu_diagnostic),
+              6'000);
+        }
       }
       if (outcome.native_presented) {
         window_.programViewer()->setNativePresented(true);
@@ -7319,7 +7792,7 @@ void EditorController::launchPreviewRequest() {
                             .gpu_used = gpu_used,
                             .gpu_failed = gpu_failed};
     };
-    if (preview_cache) {
+    if (preview_cache && gpu_timeline_renderer == nullptr) {
       if (auto cached = preview_cache->get(cache_key)) {
         return PreviewOutcome{.epoch = epoch,
                               .image = EditorController::displayImage(*cached),

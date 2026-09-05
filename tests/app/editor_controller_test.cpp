@@ -15,6 +15,10 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QListWidget>
 #include <QMessageBox>
 #include <QProcess>
 #include <QPushButton>
@@ -24,6 +28,7 @@
 #include <QStandardPaths>
 #include <QTableWidget>
 #include <QTemporaryDir>
+#include <QTabBar>
 #include <QTest>
 #include <QToolButton>
 
@@ -174,6 +179,10 @@ private slots:
   void rippleInsertsSecondStillOverlayAddsVideoTrack();
   void rippleInsertsStillOnEmptyTimelineSetsFormat();
   void rippleInsertVideoMidClipStillFails();
+  void viewerMoveAndCropUpdateSelectedClipTransform();
+  void nestSelectedClipsOpensChildSequence();
+  void queuedExportDoesNotStartSecondWorker();
+  void persistsQueuedExportSidecar();
 
 private:
   std::unique_ptr<QTemporaryDir> application_data_;
@@ -373,6 +382,101 @@ void EditorControllerTest::importsInsertsAndRoundTripsUndo() {
   QCOMPARE(reopened->assets.size(), 1U);
   QCOMPARE(audioClipCount(*reopened), 1U);
   QVERIFY(!reopened_controller.dirty());
+}
+
+void EditorControllerTest::queuedExportDoesNotStartSecondWorker() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString still_path = directory.filePath(QStringLiteral("queue-still.ppm"));
+  writePpmFrame(still_path, 16, 10);
+
+  QSettings settings(directory.filePath(QStringLiteral("queue-ui.ini")), QSettings::IniFormat);
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+
+  controller.importPaths({still_path});
+  QTRY_COMPARE_WITH_TIMEOUT(
+      controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
+  window.mediaActivated(window.mediaBin()->items().front().id);
+  window.rippleInsertFromSource();
+
+  const auto export_a = video_editor::app::pathFromQString(
+      directory.filePath(QStringLiteral("export-a.mkv")));
+  const auto export_b = video_editor::app::pathFromQString(
+      directory.filePath(QStringLiteral("export-b.mkv")));
+  QVERIFY(controller.startVideoExport(export_a, QStringLiteral("master.ffv1")));
+  QVERIFY(controller.startVideoExport(export_b, QStringLiteral("master.ffv1")));
+  QCOMPARE(controller.exportQueueCount(), 2U);
+  QCOMPARE(controller.queuedExportCount(), 1U);
+
+  auto* list = window.deliverPanel()->findChild<QListWidget*>(QStringLiteral("exportJobList"));
+  QVERIFY(list != nullptr);
+  QString queued_id;
+  for (int index = 0; index < list->count(); ++index) {
+    QListWidgetItem* item = list->item(index);
+    if (item->data(Qt::UserRole + 1).toInt() ==
+        static_cast<int>(video_editor::desktop_ui::ExportJobStateView::Queued)) {
+      queued_id = item->data(Qt::UserRole).toString();
+      break;
+    }
+  }
+  QVERIFY(!queued_id.isEmpty());
+  controller.cancelQueuedExport(queued_id);
+  QCOMPARE(controller.queuedExportCount(), 0U);
+  QCOMPARE(controller.exportQueueCount(), 1U);
+}
+
+void EditorControllerTest::persistsQueuedExportSidecar() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString still_path = directory.filePath(QStringLiteral("sidecar-still.ppm"));
+  writePpmFrame(still_path, 16, 10);
+
+  QSettings settings(directory.filePath(QStringLiteral("sidecar-ui.ini")), QSettings::IniFormat);
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+
+  controller.importPaths({still_path});
+  QTRY_COMPARE_WITH_TIMEOUT(
+      controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
+  window.mediaActivated(window.mediaBin()->items().front().id);
+  window.rippleInsertFromSource();
+
+  const auto checkpoint =
+      video_editor::app::pathFromQString(directory.filePath(QStringLiteral("project.veproj")));
+  QVERIFY(controller.saveProjectFile(checkpoint));
+
+  const auto export_a = video_editor::app::pathFromQString(
+      directory.filePath(QStringLiteral("sidecar-a.mkv")));
+  const auto export_b = video_editor::app::pathFromQString(
+      directory.filePath(QStringLiteral("sidecar-b.mkv")));
+  QVERIFY(controller.startVideoExport(export_a, QStringLiteral("master.ffv1")));
+  QVERIFY(controller.startVideoExport(export_b, QStringLiteral("master.ffv1")));
+
+  const QString sidecar_path =
+      directory.filePath(QStringLiteral("project.export-queue.json"));
+  QVERIFY(QFileInfo::exists(sidecar_path));
+  QFile sidecar_file(sidecar_path);
+  QVERIFY(sidecar_file.open(QIODevice::ReadOnly));
+  const QJsonDocument document = QJsonDocument::fromJson(sidecar_file.readAll());
+  QVERIFY(document.isObject());
+  const QJsonArray jobs = document.object().value(QStringLiteral("jobs")).toArray();
+  QCOMPARE(jobs.size(), 1);
+  QCOMPARE(jobs.at(0).toObject().value(QStringLiteral("state")).toString(),
+           QStringLiteral("queued"));
+  QCOMPARE(jobs.at(0).toObject().value(QStringLiteral("destination")).toString(),
+           video_editor::app::qStringFromPath(export_b));
+
+  auto* list = window.deliverPanel()->findChild<QListWidget*>(QStringLiteral("exportJobList"));
+  QVERIFY(list != nullptr);
+  for (int index = 0; index < list->count(); ++index) {
+    QListWidgetItem* item = list->item(index);
+    if (item->data(Qt::UserRole + 1).toInt() ==
+        static_cast<int>(video_editor::desktop_ui::ExportJobStateView::Queued)) {
+      controller.cancelQueuedExport(item->data(Qt::UserRole).toString());
+      break;
+    }
+  }
 }
 
 void EditorControllerTest::insertAssetInsertsImportedMediaWithoutSourceMonitor() {

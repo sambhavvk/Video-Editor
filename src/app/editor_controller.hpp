@@ -195,8 +195,13 @@ public:
   [[nodiscard]] bool importCaptionFile(const std::filesystem::path& source);
   [[nodiscard]] bool extractEmbeddedCaptions(const std::string& asset_id, int stream_index);
   [[nodiscard]] bool exportCaptionFile(const std::filesystem::path& destination);
+  [[nodiscard]] bool importOtioFile(const std::filesystem::path& source);
+  [[nodiscard]] bool exportOtioFile(const std::filesystem::path& destination);
   [[nodiscard]] bool startVideoExport(const std::filesystem::path& destination,
                                       const QString& presetId, bool overwriteExisting = false);
+  [[nodiscard]] std::size_t exportQueueCount() const noexcept;
+  [[nodiscard]] std::size_t queuedExportCount() const noexcept;
+  void cancelQueuedExport(const QString& jobId);
 
 signals:
   void videoExportFinished(bool succeeded, const QString& destination, const QString& message);
@@ -341,6 +346,43 @@ private:
     QString error;
   };
 
+  enum class ExportJobState : std::uint8_t { Queued, Running, Failed };
+
+  struct ExportJobRecord {
+    QString job_id;
+    std::uint64_t bound_revision{0};
+    std::filesystem::path snapshot_path;
+    std::filesystem::path destination;
+    QString preset_id;
+    std::string options_bytes;
+    ExportJobState state{ExportJobState::Queued};
+    QString error;
+    int progress_percent{0};
+    bool stale_warning_shown{false};
+  };
+
+  struct ExportRequestBuild {
+    bool ok{false};
+    QString error_title;
+    QString error_message;
+    jobs::v1::ExportOptions options;
+    std::uint64_t bound_revision{0};
+    std::string sequence_id;
+  };
+
+  [[nodiscard]] ExportRequestBuild buildExportRequest(const QString& presetId,
+                                                      bool overwriteExisting) const;
+  [[nodiscard]] bool writeExportSnapshot(ExportJobRecord& record) const;
+  [[nodiscard]] bool enqueueOrStartExport(ExportJobRecord record);
+  [[nodiscard]] bool launchExportJob(std::size_t job_index);
+  void pumpExportQueue();
+  void refreshExportJobViews();
+  void persistExportQueueSidecar() const;
+  void loadExportQueueSidecar();
+  [[nodiscard]] std::optional<std::filesystem::path> exportQueueSidecarPath() const;
+  [[nodiscard]] std::filesystem::path exportSnapshotDirectory() const;
+  void removeExportJobSnapshot(const std::filesystem::path& snapshot_path) const;
+  void clearExportQueueMemory();
   struct CacheJobOutcome {
     std::string asset_id;
     int kind{0};
@@ -604,6 +646,8 @@ private:
   std::uint64_t active_normalization_generation_{0};
   std::stop_source normalization_stop_source_;
   bool export_in_flight_{false};
+  std::vector<ExportJobRecord> export_jobs_;
+  QString running_export_job_id_;
   QNetworkAccessManager* transcription_network_{nullptr};
   QNetworkReply* model_download_reply_{nullptr};
   QFutureWatcher<ModelVerificationOutcome> model_verification_watcher_;

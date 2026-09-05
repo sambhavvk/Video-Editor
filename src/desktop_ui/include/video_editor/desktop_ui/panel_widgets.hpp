@@ -28,6 +28,9 @@ class QSpinBox;
 class QStackedWidget;
 class QTableWidget;
 class QToolButton;
+class QTreeWidget;
+class QTreeWidgetItem;
+class QSplitter;
 
 namespace video_editor::desktop_ui {
 
@@ -329,11 +332,13 @@ public:
   [[nodiscard]] QString selectedPresetId() const;
   void setExportEnabled(bool enabled);
   void setExportRunning(bool running, int percent = 0);
+  void setExportJobs(const QVector<ExportJobView>& jobs);
   void loadPlatformPresets();
   void setEncoderCapabilities(const QString& summary);
   void setDestinationPath(const QString& path);
   [[nodiscard]] QString destinationPath() const;
   [[nodiscard]] QString captionModeKey() const;
+  [[nodiscard]] QString creatorVideoCodecKey() const;
   [[nodiscard]] QString sidecarFormatKey() const;
   [[nodiscard]] int overrideWidth() const;
   [[nodiscard]] int overrideHeight() const;
@@ -349,17 +354,22 @@ signals:
   void exportRequested(const QString& presetId);
   void destinationBrowseRequested();
   void cancelRequested();
+  void cancelQueuedExportRequested(const QString& jobId);
 
 private:
+  void refreshExportJobSelection();
   QComboBox* preset_{nullptr};
   QToolButton* export_button_{nullptr};
   QProgressBar* export_progress_{nullptr};
+  QListWidget* export_job_list_{nullptr};
+  QPushButton* remove_queued_export_{nullptr};
   QLineEdit* destination_{nullptr};
   QToolButton* browse_button_{nullptr};
   QComboBox* resolution_{nullptr};
   QComboBox* frame_rate_{nullptr};
   QComboBox* video_bitrate_{nullptr};
   QComboBox* video_quality_{nullptr};
+  QComboBox* video_codec_{nullptr};
   QCheckBox* hardware_encoder_{nullptr};
   QComboBox* audio_bitrate_{nullptr};
   QComboBox* caption_mode_{nullptr};
