@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "video_editor/audio_render/timeline_audio_renderer.h"
 #include "video_editor/audio_render/track_dsp_chain.h"
+#include "video_editor/edit_model/model.h"
 #include "video_editor/media_codec/format_open.h"
 
 extern "C" {
@@ -22,6 +23,7 @@ extern "C" {
 #include <limits>
 #include <mutex>
 #include <numbers>
+#include <optional>
 #include <span>
 #include <string>
 #include <unordered_map>
@@ -508,9 +510,18 @@ public:
 
   std::shared_ptr<const OriginalAudioProvider> originals;
   mutable std::mutex dsp_mutex;
-  mutable std::unordered_map<edit::EntityId, DspSession> dsp_sessions;
+  mutable std::unordered_map<edit::EntityId, DspSession> track_dsp_sessions;
+  mutable std::unordered_map<edit::EntityId, DspSession> clip_dsp_sessions;
   std::atomic<std::shared_ptr<const MeterHistory>> meter_history;
   std::uint64_t meter_version{0};
+
+  [[nodiscard]] static AudioRenderResult mix_sequence_audio(Impl& impl, const edit::Project& project,
+                                                          const edit::Sequence& sequence,
+                                                          const edit::Revision revision,
+                                                          const AudioRenderRequest& request,
+                                                          audio::AudioBlock& output, int depth,
+                                                          bool collect_meters,
+                                                          TrackMeterSnapshot* meter_snapshot);
 };
 
 TimelineAudioRenderer::TimelineAudioRenderer(std::shared_ptr<const OriginalAudioProvider> originals)
@@ -626,7 +637,7 @@ AudioRenderResult TimelineAudioRenderer::render(const edit::TimelineSnapshot& sn
         issue.asset_id = clip.asset_id;
         return Result::failure(std::move(issue));
       }
-      const edit::Asset* const asset = edit::findAsset(snapshot.project(), clip.asset_id);
+      const edit::Asset* const asset = edit::findAsset(project, clip.asset_id);
       if (asset == nullptr || !asset->has_audio) {
         AudioRenderError issue = make_error(AudioRenderErrorCode::MissingAsset,
                                             "audio clip references a missing or non-audio asset");
@@ -634,7 +645,7 @@ AudioRenderResult TimelineAudioRenderer::render(const edit::TimelineSnapshot& sn
         issue.asset_id = clip.asset_id;
         return Result::failure(std::move(issue));
       }
-      const auto media = impl_->originals->resolve_original(clip.asset_id);
+      const auto media = impl.originals->resolve_original(clip.asset_id);
       if (!media.has_value()) {
         AudioRenderError issue =
             make_error(AudioRenderErrorCode::MissingMedia,
@@ -669,18 +680,22 @@ AudioRenderResult TimelineAudioRenderer::render(const edit::TimelineSnapshot& sn
       const float pan_angle = (pan + 1.0F) * (std::numbers::pi_v<float> / 4.0F);
       const float left_pan = std::cos(pan_angle);
       const float right_pan = std::sin(pan_angle);
-      // Track-level gain/pan is a separate mixer stage. At defaults (0 dB,
-      // pan 0) it must be unity so an unadjusted track is bit-identical to the
-      // clip mix. Track pan therefore uses a linear law (pan=-1 -> left only,
-      // pan 0 -> both unity, pan=+1 -> right only) rather than the equal-power
-      // law used for clip pan, because a mixer fader's center detent should
-      // not attenuate the signal.
       const float track_gain = static_cast<float>(std::pow(10.0, track.audio_gain_db / 20.0));
       const float track_pan = static_cast<float>(std::clamp(track.audio_pan, -1.0, 1.0));
       const float track_left_pan = std::clamp(1.0F - track_pan, 0.0F, 1.0F);
       const float track_right_pan = std::clamp(1.0F + track_pan, 0.0F, 1.0F);
+      const bool has_clip_dsp = !clip.effects.empty();
+      std::optional<audio::AudioBlock> clip_output;
+      if (has_clip_dsp) {
+        clip_output.emplace(
+            audio::AudioFormat{.sample_rate = kTimelineAudioSampleRate,
+                               .channels = kTimelineAudioChannels},
+            request.start_sample, request.sample_count);
+      }
       auto left_track = track_output.channel(0);
       auto right_track = track_output.channel(1);
+      const auto left_clip = has_clip_dsp ? clip_output->channel(0) : std::span<float>{};
+      const auto right_clip = has_clip_dsp ? clip_output->channel(1) : std::span<float>{};
       for (std::size_t index = begin; index < end; ++index) {
         if (is_cancelled(request.cancellation)) {
           return request_error(AudioRenderErrorCode::Cancelled, "audio render was cancelled");
@@ -693,23 +708,43 @@ AudioRenderResult TimelineAudioRenderer::render(const edit::TimelineSnapshot& sn
             request.start_sample + static_cast<std::int64_t>(index);
         const float envelope =
             fade_gain(clip, edit::Time(absolute_sample, kTimelineAudioSampleRate));
-        const float left_sample =
-            found->second.left * clip_gain * left_pan * envelope * track_gain * track_left_pan;
-        const float right_sample =
-            found->second.right * clip_gain * right_pan * envelope * track_gain * track_right_pan;
-        left_track[index] += left_sample;
-        right_track[index] += right_sample;
+        const float left_sample = found->second.left * clip_gain * left_pan * envelope;
+        const float right_sample = found->second.right * clip_gain * right_pan * envelope;
+        if (has_clip_dsp) {
+          left_clip[index] += left_sample;
+          right_clip[index] += right_sample;
+        } else {
+          left_track[index] += left_sample * track_gain * track_left_pan;
+          right_track[index] += right_sample * track_gain * track_right_pan;
+        }
+      }
+      if (has_clip_dsp) {
+        auto [session_it, inserted] = impl.clip_dsp_sessions.try_emplace(clip.id);
+        auto& session = session_it->second;
+        if (inserted || !session.configured || session.revision != revision ||
+            session.next_sample != request.start_sample) {
+          session.chain.configure(clip.effects, static_cast<float>(kTimelineAudioSampleRate));
+          session.revision = revision;
+          session.next_sample = request.start_sample;
+          session.configured = true;
+        }
+        if (!session.chain.empty()) {
+          session.chain.process(*clip_output);
+        }
+        session.next_sample = request.start_sample + static_cast<std::int64_t>(request.sample_count);
+        for (std::size_t index = 0; index < request.sample_count; ++index) {
+          left_track[index] += left_clip[index] * track_gain * track_left_pan;
+          right_track[index] += right_clip[index] * track_gain * track_right_pan;
+        }
       }
     }
-    // Apply track-level DSP chain (EQ, compressor, dialogue denoise, limiter)
-    // to the isolated track mix before summing into the master output.
     if (!track.effects.empty()) {
-      auto [session_it, inserted] = impl_->dsp_sessions.try_emplace(track.id);
+      auto [session_it, inserted] = impl.track_dsp_sessions.try_emplace(track.id);
       auto& session = session_it->second;
-      if (inserted || !session.configured || session.revision != snapshot.revision() ||
+      if (inserted || !session.configured || session.revision != revision ||
           session.next_sample != request.start_sample) {
         session.chain.configure(track.effects, static_cast<float>(kTimelineAudioSampleRate));
-        session.revision = snapshot.revision();
+        session.revision = revision;
         session.next_sample = request.start_sample;
         session.configured = true;
       }
@@ -718,15 +753,16 @@ AudioRenderResult TimelineAudioRenderer::render(const edit::TimelineSnapshot& sn
       }
       session.next_sample = request.start_sample + static_cast<std::int64_t>(request.sample_count);
     }
-    const audio::LevelReading levels = audio::measure_levels(track_output);
-    TrackMeterReading track_meter{.track_id = track.id, .active = audible};
-    if (levels.peak.size() >= track_meter.peak.size() &&
-        levels.rms.size() >= track_meter.rms.size()) {
-      std::copy_n(levels.peak.begin(), track_meter.peak.size(), track_meter.peak.begin());
-      std::copy_n(levels.rms.begin(), track_meter.rms.size(), track_meter.rms.begin());
+    if (collect_meters && meter_snapshot != nullptr) {
+      const audio::LevelReading levels = audio::measure_levels(track_output);
+      TrackMeterReading track_meter{.track_id = track.id, .active = audible};
+      if (levels.peak.size() >= track_meter.peak.size() &&
+          levels.rms.size() >= track_meter.rms.size()) {
+        std::copy_n(levels.peak.begin(), track_meter.peak.size(), track_meter.peak.begin());
+        std::copy_n(levels.rms.begin(), track_meter.rms.size(), track_meter.rms.begin());
+      }
+      meter_snapshot->tracks.push_back(track_meter);
     }
-    meter_snapshot.tracks.push_back(track_meter);
-    // Sum the processed track into the master output.
     auto left_output = output.channel(0);
     auto right_output = output.channel(1);
     auto left_track = track_output.channel(0);
@@ -735,6 +771,186 @@ AudioRenderResult TimelineAudioRenderer::render(const edit::TimelineSnapshot& sn
       left_output[index] += left_track[index];
       right_output[index] += right_track[index];
     }
+  }
+
+  for (const edit::Track& track : sequence.tracks) {
+    if (track.kind != edit::TrackKind::Video || track.muted) {
+      continue;
+    }
+    for (const edit::Clip& clip : track.clips) {
+      if (clip.kind != edit::ClipKind::NestedSequence) {
+        continue;
+      }
+      if (!clip.nested_sequence_id.has_value()) {
+        AudioRenderError issue = make_error(AudioRenderErrorCode::InvalidTimeline,
+                                            "nested sequence clip is missing nested_sequence_id");
+        issue.clip_id = clip.id;
+        return Result::failure(std::move(issue));
+      }
+      const edit::Sequence* child = edit::findSequence(project, *clip.nested_sequence_id);
+      if (child == nullptr) {
+        AudioRenderError issue = make_error(AudioRenderErrorCode::InvalidTimeline,
+                                            "nested sequence clip references a missing sequence");
+        issue.clip_id = clip.id;
+        return Result::failure(std::move(issue));
+      }
+      const auto [begin, end] = clip_output_bounds(clip, request);
+      if (begin >= end) {
+        continue;
+      }
+      if (!std::isfinite(clip.audio_gain_db) || !std::isfinite(clip.audio_pan)) {
+        AudioRenderError issue = make_error(AudioRenderErrorCode::InvalidTimeline,
+                                            "clip has non-finite audio gain or pan");
+        issue.clip_id = clip.id;
+        return Result::failure(std::move(issue));
+      }
+
+      std::vector<std::int64_t> child_samples(end - begin, -1);
+      std::int64_t child_start = std::numeric_limits<std::int64_t>::max();
+      std::int64_t child_end = std::numeric_limits<std::int64_t>::min();
+      for (std::size_t index = begin; index < end; ++index) {
+        const std::int64_t absolute_sample =
+            request.start_sample + static_cast<std::int64_t>(index);
+        const std::int64_t child_sample = nested_child_sample_at(clip, absolute_sample);
+        child_samples[index - begin] = child_sample;
+        if (child_sample >= 0) {
+          child_start = std::min(child_start, child_sample);
+          child_end = std::max(child_end, child_sample + 1);
+        }
+      }
+      if (child_start >= child_end) {
+        continue;
+      }
+
+      AudioRenderRequest child_request{
+          .start_sample = child_start,
+          .sample_count = static_cast<std::size_t>(child_end - child_start),
+          .cancellation = request.cancellation,
+      };
+      audio::AudioBlock child_output(
+          {.sample_rate = kTimelineAudioSampleRate, .channels = kTimelineAudioChannels},
+          child_start, child_request.sample_count);
+      auto nested = mix_sequence_audio(impl, project, *child, revision, child_request, child_output,
+                                       depth + 1, false, nullptr);
+      if (!nested) {
+        return nested;
+      }
+
+      const float clip_gain = static_cast<float>(std::pow(10.0, clip.audio_gain_db / 20.0));
+      const float pan = static_cast<float>(std::clamp(clip.audio_pan, -1.0, 1.0));
+      const float pan_angle = (pan + 1.0F) * (std::numbers::pi_v<float> / 4.0F);
+      const float left_pan = std::cos(pan_angle);
+      const float right_pan = std::sin(pan_angle);
+      const bool has_clip_dsp = !clip.effects.empty();
+      std::optional<audio::AudioBlock> clip_output;
+      if (has_clip_dsp) {
+        clip_output.emplace(
+            audio::AudioFormat{.sample_rate = kTimelineAudioSampleRate,
+                               .channels = kTimelineAudioChannels},
+            request.start_sample, request.sample_count);
+      }
+      auto left_output = output.channel(0);
+      auto right_output = output.channel(1);
+      const auto left_clip = has_clip_dsp ? clip_output->channel(0) : std::span<float>{};
+      const auto right_clip = has_clip_dsp ? clip_output->channel(1) : std::span<float>{};
+      auto left_child = child_output.channel(0);
+      auto right_child = child_output.channel(1);
+      for (std::size_t index = begin; index < end; ++index) {
+        if (is_cancelled(request.cancellation)) {
+          return request_error(AudioRenderErrorCode::Cancelled, "audio render was cancelled");
+        }
+        const std::int64_t child_sample = child_samples[index - begin];
+        if (child_sample < 0) {
+          continue;
+        }
+        const std::size_t child_index = static_cast<std::size_t>(child_sample - child_start);
+        const std::int64_t absolute_sample =
+            request.start_sample + static_cast<std::int64_t>(index);
+        const float envelope =
+            fade_gain(clip, edit::Time(absolute_sample, kTimelineAudioSampleRate));
+        const float left_sample =
+            left_child[child_index] * clip_gain * left_pan * envelope;
+        const float right_sample =
+            right_child[child_index] * clip_gain * right_pan * envelope;
+        if (has_clip_dsp) {
+          left_clip[index] += left_sample;
+          right_clip[index] += right_sample;
+        } else {
+          left_output[index] += left_sample;
+          right_output[index] += right_sample;
+        }
+      }
+      if (has_clip_dsp) {
+        auto [session_it, inserted] = impl.clip_dsp_sessions.try_emplace(clip.id);
+        auto& session = session_it->second;
+        if (inserted || !session.configured || session.revision != revision ||
+            session.next_sample != request.start_sample) {
+          session.chain.configure(clip.effects, static_cast<float>(kTimelineAudioSampleRate));
+          session.revision = revision;
+          session.next_sample = request.start_sample;
+          session.configured = true;
+        }
+        if (!session.chain.empty()) {
+          session.chain.process(*clip_output);
+        }
+        session.next_sample = request.start_sample + static_cast<std::int64_t>(request.sample_count);
+        for (std::size_t index = 0; index < request.sample_count; ++index) {
+          left_output[index] += left_clip[index];
+          right_output[index] += right_clip[index];
+        }
+      }
+    }
+  }
+
+  return Result::success(output);
+}
+
+AudioRenderResult TimelineAudioRenderer::render(const edit::TimelineSnapshot& snapshot,
+                                                const AudioRenderRequest& request) const {
+  if (!impl_->originals) {
+    return request_error(AudioRenderErrorCode::InvalidRequest,
+                         "an original-media provider is required");
+  }
+  if (request.sample_count > static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max()) ||
+      request.start_sample > std::numeric_limits<std::int64_t>::max() -
+                                 static_cast<std::int64_t>(request.sample_count)) {
+    return request_error(AudioRenderErrorCode::InvalidRequest,
+                         "requested audio sample range overflows int64");
+  }
+  if (is_cancelled(request.cancellation)) {
+    return request_error(AudioRenderErrorCode::Cancelled, "audio render was cancelled");
+  }
+
+  audio::AudioBlock output(
+      {.sample_rate = kTimelineAudioSampleRate, .channels = kTimelineAudioChannels},
+      request.start_sample, request.sample_count);
+  if (request.sample_count == 0U) {
+    return Result::success(std::move(output));
+  }
+
+  const edit::Sequence& sequence = snapshot.sequence();
+  if (sequence.audio_sample_rate != kTimelineAudioSampleRate) {
+    return request_error(AudioRenderErrorCode::InvalidTimeline,
+                         "beta timeline audio must use a 48 kHz master sample rate");
+  }
+
+  // DSP stages carry history across adjacent pulls. Serialize access to the
+  // renderer-owned sessions and reset on a seek/revision discontinuity so
+  // contiguous block rendering is equivalent to one larger request.
+  std::lock_guard dsp_lock(impl_->dsp_mutex);
+
+  TrackMeterSnapshot meter_snapshot;
+  meter_snapshot.version = impl_->meter_version + 1U;
+  meter_snapshot.revision = snapshot.revision();
+  meter_snapshot.start_sample = request.start_sample;
+  meter_snapshot.end_sample =
+      request.start_sample + static_cast<std::int64_t>(request.sample_count);
+  meter_snapshot.stale = false;
+
+  auto mixed = Impl::mix_sequence_audio(*impl_, snapshot.project(), sequence, snapshot.revision(),
+                                          request, output, 0, true, &meter_snapshot);
+  if (!mixed) {
+    return mixed;
   }
 
   impl_->meter_version = meter_snapshot.version;

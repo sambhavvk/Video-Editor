@@ -28,8 +28,8 @@ inline constexpr std::string_view kLimiterCeilingDb = "ceiling_db";
 inline constexpr std::string_view kDenoiseStrength = "strength";
 inline constexpr std::string_view kDenoiseThresholdDb = "threshold_db";
 
-// A stateful DSP chain that applies track-level audio effects to a mixed
-// AudioBlock. The chain is constructed from a track's `effects` vector and
+// A stateful DSP chain that applies clip- or track-level audio effects to a
+// mixed AudioBlock. The chain is constructed from an `effects` vector and
 // preserves filter state across blocks so it can process a continuous stream.
 // Processing runs on the pre-render worker thread, never in the audio device
 // callback. Unknown or disabled effects are skipped. Processing order is
@@ -44,8 +44,7 @@ public:
   TrackDspChain(TrackDspChain&&) noexcept;
   TrackDspChain& operator=(TrackDspChain&&) noexcept;
 
-  // Build a chain from a track's effects vector. Unknown effect types are
-  // ignored (the `Effect::known` flag is advisory). Returns an empty chain if
+  // Build a chain from an effects vector. Unknown effect types are ignored (the `Effect::known` flag is advisory). Returns an empty chain if
   // the vector is empty.
   void configure(const std::vector<edit::Effect>& effects, float sample_rate);
 

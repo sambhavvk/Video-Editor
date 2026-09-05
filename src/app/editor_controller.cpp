@@ -683,16 +683,20 @@ edit::Effect effectPreset(const QString& effectId) {
     add("blue", std::string{"0,0;1,1"});
     add("luma", std::string{"0,0;1,1"});
   } else if (effectId == QStringLiteral("audio.eq")) {
-    add("frequency", 1000.0);
-    add("gain", 0.0);
-    add("q", 1.0);
+    add(std::string(audio_render::kEqFrequencyHz).c_str(), 1'000.0);
+    add(std::string(audio_render::kEqQuality).c_str(), 1.0);
+    add(std::string(audio_render::kEqGainDb).c_str(), 0.0);
   } else if (effectId == QStringLiteral("audio.compressor")) {
-    add("threshold", -18.0);
-    add("ratio", 4.0);
-    add("attack", 10.0);
-    add("release", 100.0);
+    add(std::string(audio_render::kCompressorThresholdDb).c_str(), -18.0);
+    add(std::string(audio_render::kCompressorRatio).c_str(), 4.0);
+    add(std::string(audio_render::kCompressorAttackMs).c_str(), 10.0);
+    add(std::string(audio_render::kCompressorReleaseMs).c_str(), 100.0);
+    add(std::string(audio_render::kCompressorMakeupDb).c_str(), 0.0);
   } else if (effectId == QStringLiteral("audio.dialogue_denoise")) {
-    add("strength", 0.5);
+    add(std::string(audio_render::kDenoiseStrength).c_str(), 0.5);
+    add(std::string(audio_render::kDenoiseThresholdDb).c_str(), -45.0);
+  } else if (effectId == QStringLiteral("audio.limiter")) {
+    add(std::string(audio_render::kLimiterCeilingDb).c_str(), -1.0);
   } else {
     add("amount", 0.0);
   }
