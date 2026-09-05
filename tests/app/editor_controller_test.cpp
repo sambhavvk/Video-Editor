@@ -1348,6 +1348,51 @@ void EditorControllerTest::rippleInsertsStillOnEmptyTimelineSetsFormat() {
   QCOMPARE(sequence.tracks.front().clips.front().timeline_range.start, video_editor::edit::Time{});
 }
 
+void EditorControllerTest::viewerMoveAndCropUpdateSelectedClipTransform() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString still_path = directory.filePath(QStringLiteral("viewer-transform-still.ppm"));
+  writePpmFrame(still_path, 16, 10);
+
+  QSettings settings(directory.filePath(QStringLiteral("viewer-transform-ui.ini")),
+                     QSettings::IniFormat);
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+  controller.importPaths({still_path});
+  QTRY_COMPARE_WITH_TIMEOUT(
+      controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
+
+  window.mediaActivated(window.mediaBin()->items().front().id);
+  window.rippleInsertFromSource();
+
+  window.viewerTransformPressed(QStringLiteral("cropLeft"), QPointF(-7.5, 0.0));
+  window.viewerTransformMoved(QPointF(-5.5, 0.0));
+  window.viewerTransformReleased();
+
+  const auto cropped = controller.editor().projectAt(controller.editor().revision());
+  QCOMPARE(cropped->sequences.front().tracks.front().clips.front().transform.crop_left, 0.125);
+
+  window.viewerTransformPressed(QStringLiteral("move"), QPointF(0.0, 0.0));
+  window.viewerTransformMoved(QPointF(32.0, 8.0));
+  window.viewerTransformReleased();
+
+  const auto moved = controller.editor().projectAt(controller.editor().revision());
+  const auto& moved_clip = moved->sequences.front().tracks.front().clips.front();
+  QCOMPARE(moved_clip.transform.position.x, 32.0);
+  QCOMPARE(moved_clip.transform.position.y, 8.0);
+  QCOMPARE(moved_clip.transform.crop_left, 0.125);
+
+  window.undoRequested();
+  const auto move_undone = controller.editor().projectAt(controller.editor().revision());
+  QCOMPARE(move_undone->sequences.front().tracks.front().clips.front().transform.position.x, 0.0);
+  QCOMPARE(move_undone->sequences.front().tracks.front().clips.front().transform.position.y, 0.0);
+  QCOMPARE(move_undone->sequences.front().tracks.front().clips.front().transform.crop_left, 0.125);
+
+  window.undoRequested();
+  const auto crop_undone = controller.editor().projectAt(controller.editor().revision());
+  QCOMPARE(crop_undone->sequences.front().tracks.front().clips.front().transform.crop_left, 0.0);
+}
+
 void EditorControllerTest::rippleInsertVideoMidClipStillFails() {
   QTemporaryDir directory;
   QVERIFY(directory.isValid());

@@ -515,12 +515,29 @@ QString gpuActiveTitle(const render::GpuCapabilities& capabilities) {
   options.presentation = {.backend = render::GpuBackendKind::Vulkan,
                           .instance = static_cast<std::uintptr_t>(handles.instance),
                           .surface = static_cast<std::uintptr_t>(handles.surface),
+                          .get_proc_addr = static_cast<std::uintptr_t>(handles.get_proc_addr),
                           .width = handles.width,
                           .height = handles.height};
 #else
   Q_UNUSED(handles)
 #endif
   return options;
+}
+
+[[nodiscard]] render::NativePresentationSurface secondaryPresentationSurface(
+    const desktop_ui::NativePresentationHandles& handles) {
+#if defined(__linux__)
+  return render::NativePresentationSurface{
+      .backend = render::GpuBackendKind::Vulkan,
+      .instance = static_cast<std::uintptr_t>(handles.instance),
+      .surface = static_cast<std::uintptr_t>(handles.surface),
+      .get_proc_addr = static_cast<std::uintptr_t>(handles.get_proc_addr),
+      .width = handles.width,
+      .height = handles.height};
+#else
+  Q_UNUSED(handles)
+  return {};
+#endif
 }
 
 [[nodiscard]] bool isUnityPlaybackRate(const double rate) noexcept {
@@ -1000,6 +1017,12 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           });
   connect(&window_, &desktop_ui::EditorWindow::parameterEdited, this,
           &EditorController::updateSelectedClipProperty);
+  connect(&window_, &desktop_ui::EditorWindow::viewerTransformPressed, this,
+          &EditorController::beginViewerTransform);
+  connect(&window_, &desktop_ui::EditorWindow::viewerTransformMoved, this,
+          &EditorController::updateViewerTransform);
+  connect(&window_, &desktop_ui::EditorWindow::viewerTransformReleased, this,
+          &EditorController::endViewerTransform);
   connect(&window_, &desktop_ui::EditorWindow::keyframeToggleRequested, this,
           &EditorController::toggleSelectedClipKeyframe);
   connect(&window_, &desktop_ui::EditorWindow::effectAddRequested, this,
@@ -1311,6 +1334,42 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
             window_.programViewer()->setNativePresented(false);
             requestPreview();
           });
+  connect(&window_, &desktop_ui::EditorWindow::programOutputPresentationReady, this,
+          [this](const desktop_ui::NativePresentationHandles& handles) {
+#if defined(__linux__)
+            if (gpu_renderer_ == nullptr) {
+              return;
+            }
+            const auto attached =
+                gpu_renderer_->attach_secondary_presentation(secondaryPresentationSurface(handles));
+            gpu_secondary_presentation_ = static_cast<bool>(attached);
+#else
+            Q_UNUSED(handles)
+#endif
+          });
+  connect(&window_, &desktop_ui::EditorWindow::programOutputPresentationResized, this,
+          [this](const int width, const int height) {
+            if (gpu_renderer_ != nullptr && gpu_secondary_presentation_) {
+              (void)gpu_renderer_->resize_secondary_presentation(width, height);
+              requestPreview();
+            }
+          });
+  connect(&window_, &desktop_ui::EditorWindow::programOutputPresentationLost, this, [this] {
+    gpu_secondary_presentation_ = false;
+    if (gpu_renderer_ != nullptr) {
+      gpu_renderer_->detach_secondary_presentation();
+    }
+    if (auto* output = window_.programOutputViewer()) {
+      output->setNativePresented(false);
+    }
+    requestPreview();
+  });
+  connect(&window_, &desktop_ui::EditorWindow::programOutputClosed, this, [this] {
+    gpu_secondary_presentation_ = false;
+    if (gpu_renderer_ != nullptr) {
+      gpu_renderer_->detach_secondary_presentation();
+    }
+  });
   QTimer::singleShot(2'000, this, [this] {
     if (!gpu_init_started_) {
       startGpuInitialization();
@@ -4708,6 +4767,123 @@ void EditorController::updateSelectedClipProperty(const QString& parameterId,
   }
 }
 
+void EditorController::beginViewerTransform(const QString& handle, const QPointF sequencePos) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || !active_clip_id_.has_value()) {
+    return;
+  }
+  const edit::Clip* clip = edit::findClip(*sequence, *active_clip_id_);
+  if (clip == nullptr || (clip->kind != edit::ClipKind::Video && clip->kind != edit::ClipKind::Title) ||
+      !clip->timeline_range.contains(playheadTime())) {
+    return;
+  }
+
+  ViewerTransformGesture gesture;
+  gesture.handle = handle;
+  gesture.clip_id = clip->id;
+  gesture.start_transform = clip->transform;
+  gesture.start_pos = sequencePos;
+  if (clip->kind == edit::ClipKind::Video) {
+    if (const edit::Asset* asset = assetByTextId(QString::fromStdString(clip->asset_id.toString()));
+        asset != nullptr && asset->width > 0U && asset->height > 0U) {
+      gesture.source_width = static_cast<double>(asset->width);
+      gesture.source_height = static_cast<double>(asset->height);
+    }
+  }
+  if (gesture.source_width <= 0.0 || gesture.source_height <= 0.0) {
+    gesture.source_width = static_cast<double>(sequence->width);
+    gesture.source_height = static_cast<double>(sequence->height);
+  }
+  if (gesture.source_width <= 0.0 || gesture.source_height <= 0.0) {
+    return;
+  }
+  gesture.coalescing_key =
+      "viewer-transform:" + clip->id.toString() + ":" + std::to_string(++viewer_transform_generation_);
+  viewer_transform_ = std::move(gesture);
+}
+
+void EditorController::updateViewerTransform(const QPointF sequencePos) {
+  if (!viewer_transform_.has_value()) {
+    return;
+  }
+  const ViewerTransformGesture gesture = *viewer_transform_;
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    return;
+  }
+  const edit::Clip* clip = edit::findClip(*sequence, gesture.clip_id);
+  if (clip == nullptr) {
+    return;
+  }
+
+  edit::Transform transform = gesture.start_transform;
+  if (gesture.handle == QStringLiteral("move") ||
+      std::abs(gesture.start_transform.rotation_degrees) >= 0.5) {
+    transform.position.x =
+        gesture.start_transform.position.x + (sequencePos.x() - gesture.start_pos.x());
+    transform.position.y =
+        gesture.start_transform.position.y + (sequencePos.y() - gesture.start_pos.y());
+  } else {
+    const double source_width = gesture.source_width;
+    const double source_height = gesture.source_height;
+    const double anchor_x = gesture.start_transform.anchor_x * (source_width - 1.0);
+    const double anchor_y = gesture.start_transform.anchor_y * (source_height - 1.0);
+    const double scale_x = gesture.start_transform.scale.x;
+    const double scale_y = gesture.start_transform.scale.y;
+    const bool crop_left = gesture.handle.contains(QStringLiteral("Left"));
+    const bool crop_right = gesture.handle.contains(QStringLiteral("Right"));
+    const bool crop_top = gesture.handle.contains(QStringLiteral("Top"));
+    const bool crop_bottom = gesture.handle.contains(QStringLiteral("Bottom"));
+    if ((crop_left || crop_right) && std::abs(scale_x) > 1.0e-9) {
+      const double source_x =
+          anchor_x + (sequencePos.x() - gesture.start_transform.position.x) / scale_x;
+      if (crop_left) {
+        transform.crop_left = std::clamp(source_x / source_width, 0.0,
+                                         1.0 - gesture.start_transform.crop_right - 0.01);
+      }
+      if (crop_right) {
+        transform.crop_right = std::clamp(1.0 - source_x / source_width, 0.0,
+                                          1.0 - gesture.start_transform.crop_left - 0.01);
+      }
+    }
+    if ((crop_top || crop_bottom) && std::abs(scale_y) > 1.0e-9) {
+      const double source_y =
+          anchor_y + (sequencePos.y() - gesture.start_transform.position.y) / scale_y;
+      if (crop_top) {
+        transform.crop_top = std::clamp(source_y / source_height, 0.0,
+                                        1.0 - gesture.start_transform.crop_bottom - 0.01);
+      }
+      if (crop_bottom) {
+        transform.crop_bottom = std::clamp(1.0 - source_y / source_height, 0.0,
+                                           1.0 - gesture.start_transform.crop_top - 0.01);
+      }
+    }
+  }
+
+  if (transform == clip->transform) {
+    return;
+  }
+  (void)apply(
+      edit::EditCommand{.operation = edit::SetClipTransformCommand{.sequence_id = sequence->id,
+                                                                   .clip_id = gesture.clip_id,
+                                                                   .transform = transform},
+                        .coalescing_key = gesture.coalescing_key},
+      tr("Could not update the selected clip"), false);
+}
+
+void EditorController::endViewerTransform() {
+  if (!viewer_transform_.has_value()) {
+    return;
+  }
+  viewer_transform_.reset();
+  try {
+    persistSnapshot("edit.command");
+  } catch (const std::exception& exception) {
+    showError(tr("Project write failed"), QString::fromUtf8(exception.what()));
+  }
+  refreshViews();
+}
+
 void EditorController::toggleSelectedClipKeyframe(const QString& parameterId) {
   const edit::Sequence* sequence = currentSequence();
   if (sequence == nullptr || active_clip_id_.has_value() == false) {
@@ -5761,17 +5937,25 @@ bool EditorController::apply(edit::EditCommand command, const QString& failureCo
   stopAudioPlayback();
   playback_timer_.stop();
   playback_rate_ = 0.0;
-  try {
-    persistSnapshot("edit.command");
-  } catch (const std::exception& exception) {
-    const auto rollback = editor_->undo(editor_->revision());
-    Q_UNUSED(rollback);
-    showError(tr("Project write failed"), QString::fromUtf8(exception.what()));
-    refreshViews();
-    return false;
+  if (persist) {
+    try {
+      persistSnapshot("edit.command");
+    } catch (const std::exception& exception) {
+      const auto rollback = editor_->undo(editor_->revision());
+      Q_UNUSED(rollback);
+      showError(tr("Project write failed"), QString::fromUtf8(exception.what()));
+      refreshViews();
+      return false;
+    }
   }
   setDirty(true);
-  refreshViews();
+  if (persist) {
+    refreshViews();
+  } else {
+    refreshInspectorView();
+    refreshViewerOverlay();
+    requestPreview();
+  }
   SessionEventLog::instance().log_backend("apply", "success op=" + operation);
   return true;
 }
@@ -6233,6 +6417,7 @@ void EditorController::refreshViews() {
   refreshMediaView();
   refreshTimelineView();
   refreshInspectorView();
+  refreshViewerOverlay();
   refreshMixerView();
   refreshCaptionView();
   requestPreview();
@@ -6550,6 +6735,49 @@ void EditorController::refreshInspectorView() {
   presentAssetMetadata(QString::fromStdString(clip->asset_id.toString()));
 }
 
+void EditorController::refreshViewerOverlay() {
+  if (window_.programViewer() == nullptr) {
+    return;
+  }
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    window_.programViewer()->setCanvasSize(1920, 1080);
+    window_.programViewer()->setViewerOverlay({});
+    return;
+  }
+
+  window_.programViewer()->setCanvasSize(static_cast<int>(sequence->width),
+                                         static_cast<int>(sequence->height));
+  desktop_ui::ViewerOverlay overlay;
+  if (active_clip_id_.has_value()) {
+    const edit::Clip* clip = edit::findClip(*sequence, *active_clip_id_);
+    if (clip != nullptr &&
+        (clip->kind == edit::ClipKind::Video || clip->kind == edit::ClipKind::Title) &&
+        clip->timeline_range.contains(playheadTime())) {
+      double source_width = 0.0;
+      double source_height = 0.0;
+      if (clip->kind == edit::ClipKind::Video) {
+        if (const edit::Asset* asset =
+                assetByTextId(QString::fromStdString(clip->asset_id.toString()));
+            asset != nullptr && asset->width > 0U && asset->height > 0U) {
+          source_width = static_cast<double>(asset->width);
+          source_height = static_cast<double>(asset->height);
+        }
+      }
+      if (source_width <= 0.0 || source_height <= 0.0) {
+        source_width = static_cast<double>(sequence->width);
+        source_height = static_cast<double>(sequence->height);
+      }
+      if (source_width > 0.0 && source_height > 0.0) {
+        overlay.visible = true;
+        overlay.bounds = viewerOverlayBounds(clip->transform, source_width, source_height);
+        overlay.crop_handles = std::abs(clip->transform.rotation_degrees) < 0.5;
+      }
+    }
+  }
+  window_.programViewer()->setViewerOverlay(overlay);
+}
+
 void EditorController::refreshMixerView() {
   QVector<desktop_ui::AudioTrackView> tracks;
   const edit::Sequence* sequence = currentSequence();
@@ -6857,20 +7085,30 @@ void EditorController::startGpuInitializationWithPresentation(
     return;
   }
   gpu_init_started_ = true;
+  gpu_presentation_attempted_ = true;
   ++gpu_init_generation_;
   if (gpu_init_watcher_.isRunning()) {
     gpu_init_watcher_.waitForFinished();
   }
-  gpu_renderer_.reset();
-  gpu_timeline_renderer_.reset();
+  // Keep any already-ready offscreen device until the presentation-backed
+  // renderer actually attaches. Destroying it first latches testers onto CPU
+  // when Qt's VkInstance cannot be imported by libplacebo.
   ++preview_epoch_;
   renderer_->begin_epoch(preview_epoch_);
+  if (gpu_timeline_renderer_ != nullptr) {
+    gpu_timeline_renderer_->begin_epoch(preview_epoch_);
+  }
   if (frame_provider_ != nullptr) {
     frame_provider_->begin_epoch(preview_epoch_);
   }
 
   gpu_init_attach_generation_ = ++gpu_init_generation_;
   const render::GpuOptions options = gpuOptionsForPresentation(handles);
+  SessionEventLog::instance().log_backend(
+      "gpuInit",
+      "start presentation instance=" + std::to_string(handles.instance != 0U) +
+          " surface=" + std::to_string(handles.surface != 0U) +
+          " proc=" + std::to_string(handles.get_proc_addr != 0U));
   gpu_init_watcher_.setFuture(QtConcurrent::run([options] {
     auto gpu = render::GpuRenderer::create(options);
     return std::shared_ptr<render::GpuRenderer>(std::move(gpu));
@@ -6931,6 +7169,9 @@ void EditorController::requestPreview(const PreviewRequestPolicy policy) {
     invalidate_in_flight();
     gpu_preview_active_ = false;
     window_.programViewer()->clearFrame();
+    if (auto* output = window_.programOutputViewer()) {
+      output->clearFrame();
+    }
     return;
   }
   requested_preview_position_ = playhead_;
@@ -6971,10 +7212,20 @@ void EditorController::launchPreviewRequest() {
   const auto gpu_renderer = gpu_fallback_latched_ ? nullptr : gpu_renderer_;
   const auto gpu_timeline_renderer = gpu_fallback_latched_ ? nullptr : gpu_timeline_renderer_;
   const auto preview_cache = preview_cache_;
-  const bool allow_native_present =
-      window_.programViewer() != nullptr && !window_.programViewer()->safeGuidesVisible();
+  const bool allow_native_present = window_.programViewer() != nullptr &&
+                                    !window_.programViewer()->safeGuidesVisible() &&
+                                    !viewer_transform_.has_value();
+  const bool program_output_active = window_.programOutputViewer() != nullptr;
+  const bool secondary_native = gpu_secondary_presentation_;
+  const bool scopes_visible =
+      window_.scopesWidget() != nullptr && window_.scopesWidget()->isVisible();
+  const bool gpu_can_present = gpu_renderer != nullptr && gpu_renderer->capabilities().presentation;
+  const bool playing = std::abs(playback_rate_) > 1.0e-9;
   const render::PreviewProfile profile{
-      .scale = render::PreviewScale::Half, .bypass_expensive_effects = true, .use_proxies = true};
+      .scale = (!gpu_can_present && playing) ? render::PreviewScale::Quarter
+                                             : render::PreviewScale::Half,
+      .bypass_expensive_effects = true,
+      .use_proxies = true};
   const render::RenderCacheKey cache_key{
       .revision = snapshot.revision(),
       .sequence_id = snapshot.sequence().id,
@@ -7038,6 +7289,8 @@ void EditorController::launchPreviewRequest() {
         window_.programViewer()->setSamplingFrameSize(
             QSize(outcome.cpu_frame->width(), outcome.cpu_frame->height()));
       }
+      updateProgramOutputViewer(outcome);
+      updateScopes(outcome.cpu_frame.get());
     }
     if (outcome.epoch != preview_epoch_ || request_serial != preview_request_serial_) {
       launchPreviewRequest();
@@ -7045,7 +7298,8 @@ void EditorController::launchPreviewRequest() {
   });
   watcher->setFuture(QtConcurrent::run([renderer, gpu_renderer, gpu_timeline_renderer, preview_cache,
                                         cache_key, profile, snapshot = std::move(snapshot),
-                                        requested_time, epoch, allow_native_present]() mutable {
+                                        requested_time, epoch, allow_native_present,
+                                        program_output_active, secondary_native, scopes_visible]() mutable {
     const auto present = [&](std::shared_ptr<const render::CpuFrame> frame, QString backend,
                              QString diagnostic, const bool gpu_used,
                              const bool gpu_failed) -> PreviewOutcome {
@@ -7112,14 +7366,36 @@ void EditorController::launchPreviewRequest() {
         if (capabilities.presentation && allow_native_present) {
           const auto presented = gpu_renderer->present(*gpu_frame.value);
           if (presented) {
-            return PreviewOutcome{.epoch = epoch,
-                                  .image = {},
-                                  .error = {},
-                                  .gpu_backend = backend,
-                                  .gpu_diagnostic = {},
-                                  .gpu_used = true,
-                                  .gpu_failed = false,
-                                  .native_presented = true};
+            PreviewOutcome outcome{.epoch = epoch,
+                                   .image = {},
+                                   .error = {},
+                                   .gpu_backend = backend,
+                                   .gpu_diagnostic = {},
+                                   .gpu_used = true,
+                                   .gpu_failed = false,
+                                   .native_presented = true};
+            outcome.secondary_native_presented =
+                program_output_active && secondary_native &&
+                gpu_renderer->last_secondary_present_succeeded();
+            const bool needs_scope_readback = scopes_visible;
+            const bool needs_secondary_readback =
+                program_output_active && !outcome.secondary_native_presented;
+            if (needs_scope_readback || needs_secondary_readback) {
+              auto downloaded = gpu_renderer->download(*gpu_frame.value);
+              if (downloaded) {
+                const auto* gpu_cpu = std::get_if<std::shared_ptr<const render::CpuFrame>>(
+                    &downloaded.value->storage);
+                if (gpu_cpu != nullptr && *gpu_cpu) {
+                  if (needs_secondary_readback) {
+                    outcome.secondary_image = EditorController::displayImage(**gpu_cpu);
+                  }
+                  if (needs_scope_readback) {
+                    outcome.cpu_frame = *gpu_cpu;
+                  }
+                }
+              }
+            }
+            return outcome;
           }
           if (presented.error.has_value() &&
               presented.error->code != render::RenderErrorCode::GpuPresentFailed &&
@@ -7164,6 +7440,42 @@ void EditorController::launchPreviewRequest() {
     }
     return cpu_fallback(QStringLiteral("CPU"), {}, false);
   }));
+}
+
+void EditorController::updateScopes(const render::CpuFrame* frame) {
+  if (frame == nullptr || window_.scopesWidget() == nullptr || !window_.scopesWidget()->isVisible()) {
+    return;
+  }
+  window_.scopesWidget()->setAnalysis(render::ScopeAnalyzer::analyze(*frame));
+}
+
+void EditorController::updateProgramOutputViewer(const PreviewOutcome& outcome) {
+  auto* output = window_.programOutputViewer();
+  if (output == nullptr || window_.programViewer() == nullptr) {
+    return;
+  }
+
+  output->setTimecode(window_.programViewer()->timecode());
+  if (outcome.secondary_native_presented) {
+    output->setNativePresented(true);
+    if (outcome.cpu_frame != nullptr) {
+      output->setSamplingFrameSize(
+          QSize(outcome.cpu_frame->width(), outcome.cpu_frame->height()));
+    }
+    return;
+  }
+
+  output->setNativePresented(false);
+  if (!outcome.secondary_image.isNull()) {
+    output->setFrame(outcome.secondary_image);
+  } else if (!outcome.image.isNull()) {
+    output->setFrame(outcome.image);
+  } else if (!outcome.native_presented) {
+    output->clearFrame();
+  }
+  if (outcome.cpu_frame != nullptr) {
+    output->setSamplingFrameSize(QSize(outcome.cpu_frame->width(), outcome.cpu_frame->height()));
+  }
 }
 
 QImage EditorController::displayImage(const render::CpuFrame& frame) {

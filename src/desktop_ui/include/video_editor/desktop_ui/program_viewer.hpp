@@ -5,6 +5,7 @@
 #pragma once
 
 #include <QImage>
+#include <QPointF>
 #include <QWidget>
 
 #include <memory>
@@ -18,8 +19,15 @@ namespace video_editor::desktop_ui {
 struct NativePresentationHandles final {
   quintptr instance{0};
   quintptr surface{0};
+  quintptr get_proc_addr{0};
   int width{0};
   int height{0};
+};
+
+struct ViewerOverlay final {
+  bool visible{false};
+  bool crop_handles{false};
+  QRectF bounds;
 };
 
 class ProgramViewer final : public QWidget {
@@ -44,6 +52,7 @@ public:
   [[nodiscard]] bool frameSamplingEnabled() const noexcept {
     return frame_sampling_enabled_;
   }
+  [[nodiscard]] bool nativePresentationEligible() const noexcept;
   [[nodiscard]] bool hasFrame() const noexcept {
     return native_presented_ || !frame_.isNull();
   }
@@ -59,6 +68,8 @@ public slots:
   void setFrameSamplingEnabled(bool enabled);
   void setNativePresentationEnabled(bool enabled);
   void setNativePresented(bool presented);
+  void setCanvasSize(int width, int height);
+  void setViewerOverlay(const ViewerOverlay& overlay);
 
 signals:
   void filesDropped(const QStringList& localFiles);
@@ -72,6 +83,9 @@ signals:
   void nativePresentationResized(int width, int height);
   void nativePresentationLost();
   void frameSampleRequested(int frameX, int frameY);
+  void viewerTransformPressed(const QString& handle, QPointF sequencePos);
+  void viewerTransformMoved(QPointF sequencePos);
+  void viewerTransformReleased();
 
 protected:
   void paintEvent(QPaintEvent* event) override;
@@ -80,13 +94,18 @@ protected:
   void dragEnterEvent(QDragEnterEvent* event) override;
   void dropEvent(QDropEvent* event) override;
   void mousePressEvent(QMouseEvent* event) override;
+  void mouseMoveEvent(QMouseEvent* event) override;
+  void mouseReleaseEvent(QMouseEvent* event) override;
   void mouseDoubleClickEvent(QMouseEvent* event) override;
   void keyPressEvent(QKeyEvent* event) override;
 
 private:
   [[nodiscard]] QRect targetFrameRect() const;
   [[nodiscard]] std::optional<QPoint> mapWidgetToFramePixel(const QPoint& widget_pos) const;
-  [[nodiscard]] bool nativePresentationEligible() const noexcept;
+  [[nodiscard]] std::optional<QPointF> mapWidgetToSequence(const QPoint& widget_pos) const;
+  [[nodiscard]] QRectF sequenceRectToWidget(const QRectF& sequence_rect) const;
+  [[nodiscard]] QString hitTestOverlay(const QPoint& widget_pos) const;
+  void updateTransformHud();
   void tryInitializeNativePresentation();
   void updateVulkanContainerGeometry();
   void paintSafeGuides(QPainter& painter, const QRect& frameRect) const;
@@ -104,6 +123,11 @@ private:
   bool native_presentation_ready_{false};
   bool native_presentation_attempted_{false};
   bool native_presentation_outcome_reported_{false};
+  int canvas_width_{1920};
+  int canvas_height_{1080};
+  ViewerOverlay overlay_{};
+  bool viewer_drag_active_{false};
+  QWidget* transform_hud_{nullptr};
 
 #if defined(__linux__)
   std::unique_ptr<QVulkanInstance> vulkan_instance_;

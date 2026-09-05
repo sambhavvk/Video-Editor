@@ -11,15 +11,18 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPaintEvent>
 #include <QResizeEvent>
 #include <QShowEvent>
 #include <QUrl>
 #if defined(__linux__)
+#include <QVersionNumber>
 #include <QVulkanInstance>
 #include <QWindow>
 #endif
 
 #include <algorithm>
+#include <functional>
 #include <memory>
 
 namespace video_editor::desktop_ui {
@@ -28,6 +31,65 @@ namespace {
 constexpr int kOuterMargin = 22;
 constexpr int kTopBarHeight = 28;
 constexpr int kBottomBarHeight = 34;
+constexpr double kOverlayEdgeHitPx = 8.0;
+constexpr int kOverlayHandleSize = 9;
+
+class TransformHud final : public QWidget {
+public:
+  explicit TransformHud(QWidget* parent) : QWidget(parent) {
+    setAttribute(Qt::WA_TranslucentBackground);
+    setAttribute(Qt::WA_TransparentForMouseEvents);
+    setAutoFillBackground(false);
+  }
+
+  void setOverlay(const ViewerOverlay& overlay, const std::function<QRectF(QRectF)>& to_widget) {
+    overlay_ = overlay;
+    to_widget_ = to_widget;
+    setVisible(overlay.visible);
+    update();
+  }
+
+protected:
+  void paintEvent(QPaintEvent* event) override {
+    Q_UNUSED(event)
+    if (!overlay_.visible) {
+      return;
+    }
+    const QRectF bounds = to_widget_(overlay_.bounds);
+    if (bounds.isEmpty()) {
+      return;
+    }
+
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    const QColor outline{0, 200, 190, 220};
+    painter.setPen(QPen{outline, 2});
+    painter.setBrush(Qt::NoBrush);
+    painter.drawRect(bounds);
+
+    if (!overlay_.crop_handles) {
+      return;
+    }
+
+    painter.setBrush(outline);
+    const auto draw_handle = [&](const QPointF& center) {
+      painter.drawRect(QRectF{center.x() - kOverlayHandleSize * 0.5, center.y() - kOverlayHandleSize * 0.5,
+                            kOverlayHandleSize, kOverlayHandleSize});
+    };
+    draw_handle(bounds.topLeft());
+    draw_handle(bounds.topRight());
+    draw_handle(bounds.bottomLeft());
+    draw_handle(bounds.bottomRight());
+    draw_handle(QPointF{bounds.center().x(), bounds.top()});
+    draw_handle(QPointF{bounds.center().x(), bounds.bottom()});
+    draw_handle(QPointF{bounds.left(), bounds.center().y()});
+    draw_handle(QPointF{bounds.right(), bounds.center().y()});
+  }
+
+private:
+  ViewerOverlay overlay_{};
+  std::function<QRectF(QRectF)> to_widget_;
+};
 
 } // namespace
 
@@ -40,6 +102,8 @@ ProgramViewer::ProgramViewer(QWidget* parent) : QWidget(parent) {
   setFocusPolicy(Qt::StrongFocus);
   setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
   setMinimumSize(320, 180);
+  transform_hud_ = new TransformHud(this);
+  transform_hud_->hide();
 }
 
 ProgramViewer::~ProgramViewer() {
@@ -121,6 +185,7 @@ void ProgramViewer::setNativePresented(bool presented) {
                                   !safe_guides_visible_);
   }
 #endif
+  updateTransformHud();
   update();
 }
 
@@ -136,6 +201,19 @@ void ProgramViewer::tryInitializeNativePresentation() {
   native_presentation_attempted_ = true;
 
   vulkan_instance_ = std::make_unique<QVulkanInstance>();
+  const QVersionNumber supported = vulkan_instance_->supportedApiVersion();
+  // libplacebo refuses to import a VkInstance created below Vulkan 1.2
+  // (PL_VK_MIN_VERSION). Qt's default is 1.0, which made presentation device
+  // creation fail and forced a host readback of every preview frame.
+  if (supported < QVersionNumber(1, 2)) {
+    vulkan_instance_.reset();
+    if (!native_presentation_outcome_reported_) {
+      native_presentation_outcome_reported_ = true;
+      emit nativePresentationUnavailable();
+    }
+    return;
+  }
+  vulkan_instance_->setApiVersion(supported);
   if (!vulkan_instance_->create()) {
     vulkan_instance_.reset();
     if (!native_presentation_outcome_reported_) {
@@ -168,6 +246,7 @@ void ProgramViewer::tryInitializeNativePresentation() {
     vulkan_container_->setFocusPolicy(Qt::NoFocus);
     vulkan_container_->setAttribute(Qt::WA_TransparentForMouseEvents, true);
     vulkan_container_->hide();
+    updateTransformHud();
   }
 
   native_presentation_ready_ = true;
@@ -178,6 +257,8 @@ void ProgramViewer::tryInitializeNativePresentation() {
     emit nativePresentationReady(NativePresentationHandles{
         .instance = reinterpret_cast<quintptr>(vulkan_instance_->vkInstance()),
         .surface = reinterpret_cast<quintptr>(surface),
+        .get_proc_addr = reinterpret_cast<quintptr>(
+            vulkan_instance_->getInstanceProcAddr("vkGetInstanceProcAddr")),
         .width = std::max(1, frameRect.width()),
         .height = std::max(1, frameRect.height()),
     });
@@ -200,6 +281,9 @@ void ProgramViewer::updateVulkanContainerGeometry() {
   vulkan_container_->setGeometry(frameRect);
   vulkan_container_->setVisible(native_presentation_ready_ && native_presented_ &&
                                 !safe_guides_visible_);
+  if (transform_hud_ != nullptr) {
+    transform_hud_->raise();
+  }
   if (native_presentation_ready_) {
     emit nativePresentationResized(std::max(1, frameRect.width()),
                                    std::max(1, frameRect.height()));
@@ -311,11 +395,13 @@ void ProgramViewer::paintEvent(QPaintEvent* event) {
 void ProgramViewer::resizeEvent(QResizeEvent* event) {
   QWidget::resizeEvent(event);
   updateVulkanContainerGeometry();
+  updateTransformHud();
 }
 
 void ProgramViewer::showEvent(QShowEvent* event) {
   QWidget::showEvent(event);
   tryInitializeNativePresentation();
+  updateTransformHud();
 }
 
 void ProgramViewer::dragEnterEvent(QDragEnterEvent* event) {
@@ -346,6 +432,10 @@ void ProgramViewer::dropEvent(QDropEvent* event) {
 }
 
 void ProgramViewer::mouseDoubleClickEvent(QMouseEvent* event) {
+  if (viewer_drag_active_) {
+    event->accept();
+    return;
+  }
   if (frame_sampling_enabled_) {
     event->accept();
     return;
@@ -397,7 +487,90 @@ void ProgramViewer::mousePressEvent(QMouseEvent* event) {
       return;
     }
   }
+  if (!source_edit_keys_ && event->button() == Qt::LeftButton) {
+    const QString handle = hitTestOverlay(event->pos());
+    if (!handle.isEmpty()) {
+      if (const auto sequence_pos = mapWidgetToSequence(event->pos())) {
+        viewer_drag_active_ = true;
+        grabMouse();
+        emit viewerTransformPressed(handle, *sequence_pos);
+        event->accept();
+        return;
+      }
+    }
+  }
   QWidget::mousePressEvent(event);
+}
+
+void ProgramViewer::mouseMoveEvent(QMouseEvent* event) {
+  if (frame_sampling_enabled_) {
+    QWidget::mouseMoveEvent(event);
+    return;
+  }
+  if (viewer_drag_active_) {
+    if (const auto sequence_pos = mapWidgetToSequence(event->pos())) {
+      emit viewerTransformMoved(*sequence_pos);
+    }
+    event->accept();
+    return;
+  }
+  if (!source_edit_keys_ && overlay_.visible) {
+    const QString handle = hitTestOverlay(event->pos());
+    if (handle == QStringLiteral("move")) {
+      setCursor(Qt::SizeAllCursor);
+    } else if (handle == QStringLiteral("cropLeft") || handle == QStringLiteral("cropRight")) {
+      setCursor(Qt::SizeHorCursor);
+    } else if (handle == QStringLiteral("cropTop") || handle == QStringLiteral("cropBottom")) {
+      setCursor(Qt::SizeVerCursor);
+    } else if (handle == QStringLiteral("cropTopLeft") ||
+               handle == QStringLiteral("cropBottomRight")) {
+      setCursor(Qt::SizeFDiagCursor);
+    } else if (handle == QStringLiteral("cropTopRight") ||
+               handle == QStringLiteral("cropBottomLeft")) {
+      setCursor(Qt::SizeBDiagCursor);
+    } else {
+      setCursor(Qt::ArrowCursor);
+    }
+  }
+  QWidget::mouseMoveEvent(event);
+}
+
+void ProgramViewer::mouseReleaseEvent(QMouseEvent* event) {
+  if (viewer_drag_active_ && event->button() == Qt::LeftButton) {
+    viewer_drag_active_ = false;
+    releaseMouse();
+    emit viewerTransformReleased();
+    event->accept();
+    return;
+  }
+  QWidget::mouseReleaseEvent(event);
+}
+
+void ProgramViewer::setCanvasSize(const int width, const int height) {
+  if (canvas_width_ == width && canvas_height_ == height) {
+    return;
+  }
+  canvas_width_ = std::max(1, width);
+  canvas_height_ = std::max(1, height);
+  updateTransformHud();
+}
+
+void ProgramViewer::setViewerOverlay(const ViewerOverlay& overlay) {
+  overlay_ = overlay;
+  updateTransformHud();
+}
+
+void ProgramViewer::updateTransformHud() {
+  if (transform_hud_ == nullptr) {
+    return;
+  }
+  transform_hud_->setGeometry(rect());
+  auto* hud = static_cast<TransformHud*>(transform_hud_);
+  hud->setOverlay(overlay_, [this](const QRectF& sequence_rect) {
+    return sequenceRectToWidget(sequence_rect);
+  });
+  setMouseTracking(overlay_.visible && !frame_sampling_enabled_ && !source_edit_keys_);
+  transform_hud_->raise();
 }
 
 QRect ProgramViewer::targetFrameRect() const {
@@ -434,6 +607,93 @@ std::optional<QPoint> ProgramViewer::mapWidgetToFramePixel(const QPoint& widget_
   const int frame_y = std::clamp(static_cast<int>(std::lround(relative_y * (source_size.height() - 1))), 0,
                                  std::max(0, source_size.height() - 1));
   return QPoint{frame_x, frame_y};
+}
+
+std::optional<QPointF> ProgramViewer::mapWidgetToSequence(const QPoint& widget_pos) const {
+  const auto frame_rect = targetFrameRect();
+  if (frame_rect.isEmpty()) {
+    return std::nullopt;
+  }
+  if (!viewer_drag_active_ && !frame_rect.contains(widget_pos)) {
+    return std::nullopt;
+  }
+  const double nx =
+      static_cast<double>(widget_pos.x() - frame_rect.left()) / static_cast<double>(frame_rect.width());
+  const double ny =
+      static_cast<double>(widget_pos.y() - frame_rect.top()) / static_cast<double>(frame_rect.height());
+  return QPointF{(nx - 0.5) * (canvas_width_ - 1), (ny - 0.5) * (canvas_height_ - 1)};
+}
+
+QRectF ProgramViewer::sequenceRectToWidget(const QRectF& sequence_rect) const {
+  const auto frame_rect = targetFrameRect();
+  if (frame_rect.isEmpty() || canvas_width_ <= 1 || canvas_height_ <= 1) {
+    return {};
+  }
+  const auto to_widget_x = [&](const double sequence_x) {
+    const double nx = sequence_x / static_cast<double>(canvas_width_ - 1) + 0.5;
+    return frame_rect.left() + nx * frame_rect.width();
+  };
+  const auto to_widget_y = [&](const double sequence_y) {
+    const double ny = sequence_y / static_cast<double>(canvas_height_ - 1) + 0.5;
+    return frame_rect.top() + ny * frame_rect.height();
+  };
+  const QRectF mapped{QPointF{to_widget_x(sequence_rect.left()), to_widget_y(sequence_rect.top())},
+                      QPointF{to_widget_x(sequence_rect.right()), to_widget_y(sequence_rect.bottom())}};
+  return mapped.normalized();
+}
+
+QString ProgramViewer::hitTestOverlay(const QPoint& widget_pos) const {
+  if (!overlay_.visible) {
+    return {};
+  }
+  const QRectF bounds = sequenceRectToWidget(overlay_.bounds);
+  const QRectF hit_bounds = bounds.adjusted(-kOverlayEdgeHitPx, -kOverlayEdgeHitPx, kOverlayEdgeHitPx,
+                                            kOverlayEdgeHitPx);
+  if (!hit_bounds.contains(widget_pos)) {
+    return {};
+  }
+
+  if (overlay_.crop_handles) {
+    const bool near_left = std::abs(widget_pos.x() - bounds.left()) <= kOverlayEdgeHitPx;
+    const bool near_right = std::abs(widget_pos.x() - bounds.right()) <= kOverlayEdgeHitPx;
+    const bool near_top = std::abs(widget_pos.y() - bounds.top()) <= kOverlayEdgeHitPx;
+    const bool near_bottom = std::abs(widget_pos.y() - bounds.bottom()) <= kOverlayEdgeHitPx;
+    const bool inside_x =
+        widget_pos.x() > bounds.left() + kOverlayEdgeHitPx &&
+        widget_pos.x() < bounds.right() - kOverlayEdgeHitPx;
+    const bool inside_y =
+        widget_pos.y() > bounds.top() + kOverlayEdgeHitPx &&
+        widget_pos.y() < bounds.bottom() - kOverlayEdgeHitPx;
+
+    if (near_top && near_left) {
+      return QStringLiteral("cropTopLeft");
+    }
+    if (near_top && near_right) {
+      return QStringLiteral("cropTopRight");
+    }
+    if (near_bottom && near_left) {
+      return QStringLiteral("cropBottomLeft");
+    }
+    if (near_bottom && near_right) {
+      return QStringLiteral("cropBottomRight");
+    }
+    if (near_top && inside_x) {
+      return QStringLiteral("cropTop");
+    }
+    if (near_bottom && inside_x) {
+      return QStringLiteral("cropBottom");
+    }
+    if (near_left && inside_y) {
+      return QStringLiteral("cropLeft");
+    }
+    if (near_right && inside_y) {
+      return QStringLiteral("cropRight");
+    }
+  }
+  if (!bounds.contains(widget_pos)) {
+    return {};
+  }
+  return QStringLiteral("move");
 }
 
 } // namespace video_editor::desktop_ui

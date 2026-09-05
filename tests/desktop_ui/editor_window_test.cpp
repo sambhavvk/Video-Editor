@@ -15,6 +15,7 @@
 #include <QContextMenuEvent>
 #include <QCoreApplication>
 #include <QDockWidget>
+#include <QGuiApplication>
 #include <QFileInfo>
 #include <QLabel>
 #include <QLineEdit>
@@ -29,6 +30,7 @@
 #include <QSignalSpy>
 #include <QSlider>
 #include <QTableWidget>
+#include <QTreeWidget>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
@@ -1182,6 +1184,59 @@ void EditorWindowTest::deliverPanelShowsCancelableProgress() {
   panel->setExportRunning(false);
   QVERIFY(progress->isHidden());
   QCOMPARE(button->text(), QStringLiteral("Export master"));
+}
+
+void EditorWindowTest::programFullscreenActionTogglesAndEscRestores() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  auto settings = temporarySettings(directory);
+  EditorWindow window(settings.get());
+  window.show();
+  QCoreApplication::processEvents();
+
+  auto* fullscreenAction = window.action(QStringLiteral("programFullscreen"));
+  QVERIFY(fullscreenAction != nullptr);
+  QCOMPARE(fullscreenAction->shortcut(), QKeySequence{Qt::Key_F11});
+  QVERIFY(!window.isProgramFullscreen());
+
+  fullscreenAction->trigger();
+  QCoreApplication::processEvents();
+  QVERIFY(window.isProgramFullscreen());
+  QVERIFY(fullscreenAction->isChecked());
+
+  window.exitProgramFullscreen();
+  QCoreApplication::processEvents();
+  QVERIFY(!window.isProgramFullscreen());
+  QVERIFY(!fullscreenAction->isChecked());
+}
+
+void EditorWindowTest::programOutputDisplayMenuDoesNotCrashWithOneScreen() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  auto settings = temporarySettings(directory);
+  EditorWindow window(settings.get());
+  window.show();
+  QCoreApplication::processEvents();
+
+  auto* viewMenu = window.findChild<QMenu*>(QStringLiteral("viewMenu"));
+  QVERIFY(viewMenu != nullptr);
+  auto* outputMenu = window.findChild<QMenu*>(QStringLiteral("programOutputMenu"));
+  QVERIFY(outputMenu != nullptr);
+  QCOMPARE(outputMenu->accessibleName(), QStringLiteral("Program monitor on display"));
+
+  outputMenu->popup(window.mapToGlobal(QPoint{40, 40}));
+  QCoreApplication::processEvents();
+  outputMenu->hide();
+  QCoreApplication::processEvents();
+
+  window.setProgramOutputScreen(QGuiApplication::primaryScreen());
+  QCoreApplication::processEvents();
+  QVERIFY(window.programOutputViewer() != nullptr);
+  QCOMPARE(window.programOutputViewer()->accessibleName(), QStringLiteral("Program output viewer"));
+
+  window.setProgramOutputScreen(nullptr);
+  QCoreApplication::processEvents();
+  QVERIFY(window.programOutputViewer() == nullptr);
 }
 
 QTEST_MAIN(EditorWindowTest)

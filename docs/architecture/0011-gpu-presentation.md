@@ -99,3 +99,18 @@ than the transport timer interval. Platform GUI parity still needs broader tests
 The desktop preserves the CPU result on failure. Native Windows/Linux presentation, the completed
 codec/GPU matrix, asynchronous device startup, and long-session device-loss tests remain public-beta
 gates.
+
+## Addendum: fullscreen and second-display program output (2026-09-05)
+
+The Qt desktop shell exposes two additional program-monitor presentation modes:
+
+- **Fullscreen (same display):** View → Program Monitor Fullscreen (default `F11`) reparents the
+  existing program viewer into a borderless fullscreen shell on the current screen. `Esc` restores
+  the in-layout monitor while the main editor window keeps keyboard focus for transport and
+  workspace shortcuts. Native GPU presentation remains gated by the same safe-guide and transform
+  overlay eligibility as the docked monitor.
+- **Second display:** View → Program monitor on display… opens a dedicated output window on the
+  chosen `QScreen`, persisting `display/programOutputScreen` in `QSettings`. When libplacebo can
+  attach a compatible secondary swapchain, `GpuRenderer::present()` renders the same composited
+  `GpuImage` to both surfaces; otherwise the output window alone falls back to `QImage` blit
+  without latching the main program monitor to CPU preview.

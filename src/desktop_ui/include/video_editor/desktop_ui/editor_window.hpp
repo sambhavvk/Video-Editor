@@ -6,6 +6,7 @@
 
 #include "video_editor/desktop_ui/cache_browser_dialog.hpp"
 #include "video_editor/desktop_ui/export_dialog.hpp"
+#include "video_editor/desktop_ui/program_viewer.hpp"
 #include "video_editor/desktop_ui/ui_types.hpp"
 
 #include <QHash>
@@ -18,7 +19,10 @@ class QCloseEvent;
 class QDockWidget;
 class QFrame;
 class QLabel;
+class QScreen;
 class QSettings;
+class QShortcut;
+class QSplitter;
 class QStackedWidget;
 class QToolBar;
 
@@ -31,7 +35,9 @@ class DeliverPanelWidget;
 class EffectsPanelWidget;
 class InspectorWidget;
 class MediaBinWidget;
+class ProgramOutputWindow;
 class ProgramViewer;
+class ScopeWidget;
 class TimelineWidget;
 
 class EditorWindow final : public QMainWindow {
@@ -55,6 +61,10 @@ public:
   void resetShortcutBinding(const QString& commandId);
   [[nodiscard]] ProgramViewer* programViewer() const noexcept {
     return program_viewer_;
+  }
+  [[nodiscard]] ProgramViewer* programOutputViewer() const noexcept;
+  [[nodiscard]] bool isProgramFullscreen() const noexcept {
+    return program_fullscreen_active_;
   }
   [[nodiscard]] ProgramViewer* sourceViewer() const noexcept {
     return source_viewer_;
@@ -107,6 +117,9 @@ public slots:
   void markSourceIn();
   void markSourceOut();
   void seekSource(qint64 position);
+  void toggleProgramFullscreen();
+  void exitProgramFullscreen();
+  void setProgramOutputScreen(QScreen* screen);
 
 signals:
   void workspaceChanged(Workspace workspace);
@@ -137,6 +150,13 @@ signals:
   void assetMetadataEdited(const AssetMetadataView& metadata);
   void effectAddRequested(const QString& effectId);
   void parameterEdited(const QString& parameterId, const QVariant& value);
+  void viewerTransformPressed(const QString& handle, QPointF sequencePos);
+  void viewerTransformMoved(QPointF sequencePos);
+  void viewerTransformReleased();
+  void programOutputPresentationReady(NativePresentationHandles handles);
+  void programOutputPresentationResized(int width, int height);
+  void programOutputPresentationLost();
+  void programOutputClosed();
   void keyframeToggleRequested(const QString& parameterId);
   void effectParameterEdited(const QString& effectId, const QString& parameterId,
                              const QVariant& value);
@@ -173,10 +193,13 @@ private:
   void createToolBars();
   void createStatusBar();
   void connectControllerSurface();
+  void connectScopesDock();
   void labelInteractiveChrome();
   void applyDefaultLayout(Workspace workspace);
   void updateWorkspaceActions();
   void updateWorkspaceLabel();
+  void rebuildProgramOutputMenu();
+  void restoreProgramOutputScreen();
   void setShuttleRate(double rate);
   void stepShuttle(int direction);
   [[nodiscard]] bool sourceMonitorHasFocus() const;
@@ -200,9 +223,18 @@ private:
 
   ProgramViewer* program_viewer_{nullptr};
   ProgramViewer* source_viewer_{nullptr};
+  QSplitter* program_viewer_splitter_{nullptr};
+  QWidget* program_viewer_original_parent_{nullptr};
+  int program_viewer_splitter_index_{0};
+  QWidget* program_fullscreen_shell_{nullptr};
+  QShortcut* program_fullscreen_escape_{nullptr};
+  bool program_fullscreen_active_{false};
+  std::unique_ptr<ProgramOutputWindow> program_output_window_;
+  QMenu* program_output_menu_{nullptr};
   TimelineWidget* timeline_{nullptr};
   QWidget* source_container_{nullptr};
   QFrame* precision_trim_{nullptr};
+  QTabBar* sequence_tab_bar_{nullptr};
 
   MediaBinWidget* media_bin_{nullptr};
   InspectorWidget* inspector_{nullptr};

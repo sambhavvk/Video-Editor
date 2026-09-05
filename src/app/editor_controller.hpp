@@ -242,6 +242,9 @@ private slots:
   void discardCaptionReview();
   void captionStyleEdited(const QString& captionId, const desktop_ui::CaptionStyleView& style);
   void updateSelectedClipProperty(const QString& parameterId, const QVariant& value);
+  void beginViewerTransform(const QString& handle, QPointF sequencePos);
+  void updateViewerTransform(QPointF sequencePos);
+  void endViewerTransform();
   void toggleSelectedClipKeyframe(const QString& parameterId);
   void addEffect(const QString& effectId);
   void updateSelectedEffectParameter(const QString& effectId, const QString& parameterId,
@@ -301,6 +304,8 @@ private:
     bool gpu_used{false};
     bool gpu_failed{false};
     bool native_presented{false};
+    QImage secondary_image;
+    bool secondary_native_presented{false};
   };
 
   struct VideoExportOutcome {
@@ -442,6 +447,8 @@ private:
   void closeGap(const QString& gapKey);
   void requestPreview(PreviewRequestPolicy policy = PreviewRequestPolicy::Replace);
   void launchPreviewRequest();
+  void updateProgramOutputViewer(const PreviewOutcome& outcome);
+  void updateScopes(const render::CpuFrame* frame);
   void requestSourcePreview();
   void launchSourcePreviewRequest();
   void updateSourceMonitorChrome();
@@ -523,7 +530,10 @@ private:
   // project snapshot and is pruned against every authoritative revision.
   std::unordered_set<edit::EntityId> selected_clip_ids_;
   std::optional<edit::EntityId> active_clip_id_;
+  edit::EntityId active_sequence_id_{};
   std::optional<edit::EntityId> selected_transition_id_;
+  std::optional<ViewerTransformGesture> viewer_transform_;
+  std::uint64_t viewer_transform_generation_{0};
   // Last-applied speed percentage for the active clip, used when only the
   // reverse toggle changes (so the rate is preserved).
   double selected_speed_percent_{100.0};
@@ -543,10 +553,14 @@ private:
   bool gpu_preview_active_{false};
   bool gpu_fallback_latched_{false};
   bool gpu_status_announced_{false};
+  bool gpu_frame_fallback_announced_{false};
+  bool gpu_presentation_attempted_{false};
+  bool gpu_offscreen_attempted_{false};
   QFutureWatcher<std::shared_ptr<render::GpuRenderer>> gpu_init_watcher_;
   std::uint64_t gpu_init_generation_{0};
   std::uint64_t gpu_init_attach_generation_{0};
   bool gpu_init_started_{false};
+  bool gpu_secondary_presentation_{false};
   bool audio_master_active_{false};
   bool audio_status_announced_{false};
   bool audio_fallback_announced_{false};

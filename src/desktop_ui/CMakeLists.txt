@@ -19,7 +19,9 @@ add_library(video_editor_desktop_ui STATIC
     include/video_editor/desktop_ui/keyframe_curve_widget.hpp
     include/video_editor/desktop_ui/shortcut_bindings.hpp
     include/video_editor/desktop_ui/panel_widgets.hpp
+    include/video_editor/desktop_ui/program_output_window.hpp
     include/video_editor/desktop_ui/program_viewer.hpp
+    include/video_editor/desktop_ui/scope_widget.hpp
     include/video_editor/desktop_ui/timeline_widget.hpp
     include/video_editor/desktop_ui/ui_types.hpp
     src/cache_browser_dialog.cpp
@@ -30,7 +32,9 @@ add_library(video_editor_desktop_ui STATIC
     src/keyframe_curve_widget.cpp
     src/shortcut_bindings.cpp
     src/panel_widgets.cpp
+    src/program_output_window.cpp
     src/program_viewer.cpp
+    src/scope_widget.cpp
     src/timeline_widget.cpp
 )
 

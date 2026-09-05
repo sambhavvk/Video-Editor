@@ -43,6 +43,7 @@ struct NativePresentationSurface {
   GpuBackendKind backend{GpuBackendKind::Auto};
   std::uintptr_t instance{0};
   std::uintptr_t surface{0};
+  std::uintptr_t get_proc_addr{0};
   int width{0};
   int height{0};
 };
@@ -59,6 +60,7 @@ struct GpuCapabilities {
   GpuRuntimeState state{GpuRuntimeState::Unavailable};
   bool offscreen_rendering{false};
   bool presentation{false};
+  bool secondary_presentation{false};
   // Known on D3D11. Vulkan is false when software adapters were forbidden,
   // and unknown when allow_software permitted either class of device.
   std::optional<bool> software_device;
@@ -146,6 +148,16 @@ public:
   // Resizes the presentation swapchain. Returns GpuPresentationUnavailable when
   // the renderer was created without a working surface/swapchain.
   [[nodiscard]] RenderResult<bool> resize_presentation(int width, int height);
+
+  // Optional second presentation surface (same GPU device). When attached,
+  // present() also renders to the secondary swapchain. A failed secondary
+  // present does not fail the primary surface.
+  [[nodiscard]] RenderResult<bool>
+  attach_secondary_presentation(const NativePresentationSurface& surface);
+  void detach_secondary_presentation();
+  [[nodiscard]] RenderResult<bool> resize_secondary_presentation(int width, int height);
+  [[nodiscard]] bool secondary_presentation_attached() const noexcept;
+  [[nodiscard]] bool last_secondary_present_succeeded() const noexcept;
 
   // Allows an owning platform integration to forward an independently
   // observed D3D/Vulkan device-loss notification. All later GPU operations

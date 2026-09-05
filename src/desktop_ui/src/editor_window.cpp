@@ -8,8 +8,10 @@
 #include "video_editor/desktop_ui/command_palette.hpp"
 #include "video_editor/desktop_ui/keyboard_shortcuts_dialog.hpp"
 #include "video_editor/desktop_ui/panel_widgets.hpp"
-#include "video_editor/desktop_ui/shortcut_bindings.hpp"
+#include "video_editor/desktop_ui/program_output_window.hpp"
 #include "video_editor/desktop_ui/program_viewer.hpp"
+#include "video_editor/desktop_ui/scope_widget.hpp"
+#include "video_editor/desktop_ui/shortcut_bindings.hpp"
 #include "video_editor/desktop_ui/timeline_widget.hpp"
 
 #include <QAction>
@@ -21,14 +23,19 @@
 #include <QFileDialog>
 #include <QFrame>
 #include <QGroupBox>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QScreen>
 #include <QSettings>
+#include <QShortcut>
+#include <QSignalBlocker>
 #include <QSplitter>
 #include <QStatusBar>
+#include <QSignalBlocker>
 #include <QStyle>
 #include <QTabBar>
 #include <QToolBar>
@@ -328,6 +335,7 @@ void EditorWindow::restoreUiState() {
       settings_->value(QStringLiteral("ui/precisionTrimVisible"), false).toBool());
   updateWorkspaceActions();
   updateWorkspaceLabel();
+  restoreProgramOutputScreen();
 }
 
 void EditorWindow::saveUiState() {
@@ -346,6 +354,13 @@ void EditorWindow::saveUiState() {
 }
 
 void EditorWindow::closeEvent(QCloseEvent* event) {
+  if (program_fullscreen_active_) {
+    exitProgramFullscreen();
+  }
+  if (program_output_window_ != nullptr) {
+    program_output_window_->close();
+    program_output_window_.reset();
+  }
   saveUiState();
   QMainWindow::closeEvent(event);
 }
@@ -388,6 +403,7 @@ void EditorWindow::createCentralArea() {
   program_viewer_ = new ProgramViewer(viewerSplitter);
   program_viewer_->setObjectName(QStringLiteral("programViewer"));
   program_viewer_->setNativePresentationEnabled(true);
+  program_viewer_splitter_ = viewerSplitter;
   viewerSplitter->addWidget(source_container_);
   viewerSplitter->addWidget(program_viewer_);
   viewerSplitter->setStretchFactor(0, 1);
@@ -632,11 +648,25 @@ void EditorWindow::createActions() {
   auto* precisionTrim = create(QStringLiteral("precisionTrim"), tr("Precision Trim Controls"),
                                tr("Show precision trim controls"), QKeySequence{tr("T")});
   precisionTrim->setCheckable(true);
+  auto* scopes = create(QStringLiteral("scopes"), tr("Scopes"),
+                        tr("Show Rec.709 waveform, vectorscope, and histogram"), QKeySequence{tr("Shift+3")});
+  scopes->setCheckable(true);
   auto* safeGuides = create(QStringLiteral("safeGuides"), tr("Safe Guides"),
                             tr("Show title and action safe guides"));
   safeGuides->setCheckable(true);
+  auto* programFullscreen =
+      create(QStringLiteral("programFullscreen"), tr("Program Monitor Fullscreen"),
+             tr("Show the program monitor fullscreen on this display"), QKeySequence{Qt::Key_F11});
+  programFullscreen->setCheckable(true);
   create(QStringLiteral("commandPalette"), tr("Command Palette…"), tr("Search and run any command"),
          QKeySequence{tr("Ctrl+Shift+P")});
+
+  program_fullscreen_escape_ = new QShortcut(QKeySequence{Qt::Key_Escape}, this);
+  program_fullscreen_escape_->setObjectName(QStringLiteral("programFullscreenEscape"));
+  program_fullscreen_escape_->setContext(Qt::ApplicationShortcut);
+  program_fullscreen_escape_->setEnabled(false);
+  connect(program_fullscreen_escape_, &QShortcut::activated, this,
+          &EditorWindow::exitProgramFullscreen);
 
   auto* workspaceGroup = new QActionGroup(this);
   workspaceGroup->setExclusive(true);
@@ -714,6 +744,7 @@ void EditorWindow::createActions() {
           &EditorWindow::rippleInsertFromSource);
   connect(action(QStringLiteral("sourceOverwriteInsert")), &QAction::triggered, this,
           &EditorWindow::overwriteInsertFromSource);
+  connect(programFullscreen, &QAction::triggered, this, &EditorWindow::toggleProgramFullscreen);
 }
 
 void EditorWindow::loadShortcutOverrides() {
@@ -796,12 +827,18 @@ void EditorWindow::createMenus() {
   view->addSeparator();
   view->addAction(action(QStringLiteral("sourceMonitor")));
   view->addAction(action(QStringLiteral("precisionTrim")));
+  view->addAction(action(QStringLiteral("scopes")));
   view->addAction(action(QStringLiteral("safeGuides")));
+  view->addAction(action(QStringLiteral("programFullscreen")));
+  program_output_menu_ = view->addMenu(tr("Program monitor on display…"));
+  program_output_menu_->setObjectName(QStringLiteral("programOutputMenu"));
+  program_output_menu_->setAccessibleName(tr("Program monitor on display"));
+  connect(program_output_menu_, &QMenu::aboutToShow, this, &EditorWindow::rebuildProgramOutputMenu);
   auto* panels = view->addMenu(tr("Panels"));
   panels->setObjectName(QStringLiteral("panelsMenu"));
   panels->setAccessibleName(tr("Panels"));
-  for (auto* dock :
-       {media_dock_, inspector_dock_, effects_dock_, mixer_dock_, captions_dock_, deliver_dock_}) {
+  for (auto* dock : {media_dock_, inspector_dock_, effects_dock_, mixer_dock_, captions_dock_,
+                     deliver_dock_, scopes_dock_}) {
     panels->addAction(dock->toggleViewAction());
   }
 
@@ -907,6 +944,12 @@ void EditorWindow::connectControllerSurface() {
           [this](const QStringList&) { emit importMediaRequested(); });
   connect(program_viewer_, &ProgramViewer::togglePlaybackRequested,
           action(QStringLiteral("playPause")), &QAction::trigger);
+  connect(program_viewer_, &ProgramViewer::viewerTransformPressed, this,
+          &EditorWindow::viewerTransformPressed);
+  connect(program_viewer_, &ProgramViewer::viewerTransformMoved, this,
+          &EditorWindow::viewerTransformMoved);
+  connect(program_viewer_, &ProgramViewer::viewerTransformReleased, this,
+          &EditorWindow::viewerTransformReleased);
   connect(source_viewer_, &ProgramViewer::togglePlaybackRequested, this, [this] {
     emit sourcePlaybackRateRequested(shuttle_rate_ == 0.0 ? 1.0 : 0.0);
   });
@@ -1207,6 +1250,158 @@ QString EditorWindow::darkStyleSheet() {
         QSlider::handle:vertical { background: #aab5c7; border: 1px solid #d4dae4; height: 12px; margin: 0 -5px; border-radius: 3px; }
         QToolTip { background: #111318; color: #eef1f6; border: 1px solid #5b626f; padding: 4px; }
     )");
+}
+
+ProgramViewer* EditorWindow::programOutputViewer() const noexcept {
+  return program_output_window_ != nullptr ? program_output_window_->viewer() : nullptr;
+}
+
+void EditorWindow::toggleProgramFullscreen() {
+  if (program_fullscreen_active_) {
+    exitProgramFullscreen();
+    return;
+  }
+  if (program_viewer_ == nullptr || program_viewer_splitter_ == nullptr) {
+    return;
+  }
+
+  QScreen* screen = this->screen();
+  if (screen == nullptr) {
+    screen = QGuiApplication::primaryScreen();
+  }
+  if (screen == nullptr) {
+    return;
+  }
+
+  program_viewer_original_parent_ = program_viewer_->parentWidget();
+  program_viewer_splitter_index_ = program_viewer_splitter_->indexOf(program_viewer_);
+  if (program_fullscreen_shell_ == nullptr) {
+    program_fullscreen_shell_ = new QWidget(nullptr, Qt::Window);
+    program_fullscreen_shell_->setObjectName(QStringLiteral("programFullscreenShell"));
+    program_fullscreen_shell_->setAccessibleName(tr("Program monitor fullscreen"));
+    program_fullscreen_shell_->setWindowTitle(tr("Program Monitor"));
+    program_fullscreen_shell_->setAttribute(Qt::WA_QuitOnClose, false);
+    auto* layout = new QVBoxLayout(program_fullscreen_shell_);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+  }
+
+  program_viewer_->setParent(program_fullscreen_shell_);
+  program_fullscreen_shell_->layout()->addWidget(program_viewer_);
+  program_fullscreen_shell_->setScreen(screen);
+  program_fullscreen_shell_->showFullScreen();
+  program_viewer_->show();
+  program_viewer_->updateGeometry();
+
+  program_fullscreen_active_ = true;
+  if (auto* fullscreenAction = action(QStringLiteral("programFullscreen"))) {
+    fullscreenAction->setChecked(true);
+  }
+  if (program_fullscreen_escape_ != nullptr) {
+    program_fullscreen_escape_->setEnabled(true);
+  }
+}
+
+void EditorWindow::exitProgramFullscreen() {
+  if (!program_fullscreen_active_ || program_viewer_ == nullptr ||
+      program_viewer_splitter_ == nullptr) {
+    return;
+  }
+
+  program_viewer_->setParent(program_viewer_original_parent_);
+  program_viewer_splitter_->insertWidget(program_viewer_splitter_index_, program_viewer_);
+  program_viewer_->show();
+  program_viewer_->updateGeometry();
+  if (program_fullscreen_shell_ != nullptr) {
+    program_fullscreen_shell_->hide();
+  }
+
+  program_fullscreen_active_ = false;
+  if (auto* fullscreenAction = action(QStringLiteral("programFullscreen"))) {
+    fullscreenAction->setChecked(false);
+  }
+  if (program_fullscreen_escape_ != nullptr) {
+    program_fullscreen_escape_->setEnabled(false);
+  }
+}
+
+void EditorWindow::setProgramOutputScreen(QScreen* screen) {
+  if (screen == nullptr) {
+    if (program_output_window_ != nullptr) {
+      program_output_window_->close();
+      program_output_window_.reset();
+    }
+    if (settings_ != nullptr) {
+      settings_->remove(QStringLiteral("display/programOutputScreen"));
+    }
+    return;
+  }
+
+  if (program_output_window_ == nullptr) {
+    program_output_window_ = std::make_unique<ProgramOutputWindow>();
+    connect(program_output_window_.get(), &ProgramOutputWindow::nativePresentationReady, this,
+            &EditorWindow::programOutputPresentationReady);
+    connect(program_output_window_.get(), &ProgramOutputWindow::nativePresentationResized, this,
+            &EditorWindow::programOutputPresentationResized);
+    connect(program_output_window_.get(), &ProgramOutputWindow::nativePresentationLost, this,
+            &EditorWindow::programOutputPresentationLost);
+    connect(program_output_window_.get(), &ProgramOutputWindow::outputClosed, this,
+            [this] {
+              program_output_window_.reset();
+              if (settings_ != nullptr) {
+                settings_->remove(QStringLiteral("display/programOutputScreen"));
+              }
+              emit programOutputClosed();
+            });
+  }
+
+  program_output_window_->showOnScreen(screen);
+  if (settings_ != nullptr) {
+    settings_->setValue(QStringLiteral("display/programOutputScreen"), screen->name());
+  }
+}
+
+void EditorWindow::rebuildProgramOutputMenu() {
+  if (program_output_menu_ == nullptr) {
+    return;
+  }
+  program_output_menu_->clear();
+
+  auto* noneAction = program_output_menu_->addAction(tr("None"));
+  noneAction->setObjectName(QStringLiteral("programOutputScreenNone"));
+  connect(noneAction, &QAction::triggered, this, [this] { setProgramOutputScreen(nullptr); });
+
+  const auto screens = QGuiApplication::screens();
+  for (int index = 0; index < screens.size(); ++index) {
+    QScreen* screen = screens.at(index);
+    if (screen == nullptr) {
+      continue;
+    }
+    const QString label =
+        tr("Display %1 — %2").arg(index + 1).arg(screen->name());
+    auto* screenAction = program_output_menu_->addAction(label);
+    screenAction->setObjectName(QStringLiteral("programOutputScreen.%1").arg(index));
+    connect(screenAction, &QAction::triggered, this, [this, screen] {
+      setProgramOutputScreen(screen);
+    });
+  }
+}
+
+void EditorWindow::restoreProgramOutputScreen() {
+  if (settings_ == nullptr) {
+    return;
+  }
+  const QString stored =
+      settings_->value(QStringLiteral("display/programOutputScreen")).toString().trimmed();
+  if (stored.isEmpty()) {
+    return;
+  }
+  for (QScreen* screen : QGuiApplication::screens()) {
+    if (screen != nullptr && screen->name() == stored) {
+      setProgramOutputScreen(screen);
+      return;
+    }
+  }
 }
 
 } // namespace video_editor::desktop_ui

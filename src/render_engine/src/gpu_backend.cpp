@@ -150,6 +150,7 @@ void mark_device_lost(LibplaceboState& state, std::string message) {
   state.capabilities.state = GpuRuntimeState::DeviceLost;
   state.capabilities.offscreen_rendering = false;
   state.capabilities.presentation = false;
+  state.capabilities.secondary_presentation = false;
   state.capabilities.diagnostic = std::move(message);
 }
 
@@ -470,6 +471,10 @@ std::unique_ptr<GpuRenderer> GpuRenderer::create(const GpuOptions& options) {
     }
     device_params.instance = reinterpret_cast<VkInstance>(options.presentation.instance);
     device_params.surface = reinterpret_cast<VkSurfaceKHR>(options.presentation.surface);
+    if (options.presentation.get_proc_addr != 0) {
+      device_params.get_proc_addr =
+          reinterpret_cast<PFN_vkGetInstanceProcAddr>(options.presentation.get_proc_addr);
+    }
   }
   state->vulkan = pl_vulkan_create(state->log, &device_params);
   if (state->vulkan != nullptr) {
@@ -1089,35 +1094,52 @@ RenderResult<bool> GpuRenderer::present(const GpuImage& image) {
          .message = "GPU presentation requires an image owned by this renderer device"});
   }
 
-  pl_swapchain_frame swapchain_frame{};
-  if (!pl_swapchain_start_frame(state->swapchain, &swapchain_frame)) {
-    if (detect_device_loss(*state, "starting a presentation frame")) {
-      return RenderResult<bool>::failure(unavailable_error(state->capabilities));
+  const auto present_to = [&](pl_swapchain swapchain) -> RenderResult<bool> {
+    if (swapchain == nullptr) {
+      return RenderResult<bool>::failure(
+          {.code = RenderErrorCode::GpuPresentationUnavailable,
+           .message = "GPU renderer has no presentation swapchain"});
     }
-    return RenderResult<bool>::failure(
-        {.code = RenderErrorCode::GpuPresentFailed,
-         .message = "presentation surface is temporarily unavailable"});
-  }
-  pl_frame target{};
-  pl_frame_from_swapchain(&target, &swapchain_frame);
-  const pl_frame source =
-      make_frame(image.storage_->texture, image.storage_->width, image.storage_->height);
-  pl_render_params params = pl_render_default_params;
-  params.upscaler = &pl_filter_bilinear;
-  params.downscaler = &pl_filter_bilinear;
-  const bool rendered = pl_render_image(state->renderer, &source, &target, &params);
-  const bool submitted = pl_swapchain_submit_frame(state->swapchain);
-  if (!rendered || !submitted) {
-    if (detect_device_loss(*state, "presenting a frame")) {
-      return RenderResult<bool>::failure(unavailable_error(state->capabilities));
+    pl_swapchain_frame swapchain_frame{};
+    if (!pl_swapchain_start_frame(swapchain, &swapchain_frame)) {
+      if (detect_device_loss(*state, "starting a presentation frame")) {
+        return RenderResult<bool>::failure(unavailable_error(state->capabilities));
+      }
+      return RenderResult<bool>::failure(
+          {.code = RenderErrorCode::GpuPresentFailed,
+           .message = "presentation surface is temporarily unavailable"});
     }
-    return RenderResult<bool>::failure(
-        {.code = RenderErrorCode::GpuPresentFailed,
-         .message = rendered ? "GPU could not submit the presentation frame"
-                             : "libplacebo could not render the presentation frame"});
+    pl_frame target{};
+    pl_frame_from_swapchain(&target, &swapchain_frame);
+    const pl_frame source = make_frame(image.storage_->texture, image.storage_->width,
+                                       image.storage_->height);
+    pl_render_params params = pl_render_default_params;
+    params.upscaler = &pl_filter_bilinear;
+    params.downscaler = &pl_filter_bilinear;
+    const bool rendered = pl_render_image(state->renderer, &source, &target, &params);
+    const bool submitted = pl_swapchain_submit_frame(swapchain);
+    if (!rendered || !submitted) {
+      if (detect_device_loss(*state, "presenting a frame")) {
+        return RenderResult<bool>::failure(unavailable_error(state->capabilities));
+      }
+      return RenderResult<bool>::failure(
+          {.code = RenderErrorCode::GpuPresentFailed,
+           .message = rendered ? "GPU could not submit the presentation frame"
+                               : "libplacebo could not render the presentation frame"});
+    }
+    pl_swapchain_swap_buffers(swapchain);
+    return RenderResult<bool>::success(true);
+  };
+
+  state->last_secondary_present_succeeded = false;
+  const auto primary = present_to(state->swapchain);
+  if (!primary) {
+    return primary;
   }
-  pl_swapchain_swap_buffers(state->swapchain);
-  return RenderResult<bool>::success(true);
+  if (state->secondary_swapchain != nullptr) {
+    state->last_secondary_present_succeeded = static_cast<bool>(present_to(state->secondary_swapchain));
+  }
+  return primary;
 }
 
 RenderResult<bool> GpuRenderer::resize_presentation(const int width, const int height) {
@@ -1146,6 +1168,134 @@ RenderResult<bool> GpuRenderer::resize_presentation(const int width, const int h
          .message = "presentation surface is temporarily unavailable"});
   }
   return RenderResult<bool>::success(true);
+}
+
+[[nodiscard]] pl_swapchain create_swapchain(LibplaceboState& state,
+                                            const NativePresentationSurface& surface) {
+  if (surface.surface == 0) {
+    return nullptr;
+  }
+#if defined(_WIN32) && defined(PL_HAVE_D3D11)
+  pl_d3d11_swapchain_params swapchain_params{};
+  swapchain_params.window = reinterpret_cast<HWND>(surface.surface);
+  swapchain_params.width = std::max(1, surface.width);
+  swapchain_params.height = std::max(1, surface.height);
+  return pl_d3d11_create_swapchain(state.d3d11, &swapchain_params);
+#elif defined(__linux__) && defined(PL_HAVE_VULKAN)
+  pl_vulkan_swapchain_params swapchain_params{};
+  swapchain_params.surface = reinterpret_cast<VkSurfaceKHR>(surface.surface);
+  swapchain_params.present_mode = VK_PRESENT_MODE_FIFO_KHR;
+  pl_swapchain created = pl_vulkan_create_swapchain(state.vulkan, &swapchain_params);
+  if (created != nullptr) {
+    int width = std::max(1, surface.width);
+    int height = std::max(1, surface.height);
+    pl_swapchain_resize(created, &width, &height);
+  }
+  return created;
+#else
+  (void)state;
+  (void)surface;
+  return nullptr;
+#endif
+}
+
+RenderResult<bool> GpuRenderer::attach_secondary_presentation(
+    const NativePresentationSurface& surface) {
+  const auto state = implementation_ ? implementation_->state : nullptr;
+  if (!state) {
+    return RenderResult<bool>::failure(
+        {.code = RenderErrorCode::GpuUnavailable, .message = "GPU renderer has no state"});
+  }
+  std::scoped_lock lock(state->mutex);
+  if (!state->capabilities.available()) {
+    return RenderResult<bool>::failure(unavailable_error(state->capabilities));
+  }
+  if (state->swapchain == nullptr) {
+    return RenderResult<bool>::failure(
+        {.code = RenderErrorCode::GpuPresentationUnavailable,
+         .message = "GPU renderer was created without a working presentation surface"});
+  }
+  if (surface.surface == 0) {
+    return RenderResult<bool>::failure(
+        {.code = RenderErrorCode::GpuPresentationUnavailable,
+         .message = "secondary presentation requires a non-zero surface handle"});
+  }
+
+  if (state->secondary_swapchain != nullptr) {
+    pl_swapchain_destroy(&state->secondary_swapchain);
+    state->secondary_swapchain = nullptr;
+    state->capabilities.secondary_presentation = false;
+  }
+
+  state->secondary_swapchain = create_swapchain(*state, surface);
+  state->capabilities.secondary_presentation = state->secondary_swapchain != nullptr;
+  state->last_secondary_present_succeeded = false;
+  if (state->secondary_swapchain == nullptr) {
+    return RenderResult<bool>::failure(
+        {.code = RenderErrorCode::GpuPresentationUnavailable,
+         .message = "secondary presentation swapchain creation failed"});
+  }
+  return RenderResult<bool>::success(true);
+}
+
+void GpuRenderer::detach_secondary_presentation() {
+  const auto state = implementation_ ? implementation_->state : nullptr;
+  if (!state) {
+    return;
+  }
+  std::scoped_lock lock(state->mutex);
+  if (state->secondary_swapchain != nullptr) {
+    pl_swapchain_destroy(&state->secondary_swapchain);
+    state->secondary_swapchain = nullptr;
+  }
+  state->capabilities.secondary_presentation = false;
+  state->last_secondary_present_succeeded = false;
+}
+
+RenderResult<bool> GpuRenderer::resize_secondary_presentation(const int width, const int height) {
+  const auto state = implementation_ ? implementation_->state : nullptr;
+  if (!state) {
+    return RenderResult<bool>::failure(
+        {.code = RenderErrorCode::GpuUnavailable, .message = "GPU renderer has no state"});
+  }
+  std::scoped_lock lock(state->mutex);
+  if (!state->capabilities.available()) {
+    return RenderResult<bool>::failure(unavailable_error(state->capabilities));
+  }
+  if (state->secondary_swapchain == nullptr) {
+    return RenderResult<bool>::failure(
+        {.code = RenderErrorCode::GpuPresentationUnavailable,
+         .message = "GPU renderer has no secondary presentation surface"});
+  }
+  int resize_width = std::max(1, width);
+  int resize_height = std::max(1, height);
+  if (!pl_swapchain_resize(state->secondary_swapchain, &resize_width, &resize_height)) {
+    if (detect_device_loss(*state, "resizing the secondary presentation surface")) {
+      return RenderResult<bool>::failure(unavailable_error(state->capabilities));
+    }
+    return RenderResult<bool>::failure(
+        {.code = RenderErrorCode::GpuPresentFailed,
+         .message = "secondary presentation surface is temporarily unavailable"});
+  }
+  return RenderResult<bool>::success(true);
+}
+
+bool GpuRenderer::secondary_presentation_attached() const noexcept {
+  const auto state = implementation_ ? implementation_->state : nullptr;
+  if (!state) {
+    return false;
+  }
+  std::scoped_lock lock(state->mutex);
+  return state->secondary_swapchain != nullptr;
+}
+
+bool GpuRenderer::last_secondary_present_succeeded() const noexcept {
+  const auto state = implementation_ ? implementation_->state : nullptr;
+  if (!state) {
+    return false;
+  }
+  std::scoped_lock lock(state->mutex);
+  return state->last_secondary_present_succeeded;
 }
 
 void GpuRenderer::notify_device_lost(std::string diagnostic) {
@@ -1248,6 +1398,23 @@ RenderResult<bool> GpuRenderer::resize_presentation(int, int) {
   return RenderResult<bool>::failure(
       {.code = RenderErrorCode::GpuPresentationUnavailable,
        .message = "GPU renderer was created without a working presentation surface"});
+}
+RenderResult<bool> GpuRenderer::attach_secondary_presentation(const NativePresentationSurface&) {
+  return RenderResult<bool>::failure(
+      {.code = RenderErrorCode::GpuPresentationUnavailable,
+       .message = "GPU renderer was created without a working presentation surface"});
+}
+void GpuRenderer::detach_secondary_presentation() {}
+RenderResult<bool> GpuRenderer::resize_secondary_presentation(int, int) {
+  return RenderResult<bool>::failure(
+      {.code = RenderErrorCode::GpuPresentationUnavailable,
+       .message = "GPU renderer has no secondary presentation surface"});
+}
+bool GpuRenderer::secondary_presentation_attached() const noexcept {
+  return false;
+}
+bool GpuRenderer::last_secondary_present_succeeded() const noexcept {
+  return false;
 }
 void GpuRenderer::notify_device_lost(std::string diagnostic) {
   if (!implementation_) {
