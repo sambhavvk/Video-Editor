@@ -239,6 +239,95 @@ struct PresetConfiguration final {
       .encoder = encoder, .device_type = kDeviceType, .hardware_pixel_format = kHardwareFormat};
 }
 
+[[nodiscard]] std::optional<HardwareEncoderSelection> hardware_av1_encoder() noexcept {
+#ifdef __linux__
+  constexpr const char* kEncoderName = "av1_vaapi";
+  constexpr AVHWDeviceType kDeviceType = AV_HWDEVICE_TYPE_VAAPI;
+  constexpr AVPixelFormat kHardwareFormat = AV_PIX_FMT_VAAPI;
+#else
+  return std::nullopt;
+#endif
+  const AVCodec* encoder = avcodec_find_encoder_by_name(kEncoderName);
+  if (encoder == nullptr) {
+    return std::nullopt;
+  }
+  return HardwareEncoderSelection{
+      .encoder = encoder, .device_type = kDeviceType, .hardware_pixel_format = kHardwareFormat};
+}
+
+[[nodiscard]] bool uses_creator_webm_hardware(const VideoPreset preset) noexcept {
+  return preset == VideoPreset::Vp9OpusWebm || preset == VideoPreset::Av1OpusWebm;
+}
+
+[[nodiscard]] bool container_supports_embedded_captions(const VideoPreset preset) noexcept {
+  return preset == VideoPreset::Ffv1Matroska || preset == VideoPreset::Vp9OpusWebm ||
+         preset == VideoPreset::Av1OpusWebm;
+}
+
+struct EmbeddedSubtitleContext final {
+  AVStream* stream{nullptr};
+  AVRational time_base{};
+};
+
+[[nodiscard]] std::string ffmpeg_error(int error);
+
+[[nodiscard]] std::string format_webvtt_cue_payload(const edit::Caption& caption) {
+  return caption.text + '\n';
+}
+
+[[nodiscard]] std::optional<ExportError>
+setup_embedded_webvtt_stream(AVFormatContext& format, const AVRational time_base,
+                             EmbeddedSubtitleContext& embedded) {
+  if (avcodec_descriptor_get(AV_CODEC_ID_WEBVTT) == nullptr) {
+    return ExportError{.code = ExportErrorCode::EncoderUnavailable,
+                       .message = "WebVTT muxing is not available"};
+  }
+  embedded.stream = avformat_new_stream(&format, nullptr);
+  if (embedded.stream == nullptr) {
+    return ExportError{.code = ExportErrorCode::EncodingFailed,
+                       .message = "could not create export subtitle stream"};
+  }
+  embedded.stream->codecpar->codec_type = AVMEDIA_TYPE_SUBTITLE;
+  embedded.stream->codecpar->codec_id = AV_CODEC_ID_WEBVTT;
+  embedded.stream->time_base = time_base;
+  embedded.time_base = time_base;
+  return std::nullopt;
+}
+
+[[nodiscard]] std::optional<ExportError>
+write_embedded_webvtt_captions(const std::vector<edit::Caption>& captions,
+                               EmbeddedSubtitleContext& embedded, AVFormatContext& format,
+                               AVPacket& packet) {
+  for (const auto& caption : captions) {
+    if (caption.text.empty()) {
+      continue;
+    }
+    const std::string payload = format_webvtt_cue_payload(caption);
+    const AVRational start_q{1, static_cast<int>(caption.range.start.timescale())};
+    const AVRational duration_q{1, static_cast<int>(caption.range.duration.timescale())};
+    const std::int64_t pts = av_rescale_q(caption.range.start.value(), start_q, embedded.time_base);
+    const std::int64_t duration =
+        av_rescale_q(caption.range.duration.value(), duration_q, embedded.time_base);
+    av_packet_unref(&packet);
+    if (av_new_packet(&packet, static_cast<int>(payload.size())) < 0) {
+      return ExportError{.code = ExportErrorCode::EncodingFailed,
+                         .message = "could not allocate embedded caption packet"};
+    }
+    std::memcpy(packet.data, payload.data(), payload.size());
+    packet.pts = pts;
+    packet.dts = pts;
+    packet.duration = duration;
+    packet.stream_index = embedded.stream->index;
+    const int written = av_interleaved_write_frame(&format, &packet);
+    av_packet_unref(&packet);
+    if (written < 0) {
+      return ExportError{.code = ExportErrorCode::EncodingFailed,
+                         .message = "could not write embedded caption: " + ffmpeg_error(written)};
+    }
+  }
+  return std::nullopt;
+}
+
 [[nodiscard]] bool encoder_supports_pixel_format(const AVCodec& encoder,
                                                  const AVPixelFormat pixel_format) noexcept {
   const void* raw_configurations = nullptr;
@@ -730,14 +819,18 @@ ExportOutcome export_video_impl(const ExportRequest& request, const bool use_har
       return failure(ExportErrorCode::InvalidRequest,
                      "podcast audio-only delivery requires audio export");
     }
-    if (audio_only && (request.caption_mode == CaptionExportMode::BurnIn ||
-                       request.caption_mode == CaptionExportMode::BurnInAndSidecar)) {
+    if (audio_only && caption_mode_burns_in(request.caption_mode)) {
       return failure(ExportErrorCode::InvalidRequest,
                      "caption burn-in is not available for audio-only delivery");
     }
+    if (audio_only && caption_mode_embeds(request.caption_mode)) {
+      return failure(ExportErrorCode::InvalidRequest,
+                     "embedded captions are not available for audio-only delivery");
+    }
     if (request.preset != VideoPreset::Ffv1Matroska &&
         request.preset != VideoPreset::ProRes422HqMov &&
-        request.preset != VideoPreset::Vp9OpusWebm) {
+        request.preset != VideoPreset::Vp9OpusWebm &&
+        request.preset != VideoPreset::Av1OpusWebm) {
       return failure(ExportErrorCode::InvalidRequest, "unknown export preset");
     }
     if (request.cancellation.stop_requested()) {
@@ -1170,6 +1263,19 @@ ExportOutcome export_video_impl(const ExportRequest& request, const bool use_har
       audio_stream->time_base = audio_codec->time_base;
     }
 
+    EmbeddedSubtitleContext embedded_subtitles;
+    const bool embed_captions = caption_mode_embeds(request.caption_mode);
+    if (embed_captions) {
+      const AVRational subtitle_time_base =
+          audio_only ? AVRational{1, 1000}
+                     : AVRational{static_cast<int>(output_rate.denominator()),
+                                  static_cast<int>(output_rate.numerator())};
+      if (const auto setup_error =
+              setup_embedded_webvtt_stream(*format, subtitle_time_base, embedded_subtitles)) {
+        return ExportOutcome::failure(*setup_error);
+      }
+    }
+
     status = avio_open(&format->pb, temporary_name.c_str(), AVIO_FLAG_WRITE);
     if (status < 0) {
       return failure(ExportErrorCode::IoFailed,
@@ -1320,8 +1426,7 @@ ExportOutcome export_video_impl(const ExportRequest& request, const bool use_har
                                                             rendered.error->message);
         }
         render::VideoFrame frame_for_export = *rendered.value;
-        if (request.caption_mode == CaptionExportMode::BurnIn ||
-            request.caption_mode == CaptionExportMode::BurnInAndSidecar) {
+        if (caption_mode_burns_in(request.caption_mode)) {
           if (frame_for_export.layout != render::PixelLayout::RgbaFloat32 ||
               !std::holds_alternative<std::shared_ptr<const render::CpuFrame>>(
                   frame_for_export.storage)) {
@@ -1446,6 +1551,13 @@ ExportOutcome export_video_impl(const ExportRequest& request, const bool use_har
                        "could not finish audio encoding: " + ffmpeg_error(status));
       }
     }
+    if (embed_captions) {
+      if (auto subtitle_error =
+              write_embedded_webvtt_captions(request.captions, embedded_subtitles, *format,
+                                             *packet)) {
+        return ExportOutcome::failure(*subtitle_error);
+      }
+    }
     if (request.cancellation.stop_requested()) {
       return failure(ExportErrorCode::Cancelled, "export was cancelled");
     }
@@ -1512,8 +1624,7 @@ ExportOutcome export_video_impl(const ExportRequest& request, const bool use_har
     // Write caption sidecar after the media file is committed so a sidecar
     // failure never prevents the media file from being available. The sidecar
     // path is derived from the destination stem.
-    if (request.caption_mode == CaptionExportMode::Sidecar ||
-        request.caption_mode == CaptionExportMode::BurnInAndSidecar) {
+    if (caption_mode_writes_sidecar(request.caption_mode)) {
       const auto sidecar_outcome = write_caption_sidecar(
           request.captions, request.destination, request.sidecar_format, edit::Time{}, duration);
       if (sidecar_outcome) {

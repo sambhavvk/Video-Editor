@@ -2521,6 +2521,8 @@ DeliverPanelWidget::DeliverPanelWidget(QWidget* parent) : QWidget(parent) {
   caption_mode_->addItem(tr("Burn in"), QStringLiteral("burn_in"));
   caption_mode_->addItem(tr("Sidecar file"), QStringLiteral("sidecar"));
   caption_mode_->addItem(tr("Burn in + sidecar"), QStringLiteral("burn_in_and_sidecar"));
+  caption_mode_->addItem(tr("Embedded WebVTT"), QStringLiteral("embedded"));
+  caption_mode_->addItem(tr("Burn in + embedded"), QStringLiteral("burn_in_and_embedded"));
   advancedForm->addRow(tr("Captions"), caption_mode_);
 
   sidecar_format_ = new QComboBox(advanced);

@@ -41,6 +41,8 @@ enum class CaptionExportMode : std::uint8_t {
   BurnIn,  // render captions into video frames
   Sidecar, // write SRT/WebVTT alongside the media file
   BurnInAndSidecar,
+  Embedded,          // mux WebVTT subtitle stream into WebM/Matroska
+  BurnInAndEmbedded, // burn in plus muxed WebVTT
 };
 
 enum class SidecarFormat : std::uint8_t { Srt, WebVtt };

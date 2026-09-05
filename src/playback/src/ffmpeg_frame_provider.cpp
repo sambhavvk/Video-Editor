@@ -17,6 +17,7 @@ extern "C" {
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -253,7 +254,8 @@ struct FrameReadResult final {
       }
     } while (session.packet->stream_index != session.stream_index);
 
-    if (read_result == AVERROR_EOF) {
+    if (read_result == AVERROR_EOF || read_result == AVERROR(EIO) ||
+        read_result == AVERROR_INVALIDDATA) {
       session.draining = true;
       const int drain_result = avcodec_send_packet(session.decoder.get(), nullptr);
       if (drain_result < 0 && drain_result != AVERROR_EOF) {

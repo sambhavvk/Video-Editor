@@ -205,7 +205,8 @@ TEST(MediaFormatOpen, SuppressesHarmlessDecodeNoise) {
       AV_LOG_WARNING, "[opus @ 0x1] Could not update timestamps for skipped samples.\n"));
   EXPECT_TRUE(should_suppress_ffmpeg_log(
       AV_LOG_WARNING, "[swscaler @ 0x1] deprecated pixel format used, make sure you did set range correctly\n"));
-  EXPECT_FALSE(should_suppress_ffmpeg_log(AV_LOG_ERROR, "Read error at pos. 190049971"));
+  EXPECT_TRUE(should_suppress_ffmpeg_log(AV_LOG_ERROR, "Read error at pos. 41355942 (0x2770aa6)\n"));
+  EXPECT_TRUE(should_suppress_ffmpeg_log(AV_LOG_ERROR, "Invalid track number 0\n"));
   EXPECT_FALSE(should_suppress_ffmpeg_log(AV_LOG_WARNING, "Could not find codec parameters"));
   EXPECT_FALSE(should_suppress_ffmpeg_log(AV_LOG_INFO, "Could not update timestamps for skipped samples"));
 }

@@ -37,7 +37,12 @@ bool should_suppress_ffmpeg_log(const int level, const std::string_view message)
     return false;
   }
   return message.find("Could not update timestamps for skipped samples") != std::string_view::npos ||
-         message.find("deprecated pixel format used") != std::string_view::npos;
+         message.find("deprecated pixel format used") != std::string_view::npos ||
+         // WebM/MKV seeks often land between clusters. FFmpeg logs these as
+         // ERROR even when the next read is simply EOF; the GUI already holds
+         // the last frame instead of failing the project.
+         message.find("Read error at pos") != std::string_view::npos ||
+         message.find("Invalid track number") != std::string_view::npos;
 }
 
 namespace {
