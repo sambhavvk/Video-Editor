@@ -5,6 +5,7 @@
 #include "video_editor/audio_engine/dsp.h"
 #include "video_editor/audio_engine/loudness_meter.h"
 #include "video_editor/audio_engine/miniaudio_output_device.h"
+#include "video_editor/audio_engine/realtime_buffer_policy.h"
 #include "video_editor/audio_engine/realtime_playback.h"
 #include "video_editor/audio_engine/spsc_audio_ring.h"
 
@@ -1177,6 +1178,26 @@ TEST(LoudnessMeter, AcceptsMatchingBlocksAndReportsSamplePeak) {
   const LoudnessReading reading = meter.reading();
   ASSERT_EQ(reading.sample_peak_dbfs.size(), 2U);
   EXPECT_NEAR(reading.sample_peak_dbfs[0], -12.04, 0.1);
+}
+
+TEST(RealtimeBufferPolicy, GrowsFromSmallToLargeAndConvertsFramesToMilliseconds) {
+  EXPECT_EQ(clamp_realtime_buffer_size(-1), RealtimeBufferSize::Small);
+  EXPECT_EQ(clamp_realtime_buffer_size(99), RealtimeBufferSize::Large);
+  EXPECT_EQ(grow_realtime_buffer_size(RealtimeBufferSize::Small), RealtimeBufferSize::Medium);
+  EXPECT_EQ(grow_realtime_buffer_size(RealtimeBufferSize::Large), RealtimeBufferSize::Large);
+  EXPECT_EQ(effective_realtime_buffer_size(RealtimeBufferSize::Small, 2),
+            RealtimeBufferSize::Large);
+  EXPECT_EQ(profile_for(RealtimeBufferSize::Medium).ring_capacity_frames, 192'000U);
+  EXPECT_EQ(profile_for(RealtimeBufferSize::Large).prefill_frames, 96'000U);
+  EXPECT_NEAR(frames_to_milliseconds(480), 10.0, 0.0001);
+  EXPECT_NEAR(av_clock_error_milliseconds(48'000, 1.0), 0.0, 0.0001);
+  EXPECT_NEAR(av_clock_error_milliseconds(48'480, 1.0), 10.0, 0.0001);
+  const RealtimePlaybackConfiguration configuration =
+      configuration_for_buffer_size(RealtimeBufferSize::Large, "device-a", 240);
+  EXPECT_EQ(configuration.ring_capacity_frames, 384'000U);
+  EXPECT_EQ(configuration.device_id, "device-a");
+  ASSERT_TRUE(configuration.calibrated_latency_frames.has_value());
+  EXPECT_EQ(*configuration.calibrated_latency_frames, 240U);
 }
 
 } // namespace

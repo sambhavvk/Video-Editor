@@ -883,6 +883,13 @@ void EditorWindow::createStatusBar() {
   format->setObjectName(QStringLiteral("sequenceFormatStatus"));
   format->setAccessibleName(tr("Sequence output format"));
   statusBar()->addPermanentWidget(format);
+  auto* sync_separator = new QLabel(QStringLiteral("  •  "), statusBar());
+  sync_separator->setProperty("muted", true);
+  statusBar()->addPermanentWidget(sync_separator);
+  av_sync_label_ = new QLabel(tr("A/V: idle"), statusBar());
+  av_sync_label_->setObjectName(QStringLiteral("audioSyncStatus"));
+  av_sync_label_->setAccessibleName(tr("Audio and video sync status"));
+  statusBar()->addPermanentWidget(av_sync_label_);
   updateWorkspaceLabel();
 }
 

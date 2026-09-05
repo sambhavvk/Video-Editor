@@ -219,9 +219,11 @@ private:
   QDockWidget* mixer_dock_{nullptr};
   QDockWidget* captions_dock_{nullptr};
   QDockWidget* deliver_dock_{nullptr};
+  QDockWidget* scopes_dock_{nullptr};
 
   CommandPalette* command_palette_{nullptr};
   QLabel* workspace_label_{nullptr};
+  QLabel* av_sync_label_{nullptr};
   QLabel* transport_label_{nullptr};
   QToolBar* workspace_toolbar_{nullptr};
 };

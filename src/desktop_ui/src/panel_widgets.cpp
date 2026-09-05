@@ -1172,6 +1172,23 @@ AudioMixerWidget::AudioMixerWidget(QWidget* parent) : QWidget(parent) {
   calibrated_latency_label_->hide();
   deviceRow->addWidget(calibrated_latency_label_);
   layout->addLayout(deviceRow);
+
+  auto* bufferRow = new QHBoxLayout;
+  bufferRow->addWidget(new QLabel(tr("Buffer"), this));
+  buffer_size_ = new QComboBox(this);
+  buffer_size_->setObjectName(QStringLiteral("audioBufferSize"));
+  buffer_size_->setAccessibleName(tr("Realtime audio buffer size"));
+  buffer_size_->addItem(tr("Small"), 0);
+  buffer_size_->addItem(tr("Medium"), 1);
+  buffer_size_->addItem(tr("Large"), 2);
+  buffer_size_->setCurrentIndex(1);
+  bufferRow->addWidget(buffer_size_);
+  sync_status_ = new QLabel(tr("A/V: idle"), this);
+  sync_status_->setObjectName(QStringLiteral("audioSyncDiagnostics"));
+  sync_status_->setAccessibleName(tr("Audio and video sync diagnostics"));
+  sync_status_->setProperty("muted", true);
+  bufferRow->addWidget(sync_status_, 1);
+  layout->addLayout(bufferRow);
   connect(device_selector_, &QComboBox::currentIndexChanged, this, [this](int index) {
     if (index >= 0) {
       emit outputDeviceSelected(device_selector_->itemData(index).toString());
@@ -1179,6 +1196,11 @@ AudioMixerWidget::AudioMixerWidget(QWidget* parent) : QWidget(parent) {
   });
   connect(calibrate_latency_, &QPushButton::clicked, this,
           &AudioMixerWidget::calibrateOutputLatencyRequested);
+  connect(buffer_size_, &QComboBox::currentIndexChanged, this, [this](int index) {
+    if (index >= 0) {
+      emit bufferSizeChanged(buffer_size_->itemData(index).toInt());
+    }
+  });
 
   auto* normalize = new QGroupBox(tr("Loudness normalization"), this);
   normalize->setObjectName(QStringLiteral("loudnessNormalization"));
@@ -1717,6 +1739,47 @@ void AudioMixerWidget::setCalibrationBusy(const bool busy) {
     calibrate_latency_->setEnabled(!busy && device_selector_ != nullptr &&
                                    device_selector_->isEnabled());
   }
+}
+
+void AudioMixerWidget::setSyncDiagnostics(const std::uint64_t xrunCount, const double uncertaintyMs,
+                                          const double estimatedErrorMs, const int bufferSize,
+                                          const bool adaptive) {
+  if (sync_status_ == nullptr) {
+    return;
+  }
+  QString buffer_name = tr("Medium");
+  if (bufferSize <= 0) {
+    buffer_name = tr("Small");
+  } else if (bufferSize >= 2) {
+    buffer_name = tr("Large");
+  }
+  if (adaptive && bufferSize < 2) {
+    buffer_name = tr("%1 (adaptive)").arg(buffer_name);
+  }
+  sync_status_->setText(tr("A/V: %1 ms uncertainty · %2 ms error · %3 xruns · %4 buffer")
+                            .arg(uncertaintyMs, 0, 'f', 1)
+                            .arg(estimatedErrorMs, 0, 'f', 1)
+                            .arg(xrunCount)
+                            .arg(buffer_name));
+}
+
+void AudioMixerWidget::setBufferSize(const int bufferSize) {
+  if (buffer_size_ == nullptr) {
+    return;
+  }
+  const int clamped = std::clamp(bufferSize, 0, 2);
+  const QSignalBlocker blocker(buffer_size_);
+  const int index = buffer_size_->findData(clamped);
+  if (index >= 0) {
+    buffer_size_->setCurrentIndex(index);
+  }
+}
+
+int AudioMixerWidget::bufferSize() const {
+  if (buffer_size_ == nullptr) {
+    return 1;
+  }
+  return buffer_size_->currentData().toInt();
 }
 
 void AudioMixerWidget::setNormalizationReview(const double measuredLufs, const double gainDb,

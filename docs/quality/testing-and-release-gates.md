@@ -132,6 +132,11 @@ These runs require calibrated latency and real hardware. Accelerated fake-device
 not satisfy them. Residual clock uncertainty after calibration is expected and must not be reported
 as zero.
 
+Record evidence with `python3 tools/quality/physical_av_lab.py --hours 1 --gate xrun` and
+`--hours 2 --gate drift` after mixer **Calibrate**. The desktop adaptive buffer (Small/Medium/Large,
+grown after xrun) and A/V HUD report `clock_uncertainty_frames` and estimated wall-clock error;
+they do not replace the lab archive.
+
 ## Corpus status
 
 `tests/fixtures/corpus/manifest.json` remains a committed scaffold with one verifier fixture.

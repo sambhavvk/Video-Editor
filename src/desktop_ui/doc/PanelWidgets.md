@@ -39,9 +39,11 @@ disabled. `setMeterLevels` remains a compatibility entry point.
 
 `setOutputDevices` replaces stable IDs/names, current selection, availability, and status. Selection
 emits an ID, with the empty ID representing **System default**; actual device opening and recovery
-remain application responsibilities. Normalization methods publish the editable −24 through −9
-LUFS target plus busy, review, and failure state. Apply remains disabled until the controller
-supplies a valid current-generation review.
+remain application responsibilities. `setBufferSize` / `bufferSizeChanged` expose Small/Medium/Large
+decode-ahead profiles. `setSyncDiagnostics` publishes xrun count, clock uncertainty, estimated A/V
+error, and whether the effective profile was grown after an underrun. Normalization methods publish
+the editable −24 through −9 LUFS target plus busy, review, and failure state. Apply remains disabled
+until the controller supplies a valid current-generation review.
 
 ## DeliverPanelWidget
 

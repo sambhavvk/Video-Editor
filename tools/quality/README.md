@@ -20,6 +20,10 @@
   encoder/decoder highlights, and a skip-friendly libplacebo/Vulkan probe. Write
   JSON and text artifacts with `--artifacts DIR`. Missing GPUs are reported, not
   treated as hard failures.
+- `physical_av_lab.py` runs the opt-in `PhysicalAvLab` gtest against a real
+  miniaudio device and writes JSON evidence. `--gate xrun` is one hour with zero
+  xruns; `--gate drift` is two hours with A/V error below 10 ms. Short `--seconds`
+  smokes are not a release sign-off.
 - `validate_flatpak.py` checks the Linux-first Flatpak skeleton: application ID,
   no network permission, desktop/metainfo/svg, and `release-sources.json`.
   Unpinned sources are warnings; `--store` promotes them to failures. Optional

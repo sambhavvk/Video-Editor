@@ -8,9 +8,11 @@
 #include "video_editor/audio_engine/async_realtime_playback.h"
 #include "video_editor/audio_engine/miniaudio_output_device.h"
 #include "video_editor/audio_engine/output_latency_calibration.h"
+#include "video_editor/audio_engine/realtime_buffer_policy.h"
 #include "video_editor/audio_render/loudness_normalize.h"
 #include "video_editor/audio_render/original_audio_registry.h"
 #include "video_editor/audio_render/timeline_audio_renderer.h"
+#include "video_editor/audio_render/track_dsp_chain.h"
 #include "video_editor/caption_service/caption_service.h"
 #include "video_editor/caption_service/embedded_extract.h"
 #include "video_editor/media_codec/subtitle_extract.h"
@@ -1259,7 +1261,13 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
       audioSettings.value(QStringLiteral("audio/outputDeviceId")).toString();
   selected_device_calibrated_latency_frames_ =
       loadCalibratedLatencyFrames(selected_audio_device_id_);
+  audio_buffer_size_ = static_cast<int>(audio::clamp_realtime_buffer_size(
+      audioSettings.value(QStringLiteral("audio/bufferSize"), 1).toInt()));
+  audio_adaptive_boost_ = static_cast<std::uint8_t>(std::clamp(
+      audioSettings.value(QStringLiteral("audio/adaptiveBufferBoost"), 0).toInt(), 0, 2));
+  window_.audioMixer()->setBufferSize(audio_buffer_size_);
   refreshCalibratedLatencyPresentation();
+  updateAudioSyncPresentation();
   normalization_target_lufs_ = std::clamp(
       audioSettings.value(QStringLiteral("audio/normalizationTargetLufs"), -14.0).toDouble(), -24.0,
       -9.0);
@@ -1378,6 +1386,22 @@ std::int64_t EditorController::audioMasterSampleCounter() const noexcept {
 
 std::uint64_t EditorController::audioXrunCount() const {
   return audio_playback_ != nullptr ? audio_playback_->diagnostics().playback.xrun_count : 0;
+}
+
+std::uint64_t EditorController::audioClockUncertaintyFrames() const {
+  return audio_playback_ != nullptr
+             ? audio_playback_->diagnostics().playback.clock_uncertainty_frames
+             : 0U;
+}
+
+double EditorController::estimatedAvErrorMilliseconds() const {
+  return last_av_error_ms_;
+}
+
+int EditorController::audioBufferSize() const {
+  return static_cast<int>(
+      audio::effective_realtime_buffer_size(audio::clamp_realtime_buffer_size(audio_buffer_size_),
+                                            audio_adaptive_boost_));
 }
 
 bool EditorController::audioControlPending() const {
@@ -3463,6 +3487,13 @@ void EditorController::advancePlayback() {
       playhead_ = timelinePlayheadFromAudioClock(playback.sample_counter, audio_clock_origin_,
                                                 audio_transport_rate_, end);
       audio_clock_applied = true;
+      if (!audio_master_wall_.isValid()) {
+        audio_master_wall_.start();
+        audio_master_wall_origin_ = playback.sample_counter;
+      }
+      last_av_error_ms_ = audio::av_clock_error_milliseconds(
+          playback.sample_counter, static_cast<double>(audio_master_wall_.nsecsElapsed()) / 1.0e9,
+          audio_master_wall_origin_);
       if (playback.xrun_count > last_audio_xrun_count_) {
         if (last_audio_xrun_count_ == 0) {
           window_.showTransientMessage(
@@ -3470,7 +3501,20 @@ void EditorController::advancePlayback() {
               8'000);
         }
         last_audio_xrun_count_ = playback.xrun_count;
+        const audio::RealtimeBufferSize before = audio::effective_realtime_buffer_size(
+            audio::clamp_realtime_buffer_size(audio_buffer_size_), audio_adaptive_boost_);
+        if (before != audio::RealtimeBufferSize::Large) {
+          audio_adaptive_boost_ =
+              static_cast<std::uint8_t>(std::min(2, static_cast<int>(audio_adaptive_boost_) + 1));
+          QSettings settings;
+          settings.setValue(QStringLiteral("audio/adaptiveBufferBoost"),
+                            static_cast<int>(audio_adaptive_boost_));
+          settings.sync();
+          window_.showTransientMessage(
+              tr("Increasing the realtime audio buffer for the next playback start"), 8'000);
+        }
       }
+      updateAudioSyncPresentation();
       // Poll the playback meter and push per-channel peak levels to the
       // mixer. The meter is callback-safe and resets on read.
       if (audio_playback_ != nullptr) {
@@ -5570,6 +5614,43 @@ void EditorController::refreshCalibratedLatencyPresentation() {
   window_.audioMixer()->setCalibratedLatencyFrames(selected_device_calibrated_latency_frames_);
 }
 
+void EditorController::setAudioBufferSize(const int bufferSize) {
+  audio_buffer_size_ = static_cast<int>(audio::clamp_realtime_buffer_size(bufferSize));
+  audio_adaptive_boost_ = 0;
+  QSettings settings;
+  settings.setValue(QStringLiteral("audio/bufferSize"), audio_buffer_size_);
+  settings.setValue(QStringLiteral("audio/adaptiveBufferBoost"), 0);
+  settings.sync();
+  window_.audioMixer()->setBufferSize(audio_buffer_size_);
+  updateAudioSyncPresentation();
+  window_.showTransientMessage(
+      tr("Audio buffer size applies on the next playback start"), 4'000);
+}
+
+void EditorController::updateAudioSyncPresentation() {
+  const audio::RealtimeBufferSize effective = audio::effective_realtime_buffer_size(
+      audio::clamp_realtime_buffer_size(audio_buffer_size_), audio_adaptive_boost_);
+  const int buffer_index = static_cast<int>(effective);
+  const std::uint64_t xruns = audioXrunCount();
+  const double uncertainty_ms = audio::frames_to_milliseconds(audioClockUncertaintyFrames());
+  window_.audioMixer()->setSyncDiagnostics(xruns, uncertainty_ms, last_av_error_ms_, buffer_index,
+                                           audio_adaptive_boost_ != 0U);
+  QString buffer_name = tr("Medium");
+  if (effective == audio::RealtimeBufferSize::Small) {
+    buffer_name = tr("Small");
+  } else if (effective == audio::RealtimeBufferSize::Large) {
+    buffer_name = tr("Large");
+  }
+  if (audio_master_active_) {
+    window_.setAudioSyncStatus(tr("A/V: %1 ms · %2 xruns · %3")
+                                   .arg(uncertainty_ms, 0, 'f', 1)
+                                   .arg(xruns)
+                                   .arg(buffer_name));
+  } else {
+    window_.setAudioSyncStatus(tr("A/V: idle · %1 buffer").arg(buffer_name));
+  }
+}
+
 void EditorController::setNormalizationTarget(const double targetLufs) {
   normalization_completion_gate_.invalidate();
   normalization_target_lufs_ = std::clamp(targetLufs, -24.0, -9.0);
@@ -6624,14 +6705,11 @@ bool EditorController::startAudioMasterPlayback() {
         timeline_renderer, std::move(snapshot), end_sample, playback_rate_, playhead_);
     audio_transport_rate_ = playback_rate_;
     audio_clock_origin_ = playhead_;
-    audio::RealtimePlaybackConfiguration configuration{
-        .ring_capacity_frames = 192'000,
-        .render_block_frames = 24'000,
-        .prefill_frames = 48'000,
-        .prefill_timeout = std::chrono::milliseconds(2'000),
-        .device_id = selected_audio_device_id_.toStdString(),
-        .calibrated_latency_frames = selected_device_calibrated_latency_frames_,
-    };
+    const audio::RealtimeBufferSize buffer_size = audio::effective_realtime_buffer_size(
+        audio::clamp_realtime_buffer_size(audio_buffer_size_), audio_adaptive_boost_);
+    audio::RealtimePlaybackConfiguration configuration = audio::configuration_for_buffer_size(
+        buffer_size, selected_audio_device_id_.toStdString(),
+        selected_device_calibrated_latency_frames_);
     auto miniaudio_device = std::make_unique<audio::MiniaudioOutputDevice>();
     miniaudio_device->set_device_notification_callback(&EditorController::audioDeviceNotificationThunk,
                                                        this);
@@ -6685,6 +6763,8 @@ void EditorController::stopAudioPlayback() noexcept {
   audio_control_intent_ = AudioControlIntent::None;
   audio_command_version_ = 0;
   last_audio_xrun_count_ = 0;
+  last_av_error_ms_ = 0.0;
+  audio_master_wall_.invalidate();
   if (audio_playback_ != nullptr) {
     static_cast<void>(audio_playback_->request_stop());
   }
@@ -6694,6 +6774,7 @@ void EditorController::stopAudioPlayback() noexcept {
   }
   window_.audioMixer()->setTrackMeters({});
   playback_audio_renderer_.reset();
+  updateAudioSyncPresentation();
 }
 
 void EditorController::syncPreviewCacheIdentity() {

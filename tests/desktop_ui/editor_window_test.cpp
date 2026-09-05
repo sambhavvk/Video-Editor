@@ -556,6 +556,23 @@ void EditorWindowTest::audioMixerShowsSystemDefaultAndAuthoritativeLufsStates() 
   QVERIFY(lufs->text().contains(QStringLiteral("stale")));
 }
 
+void EditorWindowTest::audioMixerExposesBufferSizeAndSyncDiagnostics() {
+  video_editor::desktop_ui::AudioMixerWidget mixer;
+  auto* buffer = mixer.findChild<QComboBox*>(QStringLiteral("audioBufferSize"));
+  auto* sync = mixer.findChild<QLabel*>(QStringLiteral("audioSyncDiagnostics"));
+  QVERIFY(buffer != nullptr);
+  QVERIFY(sync != nullptr);
+  QCOMPARE(mixer.bufferSize(), 1);
+  QSignalSpy changed(&mixer, &video_editor::desktop_ui::AudioMixerWidget::bufferSizeChanged);
+  mixer.setBufferSize(2);
+  QCOMPARE(mixer.bufferSize(), 2);
+  QCOMPARE(changed.count(), 0);
+  mixer.setSyncDiagnostics(3, 2.5, 1.25, 2, false);
+  QVERIFY(sync->text().contains(QStringLiteral("2.5")));
+  QVERIFY(sync->text().contains(QStringLiteral("3")));
+  QVERIFY(sync->text().contains(QStringLiteral("Large")));
+}
+
 void EditorWindowTest::captionsPanelEmitsEditableCueActions() {
   video_editor::desktop_ui::CaptionsPanelWidget captions;
   auto* table = captions.findChild<QTableWidget*>(QStringLiteral("captionsTable"));

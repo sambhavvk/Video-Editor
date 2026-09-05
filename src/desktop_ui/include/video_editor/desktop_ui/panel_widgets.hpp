@@ -189,6 +189,10 @@ public:
                         bool available, const QString& status = {});
   void setCalibratedLatencyFrames(std::optional<std::uint64_t> frames);
   void setCalibrationBusy(bool busy);
+  void setSyncDiagnostics(std::uint64_t xrunCount, double uncertaintyMs, double estimatedErrorMs,
+                          int bufferSize, bool adaptive);
+  void setBufferSize(int bufferSize);
+  [[nodiscard]] int bufferSize() const;
   void setNormalizationReview(double measuredLufs, double gainDb, double targetLufs);
   void setNormalizationBusy(bool busy);
   void setNormalizationStatus(const QString& status);
@@ -206,6 +210,7 @@ signals:
                                   const QString& parameterId, const QVariant& value);
   void outputDeviceSelected(const QString& deviceId);
   void calibrateOutputLatencyRequested();
+  void bufferSizeChanged(int bufferSize);
   void normalizationAnalyzeRequested();
   void normalizationApplyRequested();
   void normalizationTargetChanged(double targetLufs);
@@ -225,6 +230,8 @@ private:
   QComboBox* device_selector_{nullptr};
   QPushButton* calibrate_latency_{nullptr};
   QLabel* calibrated_latency_label_{nullptr};
+  QComboBox* buffer_size_{nullptr};
+  QLabel* sync_status_{nullptr};
   QLabel* normalization_status_{nullptr};
   QPushButton* normalization_analyze_{nullptr};
   QPushButton* normalization_apply_{nullptr};

@@ -92,8 +92,11 @@ its precise timer, and adopts the audio master only after successful completion.
 edits and project replacement. Callback-thread constraints do not change.
 
 Public beta additionally requires real-device latency calibration evidence, a one-hour zero-xrun
-run, and two-hour A/V drift below 10 ms on the supported Windows and Linux matrix. The desktop now
-stores a measured per-device latency offset in QSettings and applies it on playback start; the 10 ms,
-one-hour, and two-hour gates remain physical lab requirements, not CI fake-device claims. Reverse/non-1×
-audible transport and adaptive buffer policy also remain product work; the connected desktop path
-is not yet a release-grade audible-preview claim.
+run, and two-hour A/V drift below 10 ms on the supported Linux matrix. The desktop stores a measured
+per-device latency offset in QSettings and applies it on playback start. A user-facing Small /
+Medium / Large decode-ahead profile selects ring/prefill size; an xrun observed outside the
+callback grows the profile one step (capped at Large) for the next playback start. The mixer and
+status bar publish `clock_uncertainty_frames`, xrun count, and estimated wall-clock A/V error.
+`tools/quality/physical_av_lab.py` plus the `VIDEO_EDITOR_PHYSICAL_AV_LAB=1` gtest archive physical
+evidence. Accelerated `VE_RUN_LONG_TESTS` simulations remain CI engineering checks and do not
+satisfy the 10 ms / one-hour / two-hour gates.

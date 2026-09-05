@@ -1,16 +1,20 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "video_editor/audio_engine/audio_block.h"
 #include "video_editor/audio_engine/audio_output_device.h"
+#include "video_editor/audio_engine/miniaudio_output_device.h"
+#include "video_editor/audio_engine/realtime_buffer_policy.h"
 #include "video_editor/audio_engine/realtime_playback.h"
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
 #include <memory>
 #include <span>
 #include <thread>
@@ -183,6 +187,66 @@ TEST(DriftValidation, TwoHourPlaybackDriftsLessThanOneFrame) {
 
   const std::int64_t drift = playback.sample_counter() - video_clock;
   EXPECT_LT(std::llabs(drift), 1);
+}
+
+TEST(PhysicalAvLab, RecordsXrunAndWallClockDriftEvidence) {
+  if (std::getenv("VIDEO_EDITOR_PHYSICAL_AV_LAB") == nullptr) {
+    GTEST_SKIP() << "Set VIDEO_EDITOR_PHYSICAL_AV_LAB=1 to run the physical A/V lab";
+  }
+  if (!MiniaudioOutputDevice::available()) {
+    GTEST_SKIP() << "miniaudio output is not compiled into this binary";
+  }
+
+  int seconds = 5;
+  if (const char* env = std::getenv("VIDEO_EDITOR_PHYSICAL_AV_LAB_SECONDS")) {
+    seconds = std::max(1, std::atoi(env));
+  }
+  const char* output_path = std::getenv("VIDEO_EDITOR_PHYSICAL_AV_LAB_OUT");
+
+  auto provider = std::make_shared<SineWaveProvider>();
+  auto device = std::make_unique<MiniaudioOutputDevice>();
+  RealtimeAudioPlayback playback(provider,
+                                 configuration_for_buffer_size(RealtimeBufferSize::Large),
+                                 std::move(device));
+  ASSERT_TRUE(playback.start(0)) << playback.diagnostics().last_error;
+
+  const auto started = std::chrono::steady_clock::now();
+  while (std::chrono::steady_clock::now() - started < std::chrono::seconds(seconds)) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    const PlaybackDiagnostics diagnostics = playback.diagnostics();
+    if (diagnostics.state == PlaybackState::Failed) {
+      ADD_FAILURE() << diagnostics.last_error;
+      break;
+    }
+  }
+
+  const double wall_seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+  const PlaybackDiagnostics diagnostics = playback.diagnostics();
+  const double error_ms =
+      av_clock_error_milliseconds(diagnostics.sample_counter, wall_seconds);
+  playback.stop();
+
+  if (output_path != nullptr && output_path[0] != '\0') {
+    std::ofstream out(output_path);
+    ASSERT_TRUE(out.good());
+    out << "{\n"
+        << "  \"seconds\": " << wall_seconds << ",\n"
+        << "  \"xrun_count\": " << diagnostics.xrun_count << ",\n"
+        << "  \"underrun_frames\": " << diagnostics.underrun_frames << ",\n"
+        << "  \"sample_counter\": " << diagnostics.sample_counter << ",\n"
+        << "  \"clock_uncertainty_frames\": " << diagnostics.clock_uncertainty_frames << ",\n"
+        << "  \"av_error_ms\": " << error_ms << ",\n"
+        << "  \"clock_is_estimated\": " << (diagnostics.clock_is_estimated ? "true" : "false")
+        << "\n}\n";
+  }
+
+  if (seconds >= 3600) {
+    EXPECT_EQ(diagnostics.xrun_count, 0U);
+  }
+  if (seconds >= 7200) {
+    EXPECT_LT(error_ms, 10.0);
+  }
 }
 
 } // namespace

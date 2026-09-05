@@ -452,9 +452,21 @@ private:
   void showError(const QString& title, const QString& message);
   void refreshAudioDevices();
   void refreshCalibratedLatencyPresentation();
+  void setAudioBufferSize(int bufferSize);
+  void updateAudioSyncPresentation();
   void onAudioDeviceHotplugNotification();
   void updateAudioDevicePollInterval();
   static void audioDeviceNotificationThunk(void* user_data) noexcept;
+
+  struct ViewerTransformGesture {
+    QString handle;
+    edit::EntityId clip_id;
+    edit::Transform start_transform;
+    QPointF start_pos;
+    double source_width{1};
+    double source_height{1};
+    std::string coalescing_key;
+  };
 
   desktop_ui::EditorWindow& window_;
   std::unique_ptr<edit::TimelineEditor> editor_;
@@ -533,6 +545,11 @@ private:
   AudioControlIntent audio_control_intent_{AudioControlIntent::None};
   std::uint64_t audio_command_version_{0};
   std::uint64_t last_audio_xrun_count_{0};
+  int audio_buffer_size_{1};
+  std::uint8_t audio_adaptive_boost_{0};
+  QElapsedTimer audio_master_wall_;
+  std::int64_t audio_master_wall_origin_{0};
+  double last_av_error_ms_{0.0};
   WorkerHostSession* export_session_{nullptr};
   std::filesystem::path export_checkpoint_path_;
   std::filesystem::path export_destination_;
