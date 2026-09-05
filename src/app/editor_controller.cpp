@@ -1149,6 +1149,13 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
   playback_timer_.setTimerType(Qt::PreciseTimer);
   playback_timer_.setInterval(16);
   connect(&playback_timer_, &QTimer::timeout, this, &EditorController::advancePlayback);
+  autosave_timer_.setTimerType(Qt::CoarseTimer);
+  autosave_timer_.setSingleShot(true);
+  connect(&autosave_timer_, &QTimer::timeout, this, &EditorController::autosaveCheckpoint);
+  QSettings projectSettings;
+  autosave_interval_seconds_ = std::max(
+      0, projectSettings.value(QStringLiteral("project/autosaveIntervalSeconds"), 300).toInt());
+  configureAutosaveTimer();
   source_playback_timer_.setTimerType(Qt::PreciseTimer);
   source_playback_timer_.setInterval(16);
   connect(&source_playback_timer_, &QTimer::timeout, this,
@@ -1705,7 +1712,13 @@ void EditorController::saveProjectAs() {
   }
 }
 
-bool EditorController::saveTo(const std::filesystem::path& destination) {
+bool EditorController::saveTo(const std::filesystem::path& destination, const bool autosave) {
+  if (autosave && (autosave_in_progress_ || export_in_flight_)) {
+    return false;
+  }
+  if (autosave) {
+    autosave_in_progress_ = true;
+  }
   try {
     if (destination.extension() != ".veproj") {
       auto corrected = destination;
@@ -1717,12 +1730,45 @@ bool EditorController::saveTo(const std::filesystem::path& destination) {
     const auto revision = store_->metadata().head_revision;
     store_->checkpoint_to(*checkpoint_path_, revision);
     setDirty(false);
-    window_.showTransientMessage(tr("Project saved"));
+    window_.showTransientMessage(autosave ? tr("Autosaved") : tr("Project saved"));
+    persistExportQueueSidecar();
+    autosave_in_progress_ = false;
     return true;
   } catch (const std::exception& exception) {
+    autosave_in_progress_ = false;
+    if (autosave) {
+      window_.showTransientMessage(tr("Autosave failed"), 8'000);
+      configureAutosaveTimer();
+      return false;
+    }
     showError(tr("Could not save project"), QString::fromUtf8(exception.what()));
     return false;
   }
+}
+
+void EditorController::setAutosaveIntervalSeconds(const int seconds) {
+  autosave_interval_seconds_ = std::max(0, seconds);
+  QSettings settings;
+  settings.setValue(QStringLiteral("project/autosaveIntervalSeconds"), autosave_interval_seconds_);
+  settings.sync();
+  configureAutosaveTimer();
+}
+
+void EditorController::configureAutosaveTimer() {
+  autosave_timer_.stop();
+  if (autosave_interval_seconds_ <= 0 || !dirty_ || !checkpoint_path_.has_value()) {
+    return;
+  }
+  autosave_timer_.start(autosave_interval_seconds_ * 1000);
+}
+
+void EditorController::autosaveCheckpoint() {
+  if (!dirty_ || !checkpoint_path_.has_value() || export_in_flight_ || autosave_in_progress_) {
+    configureAutosaveTimer();
+    return;
+  }
+  (void)saveTo(*checkpoint_path_, true);
+  configureAutosaveTimer();
 }
 
 bool EditorController::saveProjectFile(const std::filesystem::path& destination) {
@@ -7168,8 +7214,12 @@ edit::Time EditorController::playheadTime() const {
 }
 
 void EditorController::setDirty(const bool dirty) {
+  const bool became_dirty = dirty && !dirty_;
   dirty_ = dirty;
   window_.setProjectDirty(dirty_);
+  if (became_dirty || !dirty_) {
+    configureAutosaveTimer();
+  }
 }
 
 void EditorController::showError(const QString& title, const QString& message) {

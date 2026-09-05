@@ -157,6 +157,8 @@ private slots:
   void beginnerFifteenMinutePathWithoutFullEncode();
   void normalizationOnlyAdjustsAudibleContributingTracks();
   void realAudioDeviceUsesTheSampleCounterAsMasterClock();
+  void audioBufferSizeDefaultsToMedium();
+  void timedAutosaveCheckpointsDirtyProjects();
   void audioDevicePollSteadyConnectedIsNotRecovered();
   void audioDevicePollLossReturnAndDelayedStopAreRetryable();
   void audioDevicePollPauseCancelsRecoveryIntent();
@@ -1064,6 +1066,37 @@ void EditorControllerTest::realAudioDeviceUsesTheSampleCounterAsMasterClock() {
   const std::int64_t paused_at = controller.audioMasterSampleCounter();
   QTest::qWait(50);
   QCOMPARE(controller.audioMasterSampleCounter(), paused_at);
+}
+
+void EditorControllerTest::audioBufferSizeDefaultsToMedium() {
+  QSettings().remove(QStringLiteral("audio/bufferSize"));
+  QSettings().remove(QStringLiteral("audio/adaptiveBufferBoost"));
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  QSettings settings(directory.filePath(QStringLiteral("buffer-ui.ini")), QSettings::IniFormat);
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+  QCOMPARE(controller.audioBufferSize(), 1);
+  QCOMPARE(controller.estimatedAvErrorMilliseconds(), 0.0);
+  QCOMPARE(controller.audioClockUncertaintyFrames(), 0U);
+  QCOMPARE(window.audioMixer()->bufferSize(), 1);
+}
+
+void EditorControllerTest::timedAutosaveCheckpointsDirtyProjects() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  QSettings settings(directory.filePath(QStringLiteral("autosave-ui.ini")), QSettings::IniFormat);
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+  const auto checkpoint =
+      video_editor::app::pathFromQString(directory.filePath(QStringLiteral("autosave.veproj")));
+  QVERIFY(controller.saveProjectFile(checkpoint));
+  QVERIFY(!controller.dirty());
+  window.timeline()->markerAddRequested(0);
+  QVERIFY(controller.dirty());
+  controller.setAutosaveIntervalSeconds(1);
+  QTRY_VERIFY_WITH_TIMEOUT(!controller.dirty(), 5'000);
+  QVERIFY(QFileInfo(directory.filePath(QStringLiteral("autosave.veproj"))).size() > 0);
 }
 
 void EditorControllerTest::reconstructsMediaRecordsFromPersistedAssets() {

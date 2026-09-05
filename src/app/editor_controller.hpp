@@ -156,11 +156,18 @@ public:
   [[nodiscard]] bool dirty() const noexcept {
     return dirty_;
   }
+  [[nodiscard]] int autosaveIntervalSeconds() const noexcept {
+    return autosave_interval_seconds_;
+  }
+  void setAutosaveIntervalSeconds(int seconds);
   [[nodiscard]] bool audioMasterActive() const noexcept {
     return audio_master_active_;
   }
   [[nodiscard]] std::int64_t audioMasterSampleCounter() const noexcept;
   [[nodiscard]] std::uint64_t audioXrunCount() const;
+  [[nodiscard]] std::uint64_t audioClockUncertaintyFrames() const;
+  [[nodiscard]] double estimatedAvErrorMilliseconds() const;
+  [[nodiscard]] int audioBufferSize() const;
   [[nodiscard]] bool audioControlPending() const;
   [[nodiscard]] bool playbackRunning() const noexcept {
     return playback_rate_ != 0.0;
@@ -346,14 +353,17 @@ private:
   [[nodiscard]] static std::filesystem::path mediaCacheDirectory();
   [[nodiscard]] std::filesystem::path newWorkingPath(const edit::EntityId& projectId) const;
   [[nodiscard]] bool confirmDiscardChanges();
-  [[nodiscard]] bool saveTo(const std::filesystem::path& destination);
+  [[nodiscard]] bool saveTo(const std::filesystem::path& destination, bool autosave = false);
+  void configureAutosaveTimer();
+  void autosaveCheckpoint();
   [[nodiscard]] bool loadCheckpoint(const std::filesystem::path& checkpoint);
   [[nodiscard]] bool loadWorkingRecovery(const std::filesystem::path& workingDatabase);
   void installProject(edit::Project project, std::filesystem::path workingPath,
                       std::unique_ptr<store::ProjectStore> store,
                       std::optional<std::filesystem::path> checkpoint);
   void persistSnapshot(std::string_view reason);
-  [[nodiscard]] bool apply(edit::EditCommand command, const QString& failureContext);
+  [[nodiscard]] bool apply(edit::EditCommand command, const QString& failureContext,
+                           bool persist = true);
   [[nodiscard]] bool applyBatch(std::vector<edit::EditCommand> commands,
                                 const QString& failureContext);
   void addImportedAsset(assets::AssetRecord asset);
@@ -617,6 +627,9 @@ private:
   double audio_transport_rate_{1.0};
   std::int64_t audio_clock_origin_{0};
   QTimer playback_timer_;
+  QTimer autosave_timer_;
+  int autosave_interval_seconds_{300};
+  bool autosave_in_progress_{false};
   QElapsedTimer playback_clock_;
   std::optional<edit::EntityId> source_asset_id_;
   qint64 source_playhead_{0};
