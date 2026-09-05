@@ -37,6 +37,11 @@ const std::array kPlatformPresets{
                        0, 0, 0, 1, 0, 96'000, true, true,
                        "Audio-only podcast delivery using FOSS Opus in WebM"}};
 
+[[nodiscard]] bool opus_encoder_available() noexcept {
+  return avcodec_find_encoder_by_name("libopus") != nullptr ||
+         avcodec_find_encoder(AV_CODEC_ID_OPUS) != nullptr;
+}
+
 } // namespace
 
 PlatformPresetInfo platform_preset_info(const PlatformPreset preset) {
@@ -56,9 +61,13 @@ bool platform_preset_available(const PlatformPreset preset) noexcept {
            avcodec_find_encoder_by_name("prores_aw") != nullptr;
   }
   const bool video_available = avcodec_find_encoder_by_name("libvpx-vp9") != nullptr;
-  const bool audio_available = avcodec_find_encoder_by_name("libopus") != nullptr ||
-                               avcodec_find_encoder(AV_CODEC_ID_OPUS) != nullptr;
-  return video_available && audio_available;
+  return video_available && opus_encoder_available();
+}
+
+bool creator_av1_available() noexcept {
+  const bool video_available = avcodec_find_encoder_by_name("libsvtav1") != nullptr ||
+                               avcodec_find_encoder_by_name("libaom-av1") != nullptr;
+  return video_available && opus_encoder_available();
 }
 
 std::vector<PlatformPresetInfo> available_platform_presets() {
@@ -80,6 +89,24 @@ std::optional<VideoPreset> reference_video_preset_for(const PlatformPreset prese
     return VideoPreset::Vp9OpusWebm;
   }
   return std::nullopt;
+}
+
+VideoPreset creator_video_preset_for(const PlatformPreset preset, const CreatorVideoCodec codec) {
+  switch (preset) {
+  case PlatformPreset::ReferenceFfv1:
+    return VideoPreset::Ffv1Matroska;
+  case PlatformPreset::ReferenceProRes:
+    return VideoPreset::ProRes422HqMov;
+  case PlatformPreset::PodcastAudioOnly:
+    return VideoPreset::Vp9OpusWebm;
+  case PlatformPreset::YouTube1080p:
+  case PlatformPreset::YouTube1440p:
+  case PlatformPreset::YouTube2160p:
+  case PlatformPreset::Vertical1080x1920:
+  case PlatformPreset::Vertical720x1280:
+    return codec == CreatorVideoCodec::Av1 ? VideoPreset::Av1OpusWebm : VideoPreset::Vp9OpusWebm;
+  }
+  return VideoPreset::Vp9OpusWebm;
 }
 
 } // namespace video_editor::export_service

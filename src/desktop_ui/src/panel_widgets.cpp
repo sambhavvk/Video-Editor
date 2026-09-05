@@ -2477,18 +2477,31 @@ DeliverPanelWidget::DeliverPanelWidget(QWidget* parent) : QWidget(parent) {
 
   video_quality_ = new QComboBox(advanced);
   video_quality_->setObjectName(QStringLiteral("videoQualityCombo"));
-  video_quality_->setAccessibleName(tr("VP9 constant quality"));
+  video_quality_->setAccessibleName(tr("Video constant quality"));
   video_quality_->addItem(tr("Use video bitrate"));
   for (const int quality : {20, 24, 28, 32, 36, 40}) {
     video_quality_->addItem(tr("Constant quality %1").arg(quality), quality);
   }
-  advancedForm->addRow(tr("VP9 quality"), video_quality_);
+  advancedForm->addRow(tr("Quality"), video_quality_);
 
-  hardware_encoder_ = new QCheckBox(tr("Use hardware VP9 when available"), advanced);
+  video_codec_ = new QComboBox(advanced);
+  video_codec_->setObjectName(QStringLiteral("videoCodecCombo"));
+  video_codec_->setAccessibleName(tr("Creator video codec"));
+  video_codec_->addItem(tr("VP9"), QStringLiteral("vp9"));
+  video_codec_->addItem(tr("AV1"), QStringLiteral("av1"));
+  if (auto* model = qobject_cast<QStandardItemModel*>(video_codec_->model())) {
+    if (QStandardItem* av1_item = model->item(1)) {
+      av1_item->setEnabled(export_service::creator_av1_available());
+    }
+  }
+  advancedForm->addRow(tr("Video codec"), video_codec_);
+
+  hardware_encoder_ = new QCheckBox(tr("Use hardware encoder when available"), advanced);
   hardware_encoder_->setObjectName(QStringLiteral("hardwareEncoderCheck"));
-  hardware_encoder_->setAccessibleName(tr("Use hardware VP9 encoder when available"));
-  hardware_encoder_->setToolTip(tr("The export retries with deterministic libvpx-vp9 software "
-                                   "encoding if hardware setup or encoding fails."));
+  hardware_encoder_->setAccessibleName(tr("Use hardware encoder when available"));
+  hardware_encoder_->setToolTip(
+      tr("VP9 VAAPI/QSV or AV1 VAAPI may be used when available. Failed hardware export "
+         "retries with deterministic software encoding."));
   hardware_encoder_->setChecked(true);
   advancedForm->addRow(QString{}, hardware_encoder_);
 
@@ -2571,11 +2584,33 @@ DeliverPanelWidget::DeliverPanelWidget(QWidget* parent) : QWidget(parent) {
     frame_rate_->setEnabled(!audio_only);
     video_bitrate_->setEnabled(!audio_only);
     video_quality_->setEnabled(!audio_only);
-    hardware_encoder_->setEnabled(!audio_only && hardware_vp9_available_);
+    video_codec_->setEnabled(!audio_only);
+    const int av1_index = video_codec_->findData(QStringLiteral("av1"));
+    if (av1_index >= 0) {
+      const bool av1_available = export_service::creator_av1_available();
+      video_codec_->setItemData(av1_index, av1_available, Qt::UserRole - 1);
+      if (!av1_available && video_codec_->currentData().toString() == QStringLiteral("av1")) {
+        video_codec_->setCurrentIndex(video_codec_->findData(QStringLiteral("vp9")));
+      }
+      const QStandardItemModel* model =
+          qobject_cast<QStandardItemModel*>(video_codec_->model());
+      if (model != nullptr) {
+        if (QStandardItem* item = model->item(av1_index)) {
+          item->setEnabled(av1_available);
+        }
+      }
+    }
+    if (audio_only) {
+      video_codec_->setCurrentIndex(video_codec_->findData(QStringLiteral("vp9")));
+    }
+    const bool hardware_available = hardware_vp9_available_ || hardware_av1_available_;
+    hardware_encoder_->setEnabled(!audio_only && hardware_available);
     hardware_encoder_->setToolTip(
-        hardware_vp9_available_
-            ? tr("Use hardware VP9 when available; failed hardware export retries in software.")
-            : tr("No usable VP9 hardware encoder was detected; software libvpx-vp9 will be used."));
+        hardware_available
+            ? tr("Use hardware VP9 or AV1 when available; failed hardware export retries in "
+                 "software.")
+            : tr("No usable VP9/AV1 hardware encoder was detected; software encoding will be "
+                 "used."));
     caption_mode_->setEnabled(!audio_only);
     if (audio_only) {
       caption_mode_->setCurrentIndex(0);
@@ -2603,7 +2638,11 @@ void DeliverPanelWidget::loadPlatformPresets() {
       software_matrix.encoders.cbegin(), software_matrix.encoders.cend(), [](const auto& encoder) {
         return encoder.codec == media::DeliveryCodec::Vp9 && encoder.hardware && encoder.available;
       });
-  hardware_encoder_->setChecked(hardware_vp9_available_);
+  hardware_av1_available_ = std::any_of(
+      software_matrix.encoders.cbegin(), software_matrix.encoders.cend(), [](const auto& encoder) {
+        return encoder.codec == media::DeliveryCodec::Av1 && encoder.hardware && encoder.available;
+      });
+  hardware_encoder_->setChecked(hardware_vp9_available_ || hardware_av1_available_);
   setEncoderCapabilities(
       QString::fromStdString(media::format_capability_summary(software_matrix)) +
       tr("\nHardware device readiness is validated on the export worker when delivery starts."));

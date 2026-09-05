@@ -80,3 +80,7 @@ supported Windows/Linux hardware matrix remains a release-validation obligation.
 - Podcast output with one Opus stream and no video stream.
 - Invalid rate, dimension, bitrate, quality, audio-only burn-in, and unavailable-encoder failures.
 - Cancellation and existing-destination preservation for creator output and caption sidecars.
+
+## Related
+
+- [ADR 0019: FOSS AV1 creator delivery and embedded WebVTT](0019-foss-av1-creator-delivery.md)

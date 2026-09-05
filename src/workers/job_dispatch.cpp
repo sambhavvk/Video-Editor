@@ -594,6 +594,23 @@ caption_mode_from_string(const std::string_view value) {
   if (value == "burn_in_and_sidecar") {
     return export_service::CaptionExportMode::BurnInAndSidecar;
   }
+  if (value == "embedded") {
+    return export_service::CaptionExportMode::Embedded;
+  }
+  if (value == "burn_in_and_embedded") {
+    return export_service::CaptionExportMode::BurnInAndEmbedded;
+  }
+  return std::nullopt;
+}
+
+[[nodiscard]] std::optional<export_service::CreatorVideoCodec>
+creator_video_codec_from_string(const std::string_view value) {
+  if (value.empty() || value == "vp9") {
+    return export_service::CreatorVideoCodec::Vp9;
+  }
+  if (value == "av1") {
+    return export_service::CreatorVideoCodec::Av1;
+  }
   return std::nullopt;
 }
 
@@ -613,6 +630,7 @@ struct ParsedExportRequest final {
   std::filesystem::path destination;
   protocol::ExportOptions options;
   export_service::PlatformPreset platform{};
+  export_service::CreatorVideoCodec creator_video_codec{export_service::CreatorVideoCodec::Vp9};
   export_service::CaptionExportMode caption_mode{export_service::CaptionExportMode::None};
   export_service::SidecarFormat sidecar_format{export_service::SidecarFormat::Srt};
   edit::EntityId sequence_id{};
@@ -690,7 +708,13 @@ struct ParsedExportRequest final {
   }
   const auto caption_mode = caption_mode_from_string(parsed.options.caption_mode());
   if (!caption_mode.has_value()) {
-    error = "caption_mode must be none, burn_in, sidecar, or burn_in_and_sidecar";
+    error = "caption_mode must be none, burn_in, sidecar, burn_in_and_sidecar, embedded, or "
+            "burn_in_and_embedded";
+    return false;
+  }
+  const auto creator_video_codec = creator_video_codec_from_string(parsed.options.video_codec());
+  if (!creator_video_codec.has_value()) {
+    error = "video_codec must be empty, vp9, or av1";
     return false;
   }
   const auto sidecar_format = sidecar_format_from_string(parsed.options.sidecar_format());
@@ -708,6 +732,7 @@ struct ParsedExportRequest final {
     return false;
   }
   parsed.platform = *platform;
+  parsed.creator_video_codec = *creator_video_codec;
   parsed.caption_mode = *caption_mode;
   parsed.sidecar_format = *sidecar_format;
   parsed.sequence_id = *sequence_id;
@@ -926,6 +951,7 @@ struct ExportErrorDescription {
       .cancellation = internal_stop.get_token(),
       .progress = progress,
       .platform_preset = parsed.platform,
+      .creator_video_codec = parsed.creator_video_codec,
       .caption_mode = parsed.caption_mode,
       .sidecar_format = parsed.sidecar_format,
       .override_width = parsed.options.override_width(),

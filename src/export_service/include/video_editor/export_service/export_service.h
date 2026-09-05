@@ -59,6 +59,7 @@ struct ExportRequest final {
 
   // NEW creator-ready controls:
   PlatformPreset platform_preset{PlatformPreset::ReferenceFfv1};
+  CreatorVideoCodec creator_video_codec{CreatorVideoCodec::Vp9};
   CaptionExportMode caption_mode{CaptionExportMode::None};
   SidecarFormat sidecar_format{SidecarFormat::Srt};
   // Resolution override (0 = use sequence dimensions). Must be even for H.264.

@@ -46,6 +46,7 @@ void DeliverPanelWidgetTest::usesCreatorReadyDefaults() {
   DeliverPanelWidget panel;
 
   QCOMPARE(panel.captionModeKey(), QStringLiteral("none"));
+  QCOMPARE(panel.creatorVideoCodecKey(), QStringLiteral("vp9"));
   QCOMPARE(panel.sidecarFormatKey(), QStringLiteral("srt"));
   QCOMPARE(panel.overrideWidth(), 0);
   QCOMPARE(panel.overrideHeight(), 0);

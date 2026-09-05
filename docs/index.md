@@ -81,8 +81,10 @@ Accepted decisions live in [`architecture/`](architecture/):
 14. [Professional timeline interaction boundary](architecture/0014-professional-timeline-interaction.md)
 15. [Clip-local effect curves and CPU reference effects](architecture/0015-effect-parameter-authoring.md)
 16. [FOSS creator delivery with VP9 and Opus](architecture/0016-foss-creator-delivery.md)
-17. [Professional track audio, DSP, meters, and normalization](architecture/0017-professional-audio-workflow.md)
-18. [Local transcription, timed captions, and reviewable proposals](architecture/0018-local-transcription-and-caption-proposals.md)
+17. [FOSS AV1 creator delivery and embedded WebVTT](architecture/0019-foss-av1-creator-delivery.md)
+18. [Professional track audio, DSP, meters, and normalization](architecture/0017-professional-audio-workflow.md)
+19. [Local transcription, timed captions, and reviewable proposals](architecture/0018-local-transcription-and-caption-proposals.md)
+20. [OTIO JSON interchange (P1)](architecture/0021-otio-interchange.md)
 
 Source code and documentation in this repository use MPL-2.0. Third-party libraries and media
 fixtures retain their own licenses; see the repository's `THIRD_PARTY.md` and fixture manifests.

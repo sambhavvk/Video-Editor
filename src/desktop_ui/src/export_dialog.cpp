@@ -26,7 +26,8 @@ namespace {
   if (platform == export_service::PlatformPreset::PodcastAudioOnly) {
     return QStringLiteral("webm");
   }
-  if (video == export_service::VideoPreset::Vp9OpusWebm) {
+  if (video == export_service::VideoPreset::Vp9OpusWebm ||
+      video == export_service::VideoPreset::Av1OpusWebm) {
     return QStringLiteral("webm");
   }
   if (video == export_service::VideoPreset::ProRes422HqMov) {
@@ -93,7 +94,10 @@ ExportDialog::ExportDialog(QWidget* parent) : QDialog(parent) {
   buttons->setObjectName(QStringLiteral("exportDialogButtons"));
   ok_button_ = buttons->button(QDialogButtonBox::Ok);
   ok_button_->setObjectName(QStringLiteral("exportOkButton"));
-  buttons->button(QDialogButtonBox::Cancel)->setObjectName(QStringLiteral("exportCancelButton"));
+  ok_button_->setAccessibleName(tr("Export"));
+  auto* cancel_button = buttons->button(QDialogButtonBox::Cancel);
+  cancel_button->setObjectName(QStringLiteral("exportCancelButton"));
+  cancel_button->setAccessibleName(tr("Cancel export"));
   connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
   connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
   layout->addWidget(buttons);

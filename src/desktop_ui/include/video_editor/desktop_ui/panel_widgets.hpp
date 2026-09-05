@@ -369,6 +369,7 @@ private:
   bool export_enabled_{false};
   bool selected_preset_available_{true};
   bool hardware_vp9_available_{false};
+  bool hardware_av1_available_{false};
 };
 
 } // namespace video_editor::desktop_ui

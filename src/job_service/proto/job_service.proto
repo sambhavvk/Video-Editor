@@ -119,6 +119,8 @@ message ExportOptions {
   bool include_audio = 13;
   bool overwrite_existing = 14;
   string sequence_id = 15;
+  // Creator delivery video codec selector: "" or "vp9" (default), or "av1".
+  string video_codec = 16;
 }
 
 message StartJob { JobSpec spec = 1; }

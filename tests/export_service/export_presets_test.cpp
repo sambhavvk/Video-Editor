@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "video_editor/export_service/presets.h"
 
+extern "C" {
+#include <libavcodec/avcodec.h>
+}
+
 #include <gtest/gtest.h>
 
 namespace video_editor::export_service {
@@ -55,6 +59,34 @@ TEST(export_presets, PodcastPresetIsAudioOnly) {
 TEST(export_presets, FossDeliveryAvailabilityRequiresRuntimeVideoAndAudioEncoders) {
   EXPECT_TRUE(platform_preset_available(PlatformPreset::YouTube1080p));
   EXPECT_TRUE(platform_preset_available(PlatformPreset::PodcastAudioOnly));
+}
+
+TEST(export_presets, CreatorAv1AvailabilityRequiresAv1AndOpusEncoders) {
+  const bool expected =
+      (avcodec_find_encoder_by_name("libsvtav1") != nullptr ||
+       avcodec_find_encoder_by_name("libaom-av1") != nullptr) &&
+      (avcodec_find_encoder_by_name("libopus") != nullptr ||
+       avcodec_find_encoder(AV_CODEC_ID_OPUS) != nullptr);
+  EXPECT_EQ(creator_av1_available(), expected);
+}
+
+TEST(export_presets, CreatorVideoPresetForYouTubeUsesSelectedCodec) {
+  EXPECT_EQ(creator_video_preset_for(PlatformPreset::YouTube1080p, CreatorVideoCodec::Vp9),
+            VideoPreset::Vp9OpusWebm);
+  EXPECT_EQ(creator_video_preset_for(PlatformPreset::YouTube1080p, CreatorVideoCodec::Av1),
+            VideoPreset::Av1OpusWebm);
+  EXPECT_EQ(creator_video_preset_for(PlatformPreset::PodcastAudioOnly, CreatorVideoCodec::Av1),
+            VideoPreset::Vp9OpusWebm);
+  EXPECT_EQ(creator_video_preset_for(PlatformPreset::ReferenceFfv1, CreatorVideoCodec::Av1),
+            VideoPreset::Ffv1Matroska);
+}
+
+TEST(export_presets, CaptionModeHelpersClassifyEmbeddedModes) {
+  EXPECT_TRUE(caption_mode_embeds(CaptionExportMode::Embedded));
+  EXPECT_TRUE(caption_mode_embeds(CaptionExportMode::BurnInAndEmbedded));
+  EXPECT_FALSE(caption_mode_embeds(CaptionExportMode::Sidecar));
+  EXPECT_TRUE(caption_mode_burns_in(CaptionExportMode::BurnInAndEmbedded));
+  EXPECT_TRUE(caption_mode_writes_sidecar(CaptionExportMode::BurnInAndSidecar));
 }
 
 TEST(export_presets, AllDisplayNamesAreNonEmpty) {

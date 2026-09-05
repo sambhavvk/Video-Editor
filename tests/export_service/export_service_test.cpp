@@ -896,6 +896,81 @@ TEST(ExportService, PodcastFossDeliveryIsAudioOnlyAndPreservesExactSamples) {
   EXPECT_EQ(decoded_audio.trimmed_sample_count, 5'600U);
 }
 
+TEST(ExportService, FossCreatorPresetExportsAv1OpusWebmWhenAvailable) {
+  if (!creator_av1_available()) {
+    GTEST_SKIP() << "This FFmpeg runtime has no AV1 software encoder";
+  }
+  const PresetInfo info = preset_info(VideoPreset::Av1OpusWebm);
+  ASSERT_TRUE(info.available) << "AV1 creator preset should be available";
+
+  TestDirectory directory;
+  const auto original = directory.path() / "av1-original.wav";
+  write_constant_pcm_wav(original, 5'600U);
+  auto timeline = make_timeline(original);
+  const auto destination = directory.path() / "creator-av1.webm";
+  const auto outcome = export_video({.snapshot = timeline.snapshot,
+                                     .renderer = timeline.renderer,
+                                     .audio_renderer = timeline.audio_renderer,
+                                     .destination = destination,
+                                     .preset = VideoPreset::Av1OpusWebm,
+                                     .include_audio = true,
+                                     .prefer_hardware_encoder = false,
+                                     .platform_preset = PlatformPreset::YouTube1080p,
+                                     .creator_video_codec = CreatorVideoCodec::Av1});
+  ASSERT_TRUE(outcome) << outcome.error().message;
+  EXPECT_EQ(outcome.value().video_codec, "AV1");
+  EXPECT_EQ(outcome.value().audio_codec, "Opus");
+  const std::string selected_encoder = outcome.value().video_encoder;
+  EXPECT_TRUE(selected_encoder == "libsvtav1" || selected_encoder == "libaom-av1" ||
+              selected_encoder == "av1_vaapi");
+  const auto decoded = decode_video(destination, AVRational{1, 30});
+  EXPECT_EQ(decoded.codec_id, AV_CODEC_ID_AV1);
+  const auto decoded_audio = decode_audio(destination);
+  EXPECT_EQ(decoded_audio.codec_id, AV_CODEC_ID_OPUS);
+}
+
+TEST(ExportService, EmbeddedWebVttCaptionsRoundTripInWebM) {
+  if (avcodec_descriptor_get(AV_CODEC_ID_WEBVTT) == nullptr) {
+    GTEST_SKIP() << "WebVTT muxing is not available";
+  }
+  const PresetInfo info = preset_info(VideoPreset::Vp9OpusWebm);
+  if (!info.available) {
+    GTEST_SKIP() << "VP9 creator preset is not available";
+  }
+
+  TestDirectory directory;
+  const auto original = directory.path() / "embedded-original.wav";
+  write_constant_pcm_wav(original, 5'600U);
+  auto timeline = make_timeline(original);
+  std::vector<edit::Caption> captions;
+  edit::Caption caption;
+  caption.text = "Embedded export cue";
+  caption.range = {edit::Time(1, 30), edit::Time(1, 30)};
+  captions.push_back(caption);
+
+  const auto destination = directory.path() / "embedded-captions.webm";
+  const auto outcome = export_video({.snapshot = timeline.snapshot,
+                                     .renderer = timeline.renderer,
+                                     .audio_renderer = timeline.audio_renderer,
+                                     .destination = destination,
+                                     .preset = VideoPreset::Vp9OpusWebm,
+                                     .include_audio = true,
+                                     .platform_preset = PlatformPreset::YouTube1080p,
+                                     .caption_mode = CaptionExportMode::Embedded,
+                                     .captions = captions});
+  ASSERT_TRUE(outcome) << outcome.error().message;
+
+  const auto probed = media::probe(destination);
+  ASSERT_TRUE(probed) << probed.error().message;
+  const auto streams = media::list_subtitle_streams(probed.value());
+  ASSERT_FALSE(streams.empty());
+  EXPECT_TRUE(streams.front().supported_text_codec);
+  const auto extracted = media::extract_text_subtitles(destination, streams.front().index);
+  ASSERT_TRUE(extracted) << extracted.error().message;
+  ASSERT_FALSE(extracted.value().cues.empty());
+  EXPECT_EQ(extracted.value().cues.front().text, "Embedded export cue");
+}
+
 TEST(ExportService, CancellationRemovesTemporaryFileAndPreservesExistingDestination) {
   TestDirectory directory;
   const auto destination = directory.path() / "existing.mkv";

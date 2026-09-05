@@ -528,27 +528,27 @@ TEST(ProjectCodecTest, RejectsMalformedAndMissingVersionData) {
 }
 
 TEST(ProjectCodecTest, RejectsFutureSchemaAndReaderVersions) {
-  // schema_version = 4, minimum_reader_version = 1
-  const auto future_schema = deserialize_project(bytes({0x08, 0x04, 0x10, 0x01}));
+  // schema_version = 5, minimum_reader_version = 1
+  const auto future_schema = deserialize_project(bytes({0x08, 0x05, 0x10, 0x01}));
   ASSERT_FALSE(future_schema);
   EXPECT_EQ(future_schema.error().code, CodecErrorCode::UnsupportedSchemaVersion);
 
-  // schema_version = 3, minimum_reader_version = 4
-  const auto future_reader = deserialize_project(bytes({0x08, 0x03, 0x10, 0x04}));
+  // schema_version = 4, minimum_reader_version = 5
+  const auto future_reader = deserialize_project(bytes({0x08, 0x04, 0x10, 0x05}));
   ASSERT_FALSE(future_reader);
   EXPECT_EQ(future_reader.error().code, CodecErrorCode::UnsupportedMinimumReaderVersion);
 }
 
 TEST(ProjectCodecTest, RejectsUnknownFieldsAtTheDeclaredCurrentVersion) {
-  // The fourth root field is unknown to schema v3. It must not be silently
+  // The fourth root field is unknown to schema v4. It must not be silently
   // dropped, even though protobuf itself can parse it.
-  const auto unknown = deserialize_project(bytes({0x08, 0x03, 0x10, 0x01, 0x1A, 0x00, 0x20, 0x01}));
+  const auto unknown = deserialize_project(bytes({0x08, 0x04, 0x10, 0x01, 0x1A, 0x00, 0x20, 0x01}));
   ASSERT_FALSE(unknown);
   EXPECT_EQ(unknown.error().code, CodecErrorCode::InvalidField);
   EXPECT_EQ(unknown.error().field_path, "snapshot");
 }
 
-TEST(ProjectCodecTest, AcceptsDeclaredVersionOneProjectsAndRewritesCanonicalVersionThree) {
+TEST(ProjectCodecTest, AcceptsDeclaredVersionOneProjectsAndRewritesCanonicalVersionFour) {
   const auto v2_project = makeSchemaV1CompatibleProject();
   const auto canonical_v2 = serialize_project(v2_project);
 

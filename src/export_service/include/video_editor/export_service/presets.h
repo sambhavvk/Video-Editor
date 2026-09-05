@@ -13,6 +13,13 @@ enum class VideoPreset : std::uint8_t {
   ProRes422HqMov,
   // FOSS creator delivery: libvpx-vp9 + libopus in WebM.
   Vp9OpusWebm,
+  // FOSS creator delivery: AV1 + libopus in WebM.
+  Av1OpusWebm,
+};
+
+enum class CreatorVideoCodec : std::uint8_t {
+  Vp9,
+  Av1,
 };
 
 enum class PlatformPreset : std::uint8_t {
@@ -55,16 +62,37 @@ struct PlatformPresetInfo final {
   std::string notes;                   // human-readable guidance
 };
 
+[[nodiscard]] constexpr bool caption_mode_burns_in(const CaptionExportMode mode) noexcept {
+  return mode == CaptionExportMode::BurnIn || mode == CaptionExportMode::BurnInAndSidecar ||
+         mode == CaptionExportMode::BurnInAndEmbedded;
+}
+
+[[nodiscard]] constexpr bool caption_mode_writes_sidecar(const CaptionExportMode mode) noexcept {
+  return mode == CaptionExportMode::Sidecar || mode == CaptionExportMode::BurnInAndSidecar;
+}
+
+[[nodiscard]] constexpr bool caption_mode_embeds(const CaptionExportMode mode) noexcept {
+  return mode == CaptionExportMode::Embedded || mode == CaptionExportMode::BurnInAndEmbedded;
+}
+
 [[nodiscard]] PlatformPresetInfo platform_preset_info(PlatformPreset preset);
 
 // Runtime capability gate for a platform preset. FOSS delivery is available
 // only when both libvpx-vp9 (video) and Opus (audio) are present.
 [[nodiscard]] bool platform_preset_available(PlatformPreset preset) noexcept;
 
+// True when libsvtav1 or libaom-av1 and Opus encoders are present.
+[[nodiscard]] bool creator_av1_available() noexcept;
+
 // Returns all available platform presets in display order.
 [[nodiscard]] std::vector<PlatformPresetInfo> available_platform_presets();
 
 // Maps a PlatformPreset to the reference or FOSS delivery VideoPreset.
 [[nodiscard]] std::optional<VideoPreset> reference_video_preset_for(PlatformPreset preset);
+
+// Maps a creator platform preset and codec selector to the delivery VideoPreset.
+// Podcast audio-only always returns Vp9OpusWebm; reference presets ignore codec.
+[[nodiscard]] VideoPreset creator_video_preset_for(PlatformPreset preset,
+                                                   CreatorVideoCodec codec);
 
 } // namespace video_editor::export_service

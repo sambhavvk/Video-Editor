@@ -25,7 +25,9 @@ extern "C" {
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <cstdio>
+#include <cstring>
 #include <exception>
 #include <filesystem>
 #include <limits>
@@ -34,6 +36,7 @@ extern "C" {
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 #include <variant>
@@ -177,6 +180,14 @@ struct PresetConfiguration final {
             .pixel_format = AV_PIX_FMT_YUV420P,
             .lossless = false,
             .creator_delivery = true};
+  case VideoPreset::Av1OpusWebm:
+    return {.muxer_name = "webm",
+            .container_name = "WebM",
+            .codec_name = "AV1",
+            .codec_id = AV_CODEC_ID_AV1,
+            .pixel_format = AV_PIX_FMT_YUV420P,
+            .lossless = false,
+            .creator_delivery = true};
   }
   throw std::invalid_argument("unknown export preset");
 }
@@ -191,6 +202,15 @@ struct PresetConfiguration final {
     if (const AVCodec* encoder = avcodec_find_encoder_by_name("libvpx-vp9"); encoder != nullptr) {
       return encoder;
     }
+  }
+  if (preset == VideoPreset::Av1OpusWebm) {
+    if (const AVCodec* encoder = avcodec_find_encoder_by_name("libsvtav1"); encoder != nullptr) {
+      return encoder;
+    }
+    if (const AVCodec* encoder = avcodec_find_encoder_by_name("libaom-av1"); encoder != nullptr) {
+      return encoder;
+    }
+    return avcodec_find_encoder(AV_CODEC_ID_AV1);
   }
   const AVCodecID codec_id =
       preset == VideoPreset::Ffv1Matroska
@@ -643,7 +663,9 @@ PresetInfo preset_info(const VideoPreset preset) {
                               ? "FFV1 10-bit / Matroska (lossless)"
                               : (preset == VideoPreset::ProRes422HqMov
                                      ? "Apple ProRes 422 HQ / MOV"
-                                     : "VP9 + Opus / WebM (creator delivery)"),
+                                     : (preset == VideoPreset::Av1OpusWebm
+                                            ? "AV1 + Opus / WebM (creator delivery)"
+                                            : "VP9 + Opus / WebM (creator delivery)")),
           .container = configuration.container_name,
           .codec = configuration.codec_name,
           .available =
@@ -653,7 +675,7 @@ PresetInfo preset_info(const VideoPreset preset) {
                     !encoder_supports_pixel_format(*encoder, configuration.pixel_format)) {
                   return false;
                 }
-                if (preset == VideoPreset::Vp9OpusWebm) {
+                if (preset == VideoPreset::Vp9OpusWebm || preset == VideoPreset::Av1OpusWebm) {
                   return avcodec_find_encoder_by_name("libopus") != nullptr ||
                          avcodec_find_encoder(AV_CODEC_ID_OPUS) != nullptr;
                 }
@@ -673,7 +695,7 @@ ExportOutcome export_video_impl(const ExportRequest& request, const bool use_har
     if (request.cancellation.stop_requested()) {
       return failure(ExportErrorCode::Cancelled, "export was cancelled before it started");
     }
-    if (use_hardware_encoder && request.preset == VideoPreset::Vp9OpusWebm &&
+    if (use_hardware_encoder && uses_creator_webm_hardware(request.preset) &&
         (injection == testing::HardwareFailureInjection::HardwareEncode ||
          injection == testing::HardwareFailureInjection::HardwareThenSoftwareEncode)) {
       if (hardware_started != nullptr) {
@@ -681,14 +703,14 @@ ExportOutcome export_video_impl(const ExportRequest& request, const bool use_har
       }
       return failure(ExportErrorCode::HardwareEncoderFailed, "injected hardware encoder failure");
     }
-    if (use_hardware_encoder && request.preset == VideoPreset::Vp9OpusWebm &&
+    if (use_hardware_encoder && uses_creator_webm_hardware(request.preset) &&
         injection == testing::HardwareFailureInjection::HardwareRender) {
       if (hardware_started != nullptr) {
         *hardware_started = true;
       }
       return failure(ExportErrorCode::RenderFailed, "injected renderer failure");
     }
-    if (!use_hardware_encoder && request.preset == VideoPreset::Vp9OpusWebm &&
+    if (!use_hardware_encoder && uses_creator_webm_hardware(request.preset) &&
         (injection == testing::HardwareFailureInjection::SoftwareEncode ||
          injection == testing::HardwareFailureInjection::HardwareThenSoftwareEncode)) {
       return failure(ExportErrorCode::EncodingFailed, "injected software encoder failure");
@@ -744,8 +766,22 @@ ExportOutcome export_video_impl(const ExportRequest& request, const bool use_har
 
     const bool delivery_platform = request.platform_preset != PlatformPreset::ReferenceFfv1 &&
                                    request.platform_preset != PlatformPreset::ReferenceProRes;
-    const VideoPreset effective_preset =
-        delivery_platform ? VideoPreset::Vp9OpusWebm : request.preset;
+    VideoPreset effective_preset = request.preset;
+    if (delivery_platform) {
+      if (request.preset == VideoPreset::Av1OpusWebm) {
+        effective_preset = VideoPreset::Av1OpusWebm;
+      } else if (request.creator_video_codec == CreatorVideoCodec::Av1 &&
+                 request.platform_preset != PlatformPreset::PodcastAudioOnly) {
+        effective_preset = VideoPreset::Av1OpusWebm;
+      } else {
+        effective_preset = VideoPreset::Vp9OpusWebm;
+      }
+    }
+    if (caption_mode_embeds(request.caption_mode) &&
+        !container_supports_embedded_captions(effective_preset)) {
+      return failure(ExportErrorCode::InvalidRequest,
+                     "embedded captions require a WebM or Matroska export container");
+    }
     const auto platform = platform_preset_info(request.platform_preset);
     const auto configuration = configuration_for(effective_preset);
     const auto resolve_dimension = [](const std::uint32_t source, const std::uint32_t requested,
@@ -786,14 +822,19 @@ ExportOutcome export_video_impl(const ExportRequest& request, const bool use_har
     std::optional<HardwareEncoderSelection> hardware_selection;
     bool hardware_encoder_used = false;
     const AVCodec* encoder = audio_only ? nullptr : encoder_for(effective_preset);
-    if (!audio_only && use_hardware_encoder && effective_preset == VideoPreset::Vp9OpusWebm) {
-      if (const auto candidate = hardware_vp9_encoder(); candidate.has_value()) {
+    if (!audio_only && use_hardware_encoder && uses_creator_webm_hardware(effective_preset)) {
+      if (effective_preset == VideoPreset::Vp9OpusWebm) {
+        hardware_selection = hardware_vp9_encoder();
+      } else {
+        hardware_selection = hardware_av1_encoder();
+      }
+      if (hardware_selection.has_value()) {
         AVBufferRef* raw_device = nullptr;
-        if (av_hwdevice_ctx_create(&raw_device, candidate->device_type, nullptr, nullptr, 0) >= 0 &&
+        if (av_hwdevice_ctx_create(&raw_device, hardware_selection->device_type, nullptr, nullptr,
+                                   0) >= 0 &&
             raw_device != nullptr) {
           hardware_device.reset(raw_device);
-          hardware_selection = candidate;
-          encoder = candidate->encoder;
+          encoder = hardware_selection->encoder;
           hardware_encoder_used = true;
           if (hardware_started != nullptr) {
             *hardware_started = true;
@@ -859,7 +900,7 @@ ExportOutcome export_video_impl(const ExportRequest& request, const bool use_har
     const auto audio_sample_count = static_cast<std::uint64_t>(signed_audio_sample_count);
     if (request.video_quality.has_value() &&
         (request.video_quality.value() < 0 || request.video_quality.value() > 63)) {
-      return failure(ExportErrorCode::InvalidRequest, "VP9 video quality must be between 0 and 63");
+      return failure(ExportErrorCode::InvalidRequest, "video quality must be between 0 and 63");
     }
     if (request.override_video_bitrate >
         static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
@@ -948,7 +989,7 @@ ExportOutcome export_video_impl(const ExportRequest& request, const bool use_har
       } else if (effective_preset == VideoPreset::Ffv1Matroska) {
         av_opt_set_int(video_codec->priv_data, "level", 3, 0);
         av_opt_set_int(video_codec->priv_data, "slicecrc", 1, 0);
-      } else if (!hardware_encoder_used) {
+      } else if (effective_preset == VideoPreset::Vp9OpusWebm && !hardware_encoder_used) {
         const auto info = platform_preset_info(request.platform_preset);
         const std::uint64_t bitrate = request.override_video_bitrate != 0U
                                           ? request.override_video_bitrate
@@ -965,7 +1006,45 @@ ExportOutcome export_video_impl(const ExportRequest& request, const bool use_har
         av_opt_set(video_codec->priv_data, "deadline", "good", 0);
         av_opt_set_int(video_codec->priv_data, "cpu-used", 2, 0);
         av_opt_set_int(video_codec->priv_data, "row-mt", 1, 0);
-      } else {
+      } else if (effective_preset == VideoPreset::Av1OpusWebm && !hardware_encoder_used) {
+        const auto info = platform_preset_info(request.platform_preset);
+        const std::uint64_t bitrate = request.override_video_bitrate != 0U
+                                          ? request.override_video_bitrate
+                                          : info.target_video_bitrate;
+        const bool is_svtav1 = encoder != nullptr && encoder->name != nullptr &&
+                               std::string_view(encoder->name) == "libsvtav1";
+        const bool is_aom = encoder != nullptr && encoder->name != nullptr &&
+                            std::string_view(encoder->name) == "libaom-av1";
+        if (is_svtav1) {
+          av_opt_set(video_codec->priv_data, "preset", "8", 0);
+          if (request.video_quality.has_value()) {
+            if (av_opt_set_int(video_codec->priv_data, "crf", request.video_quality.value(), 0) <
+                0) {
+              av_opt_set_int(video_codec->priv_data, "qp", request.video_quality.value(), 0);
+            }
+            video_codec->bit_rate = 0;
+          } else if (bitrate != 0U) {
+            video_codec->bit_rate = static_cast<std::int64_t>(bitrate);
+          }
+        } else if (is_aom) {
+          av_opt_set_int(video_codec->priv_data, "cpu-used", 6, 0);
+          av_opt_set_int(video_codec->priv_data, "row-mt", 1, 0);
+          if (request.video_quality.has_value()) {
+            av_opt_set_int(video_codec->priv_data, "crf", request.video_quality.value(), 0);
+            video_codec->bit_rate = 0;
+          } else if (bitrate != 0U) {
+            video_codec->bit_rate = static_cast<std::int64_t>(bitrate);
+          } else {
+            av_opt_set_int(video_codec->priv_data, "crf", 32, 0);
+            video_codec->bit_rate = 0;
+          }
+        } else if (request.video_quality.has_value()) {
+          av_opt_set_int(video_codec->priv_data, "crf", request.video_quality.value(), 0);
+          video_codec->bit_rate = 0;
+        } else if (bitrate != 0U) {
+          video_codec->bit_rate = static_cast<std::int64_t>(bitrate);
+        }
+      } else if (uses_creator_webm_hardware(effective_preset) && hardware_encoder_used) {
         const std::uint64_t bitrate = request.override_video_bitrate != 0U
                                           ? request.override_video_bitrate
                                           : platform.target_video_bitrate;
@@ -1458,7 +1537,7 @@ ExportOutcome export_video(const ExportRequest& request) {
   ExportOutcome outcome =
       export_video_impl(request, request.prefer_hardware_encoder, &hardware_started);
   if (outcome || !hardware_started || !request.prefer_hardware_encoder ||
-      (request.preset != VideoPreset::Vp9OpusWebm &&
+      (request.preset != VideoPreset::Vp9OpusWebm && request.preset != VideoPreset::Av1OpusWebm &&
        request.platform_preset == PlatformPreset::ReferenceFfv1) ||
       request.platform_preset == PlatformPreset::ReferenceProRes ||
       request.platform_preset == PlatformPreset::PodcastAudioOnly ||
