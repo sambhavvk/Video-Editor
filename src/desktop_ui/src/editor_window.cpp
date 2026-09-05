@@ -147,6 +147,7 @@ EditorWindow::EditorWindow(QSettings* settings, QWidget* parent) : QMainWindow(p
   loadShortcutOverrides();
   createCentralArea();
   createPanels();
+  connectScopesDock();
   createMenus();
   createToolBars();
   createStatusBar();
@@ -513,6 +514,7 @@ void EditorWindow::createPanels() {
   captions_panel_ = new CaptionsPanelWidget(this);
   deliver_panel_ = new DeliverPanelWidget(this);
   deliver_panel_->setExportEnabled(false);
+  scopes_widget_ = new ScopeWidget(this);
   cache_browser_ = new CacheBrowserDialog(this);
   export_dialog_ = new ExportDialog(this);
 
@@ -523,6 +525,8 @@ void EditorWindow::createPanels() {
   captions_dock_ =
       makeDock(QStringLiteral("captionsDock"), tr("Captions & Transcript"), captions_panel_, this);
   deliver_dock_ = makeDock(QStringLiteral("deliverDock"), tr("Deliver"), deliver_panel_, this);
+  scopes_dock_ = makeDock(QStringLiteral("scopesDock"), tr("Scopes"), scopes_widget_, this);
+  scopes_dock_->setAccessibleName(tr("Scopes"));
 
   addDockWidget(Qt::LeftDockWidgetArea, media_dock_);
   addDockWidget(Qt::RightDockWidgetArea, inspector_dock_);
@@ -530,9 +534,25 @@ void EditorWindow::createPanels() {
   addDockWidget(Qt::BottomDockWidgetArea, mixer_dock_);
   addDockWidget(Qt::RightDockWidgetArea, captions_dock_);
   addDockWidget(Qt::RightDockWidgetArea, deliver_dock_);
+  addDockWidget(Qt::BottomDockWidgetArea, scopes_dock_);
   tabifyDockWidget(inspector_dock_, effects_dock_);
   tabifyDockWidget(effects_dock_, captions_dock_);
   tabifyDockWidget(captions_dock_, deliver_dock_);
+}
+
+void EditorWindow::connectScopesDock() {
+  if (scopes_dock_ == nullptr) {
+    return;
+  }
+  if (auto* scopes = action(QStringLiteral("scopes"))) {
+    connect(scopes, &QAction::toggled, scopes_dock_, &QWidget::setVisible);
+  }
+  connect(scopes_dock_, &QDockWidget::visibilityChanged, this, [this](const bool visible) {
+    if (auto* toggle = action(QStringLiteral("scopes"))) {
+      const QSignalBlocker blocker(toggle);
+      toggle->setChecked(visible);
+    }
+  });
 }
 
 void EditorWindow::createActions() {
@@ -1066,8 +1086,8 @@ void EditorWindow::labelInteractiveChrome() {
 }
 
 void EditorWindow::applyDefaultLayout(Workspace workspace) {
-  for (auto* dock :
-       {media_dock_, inspector_dock_, effects_dock_, mixer_dock_, captions_dock_, deliver_dock_}) {
+  for (auto* dock : {media_dock_, inspector_dock_, effects_dock_, mixer_dock_, captions_dock_,
+                     deliver_dock_, scopes_dock_}) {
     dock->hide();
     dock->setFloating(false);
   }
@@ -1078,6 +1098,7 @@ void EditorWindow::applyDefaultLayout(Workspace workspace) {
   addDockWidget(Qt::BottomDockWidgetArea, mixer_dock_);
   addDockWidget(Qt::RightDockWidgetArea, captions_dock_);
   addDockWidget(Qt::RightDockWidgetArea, deliver_dock_);
+  addDockWidget(Qt::BottomDockWidgetArea, scopes_dock_);
   tabifyDockWidget(inspector_dock_, effects_dock_);
   tabifyDockWidget(effects_dock_, captions_dock_);
   tabifyDockWidget(captions_dock_, deliver_dock_);

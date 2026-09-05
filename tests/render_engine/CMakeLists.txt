@@ -3,7 +3,8 @@
 add_executable(video_editor_render_engine_tests
   gpu_backend_test.cpp
   gpu_timeline_renderer_test.cpp
-  render_engine_test.cpp)
+  render_engine_test.cpp
+  scope_analyzer_test.cpp)
 
 target_link_libraries(
   video_editor_render_engine_tests

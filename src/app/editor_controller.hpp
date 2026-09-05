@@ -8,6 +8,7 @@
 #include "video_editor/edit_model/edit_model.h"
 #include "video_editor/job_service/protocol.h"
 #include "video_editor/render_engine/gpu_backend.h"
+#include "video_editor/render_engine/scope_analyzer.h"
 
 #include <QElapsedTimer>
 #include <QFuture>

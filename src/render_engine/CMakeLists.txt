@@ -104,6 +104,7 @@ add_library(video_editor_render_engine
   src/gpu_timeline_renderer.cpp
   src/lut3d.cpp
   src/render_cache.cpp
+  src/scope_analyzer.cpp
   src/white_balance.cpp)
 
 add_library(video_editor::render_engine ALIAS video_editor_render_engine)

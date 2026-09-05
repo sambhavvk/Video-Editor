@@ -90,6 +90,9 @@ public:
   [[nodiscard]] DeliverPanelWidget* deliverPanel() const noexcept {
     return deliver_panel_;
   }
+  [[nodiscard]] ScopeWidget* scopesWidget() const noexcept {
+    return scopes_widget_;
+  }
   [[nodiscard]] CacheBrowserDialog* cacheBrowser() const noexcept {
     return cache_browser_;
   }
@@ -242,6 +245,7 @@ private:
   AudioMixerWidget* audio_mixer_{nullptr};
   CaptionsPanelWidget* captions_panel_{nullptr};
   DeliverPanelWidget* deliver_panel_{nullptr};
+  ScopeWidget* scopes_widget_{nullptr};
   CacheBrowserDialog* cache_browser_{nullptr};
   ExportDialog* export_dialog_{nullptr};
 

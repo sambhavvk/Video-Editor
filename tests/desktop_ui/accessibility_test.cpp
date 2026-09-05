@@ -7,12 +7,14 @@
 #include "video_editor/desktop_ui/editor_window.hpp"
 #include "video_editor/desktop_ui/panel_widgets.hpp"
 #include "video_editor/desktop_ui/program_viewer.hpp"
+#include "video_editor/desktop_ui/scope_widget.hpp"
 #include "video_editor/desktop_ui/timeline_widget.hpp"
 
 #include <QApplication>
 #include <QCoreApplication>
 #include <QKeySequence>
 #include <QLineEdit>
+#include <QTreeWidget>
 #include <QSettings>
 #include <QSignalSpy>
 #include <QTemporaryDir>
