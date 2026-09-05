@@ -445,13 +445,28 @@ void encodeAsset(const edit::Asset& value, wire::Asset* output, std::string_view
   output->set_audio_sample_rate(value.audio_sample_rate);
   output->set_audio_channels(value.audio_channels);
   encodeMetadata(value.metadata, output->mutable_metadata(), childPath(path, "metadata"));
+  if (value.bin_id) {
+    encodeId(*value.bin_id, output->mutable_bin_id(), childPath(path, "bin_id"));
+  }
+  if (!value.display_title.empty()) {
+    output->set_display_title(value.display_title);
+  }
+  for (const auto& tag : value.tags) {
+    output->add_tags(tag);
+  }
+  if (!value.notes.empty()) {
+    output->set_notes(value.notes);
+  }
+  if (value.rating != 0) {
+    output->set_rating(value.rating);
+  }
 }
 
 void encodeClip(const edit::Clip& value, wire::Clip* output, std::string_view path,
                 IdRegistry& ids) {
   encodeId(value.id, output->mutable_id(), childPath(path, "id"), &ids);
   encodeId(value.asset_id, output->mutable_asset_id(), childPath(path, "asset_id"), nullptr,
-           value.kind == edit::ClipKind::Title);
+           value.kind == edit::ClipKind::Title || value.kind == edit::ClipKind::NestedSequence);
   output->set_kind(encodeClipKind(value.kind));
   output->set_name(value.name);
   encodeRange(value.timeline_range, output->mutable_timeline_range());
@@ -647,6 +662,49 @@ void encodeSequence(const edit::Sequence& value, wire::Sequence* output, std::st
   encodeTransitions(value, output, path, ids);
 }
 
+[[nodiscard]] wire::MediaBinKind encodeMediaBinKind(const edit::MediaBinKind value,
+                                                    std::string_view path) {
+  switch (value) {
+  case edit::MediaBinKind::Folder:
+    return wire::MEDIA_BIN_KIND_FOLDER;
+  case edit::MediaBinKind::Smart:
+    return wire::MEDIA_BIN_KIND_SMART;
+  }
+  fail(CodecErrorCode::InvalidField, std::string(path), "unknown media bin kind");
+}
+
+void encodeSmartQuery(const edit::SmartQuery& value, wire::SmartQuery* output) {
+  for (const auto& tag : value.tags) {
+    output->add_tags(tag);
+  }
+  if (value.min_rating.has_value()) {
+    output->set_min_rating(*value.min_rating);
+  }
+  if (value.notes_contains.has_value()) {
+    output->set_notes_contains(*value.notes_contains);
+  }
+  if (value.has_video.has_value()) {
+    output->set_has_video(*value.has_video);
+  }
+  if (value.has_audio.has_value()) {
+    output->set_has_audio(*value.has_audio);
+  }
+  if (value.name_contains.has_value()) {
+    output->set_name_contains(*value.name_contains);
+  }
+}
+
+void encodeBin(const edit::MediaBin& value, wire::MediaBin* output, std::string_view path,
+               IdRegistry& ids) {
+  encodeId(value.id, output->mutable_id(), childPath(path, "id"), &ids);
+  output->set_name(value.name);
+  if (value.parent_id) {
+    encodeId(*value.parent_id, output->mutable_parent_id(), childPath(path, "parent_id"));
+  }
+  output->set_kind(encodeMediaBinKind(value.kind, childPath(path, "kind")));
+  encodeSmartQuery(value.query, output->mutable_query());
+}
+
 void encodeProject(const edit::Project& value, wire::Project* output) {
   IdRegistry ids;
   encodeId(value.id, output->mutable_id(), "project.id", &ids);
@@ -658,6 +716,9 @@ void encodeProject(const edit::Project& value, wire::Project* output) {
   for (std::size_t index = 0; index < value.sequences.size(); ++index) {
     encodeSequence(value.sequences[index], output->add_sequences(),
                    indexedPath("project", "sequences", index), ids);
+  }
+  for (std::size_t index = 0; index < value.bins.size(); ++index) {
+    encodeBin(value.bins[index], output->add_bins(), indexedPath("project", "bins", index), ids);
   }
   encodeMetadata(value.metadata, output->mutable_metadata(), "project.metadata");
 }
@@ -1196,6 +1257,21 @@ decodeMetadata(const google::protobuf::RepeatedPtrField<wire::StringEntry>& entr
             path, "audio assets require a sample rate and channel count");
   }
   result.metadata = decodeMetadata(value.metadata(), childPath(path, "metadata"));
+  if (value.has_bin_id()) {
+    result.bin_id = decodeId(value.bin_id(), childPath(path, "bin_id"));
+  }
+  if (value.has_display_title()) {
+    result.display_title = value.display_title();
+  }
+  for (const auto& tag : value.tags()) {
+    result.tags.push_back(tag);
+  }
+  if (value.has_notes()) {
+    result.notes = value.notes();
+  }
+  if (value.has_rating()) {
+    result.rating = value.rating();
+  }
   return result;
 }
 
@@ -1471,6 +1547,60 @@ decodeMetadata(const google::protobuf::RepeatedPtrField<wire::StringEntry>& entr
   return result;
 }
 
+[[nodiscard]] edit::MediaBinKind decodeMediaBinKind(const wire::MediaBinKind value,
+                                                    std::string_view path) {
+  switch (value) {
+  case wire::MEDIA_BIN_KIND_FOLDER:
+    return edit::MediaBinKind::Folder;
+  case wire::MEDIA_BIN_KIND_SMART:
+    return edit::MediaBinKind::Smart;
+  case wire::MEDIA_BIN_KIND_UNSPECIFIED:
+    break;
+  default:
+    break;
+  }
+  fail(CodecErrorCode::InvalidField, std::string(path), "media bin kind is unspecified or unknown");
+}
+
+[[nodiscard]] edit::SmartQuery decodeSmartQuery(const wire::SmartQuery& value) {
+  edit::SmartQuery result;
+  for (const auto& tag : value.tags()) {
+    result.tags.push_back(tag);
+  }
+  if (value.has_min_rating()) {
+    result.min_rating = value.min_rating();
+  }
+  if (value.has_notes_contains()) {
+    result.notes_contains = value.notes_contains();
+  }
+  if (value.has_has_video()) {
+    result.has_video = value.has_video();
+  }
+  if (value.has_has_audio()) {
+    result.has_audio = value.has_audio();
+  }
+  if (value.has_name_contains()) {
+    result.name_contains = value.name_contains();
+  }
+  return result;
+}
+
+[[nodiscard]] edit::MediaBin decodeBin(const wire::MediaBin& value, std::string_view path,
+                                       IdRegistry& ids) {
+  requirePresent(value.has_id(), childPath(path, "id"));
+  edit::MediaBin result;
+  result.id = decodeId(value.id(), childPath(path, "id"), &ids);
+  result.name = value.name();
+  if (value.has_parent_id()) {
+    result.parent_id = decodeId(value.parent_id(), childPath(path, "parent_id"));
+  }
+  result.kind = decodeMediaBinKind(value.kind(), childPath(path, "kind"));
+  if (value.has_query()) {
+    result.query = decodeSmartQuery(value.query());
+  }
+  return result;
+}
+
 [[nodiscard]] edit::Project decodeProject(const wire::Project& value,
                                           const std::uint32_t declared_schema_version) {
   requirePresent(value.has_id(), "project.id");
@@ -1486,6 +1616,10 @@ decodeMetadata(const google::protobuf::RepeatedPtrField<wire::StringEntry>& entr
   for (const auto& sequence : value.sequences()) {
     result.sequences.push_back(decodeSequence(
         sequence, indexedPath("project", "sequences", index++), declared_schema_version, ids));
+  }
+  index = 0;
+  for (const auto& bin : value.bins()) {
+    result.bins.push_back(decodeBin(bin, indexedPath("project", "bins", index++), ids));
   }
   result.metadata = decodeMetadata(value.metadata(), "project.metadata");
 
@@ -1573,6 +1707,7 @@ edit::Result<edit::Project, CodecError> deserialize_project(std::span<const std:
     requirePresent(snapshot.has_project(), "snapshot.project");
     reject_v2_fields_in_declared_v1(snapshot);
     reject_v3_fields_in_declared_older(snapshot);
+    reject_v4_fields_in_declared_older(snapshot);
     if (const auto unknown = findUnknownField(snapshot, "snapshot")) {
       fail(CodecErrorCode::InvalidField, *unknown,
            "snapshot contains fields not defined by its declared schema version");

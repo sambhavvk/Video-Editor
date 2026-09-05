@@ -42,6 +42,7 @@ class MediaBinWidget final : public QWidget {
 public:
   explicit MediaBinWidget(QWidget* parent = nullptr);
 
+  void setBins(const QVector<MediaBinView>& bins);
   void setItems(const QVector<MediaItemView>& items);
   [[nodiscard]] const QVector<MediaItemView>& items() const noexcept {
     return items_;
@@ -55,19 +56,32 @@ signals:
   void mediaActivated(const QString& mediaId);
   void mediaSelectionChanged(const QString& mediaId);
   void searchChanged(const QString& query);
+  void createBinRequested(const QString& parentBinId);
+  void renameBinRequested(const QString& binId, const QString& name);
+  void moveBinRequested(const QString& binId, const QString& parentBinId);
+  void removeBinRequested(const QString& binId);
+  void setAssetBinRequested(const QString& assetId, const QString& binId);
 
 private slots:
   void applyFilter(const QString& query);
   void activateCurrent();
+  void handleBinSelectionChanged();
 
 private:
+  void rebuildTree();
   void rebuildTable();
   void emitCurrentMediaSelection();
   [[nodiscard]] QString mediaIdAtRow(int row) const;
+  [[nodiscard]] bool itemMatchesSelectedBin(const MediaItemView& item) const;
+  [[nodiscard]] bool itemMatchesSearch(const MediaItemView& item, const QString& query) const;
+  [[nodiscard]] QString selectedBinId() const;
 
   QLineEdit* search_{nullptr};
+  QSplitter* splitter_{nullptr};
+  QTreeWidget* bin_tree_{nullptr};
   QStackedWidget* content_{nullptr};
   QTableWidget* table_{nullptr};
+  QVector<MediaBinView> bins_;
   QVector<MediaItemView> items_;
 };
 

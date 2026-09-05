@@ -469,8 +469,9 @@ validateTransition(const Project& project, const Sequence& sequence, const Trans
   return std::nullopt;
 }
 
-[[nodiscard]] std::optional<EditError> validateClip(const Project& project, const Track& track,
-                                                    const Clip& clip) {
+[[nodiscard]] std::optional<EditError> validateClip(const Project& project,
+                                                    const Sequence& parent_sequence,
+                                                    const Track& track, const Clip& clip) {
   if (clip.id.isNil()) {
     return error(EditErrorCode::InvalidArgument, "clip id cannot be nil");
   }
@@ -549,6 +550,26 @@ validateTransition(const Project& project, const Sequence& sequence, const Trans
     if (asset.duration.isNegative()) {
       return error(EditErrorCode::InvalidArgument, "asset duration cannot be negative");
     }
+    if (const auto issue = validateAssetMetadata(asset)) {
+      return issue;
+    }
+    if (asset.bin_id.has_value()) {
+      const auto* bin = findBin(project, *asset.bin_id);
+      if (bin == nullptr) {
+        return error(EditErrorCode::EntityNotFound, "asset references a bin that does not exist");
+      }
+      if (bin->kind != MediaBinKind::Folder) {
+        return error(EditErrorCode::InvalidArgument, "assets may only be filed in folder bins");
+      }
+    }
+  }
+  for (const auto& bin : project.bins) {
+    if (!addId(bin.id)) {
+      return error(EditErrorCode::DuplicateId, "project contains a duplicate or nil bin id");
+    }
+    if (const auto issue = validateBin(project, bin)) {
+      return issue;
+    }
   }
   for (const auto& sequence : project.sequences) {
     if (!addId(sequence.id)) {
@@ -570,7 +591,7 @@ validateTransition(const Project& project, const Sequence& sequence, const Trans
         if (!addId(clip.id)) {
           return error(EditErrorCode::DuplicateId, "project contains a duplicate or nil clip id");
         }
-        if (const auto issue = validateClip(project, track, clip)) {
+        if (const auto issue = validateClip(project, sequence, track, clip)) {
           return issue;
         }
         if (previous != nullptr && previous->timeline_range.overlaps(clip.timeline_range)) {
@@ -829,7 +850,7 @@ struct PlannedClip final {
     }
     auto moved = *location->clip;
     moved.timeline_range.start = moved.timeline_range.start + delta;
-    if (const auto issue = validateClip(project, *destination, moved)) {
+    if (const auto issue = validateClip(project, sequence, *destination, moved)) {
       return issue;
     }
     plans.push_back(PlannedClip{id, destination_id, std::move(moved)});
@@ -907,7 +928,7 @@ struct PlannedClip final {
       // duration delta below.
       trimmed.timeline_range.start = location->clip->timeline_range.start;
     }
-    if (const auto issue = validateClip(project, *location->track, trimmed)) {
+    if (const auto issue = validateClip(project, sequence, *location->track, trimmed)) {
       return issue;
     }
     if (command.mode == InsertMode::RejectOverlap &&
@@ -1063,9 +1084,9 @@ struct PlannedClip final {
       return issue;
     }
     renameSplitHalves(left, right, *location->clip, command.split_time);
-    if (const auto issue = validateClip(project, *location->track, left))
+    if (const auto issue = validateClip(project, sequence, *location->track, left))
       return issue;
-    if (const auto issue = validateClip(project, *location->track, right))
+    if (const auto issue = validateClip(project, sequence, *location->track, right))
       return issue;
     plans.push_back(SplitPlan{location->track, id, std::move(left), std::move(right)});
   }
@@ -1169,7 +1190,7 @@ struct PlannedClip final {
     return error(EditErrorCode::DuplicateId,
                  "a clip with the same id already exists in the sequence");
   }
-  if (const auto issue = validateClip(project, track, clip)) {
+  if (const auto issue = validateClip(project, sequence, track, clip)) {
     return issue;
   }
   if (auto issue = prepareTrackForInsert(track, clip, mode)) {
@@ -1527,10 +1548,10 @@ struct PlannedClip final {
                     rolled_right)) {
               return issue;
             }
-            if (const auto issue = validateClip(project, track, rolled_left)) {
+            if (const auto issue = validateClip(project, *sequence, track, rolled_left)) {
               return issue;
             }
-            if (const auto issue = validateClip(project, track, rolled_right)) {
+            if (const auto issue = validateClip(project, *sequence, track, rolled_right)) {
               return issue;
             }
             track.clips[left_index] = std::move(rolled_left);
@@ -1561,7 +1582,7 @@ struct PlannedClip final {
               }
               auto slipped = *selected_location->clip;
               slipped.source_range.start = slipped.source_range.start + source_delta;
-              if (const auto issue = validateClip(project, *selected_location->track, slipped)) {
+              if (const auto issue = validateClip(project, *sequence, *selected_location->track, slipped)) {
                 return issue;
               }
               plans.push_back(PlannedClip{id, selected_location->track->id, std::move(slipped)});
@@ -1621,13 +1642,13 @@ struct PlannedClip final {
             }
             auto moved = selected_clip;
             moved.timeline_range.start = command.new_start;
-            if (const auto issue = validateClip(project, track, trimmed_previous)) {
+            if (const auto issue = validateClip(project, *sequence, track, trimmed_previous)) {
               return issue;
             }
-            if (const auto issue = validateClip(project, track, moved)) {
+            if (const auto issue = validateClip(project, *sequence, track, moved)) {
               return issue;
             }
-            if (const auto issue = validateClip(project, track, trimmed_next)) {
+            if (const auto issue = validateClip(project, *sequence, track, trimmed_next)) {
               return issue;
             }
             track.clips[index - 1] = std::move(trimmed_previous);
@@ -1854,7 +1875,7 @@ struct PlannedClip final {
                     (previous != nullptr &&
                      (previous->timeline_range.start > clip.timeline_range.start ||
                       previous->timeline_range.overlaps(clip.timeline_range))) ||
-                    validateClip(project, *track, clip)) {
+                    validateClip(project, *sequence, *track, clip)) {
                   return error(EditErrorCode::InvalidArgument,
                                "timeline cut replacement contains invalid or overlapping clips");
                 }
@@ -2274,6 +2295,134 @@ struct PlannedClip final {
             }
             sequence->transitions.erase(found);
             return std::nullopt;
+          },
+          [&](const CreateBinCommand& command) -> std::optional<EditError> {
+            if (findBin(project, command.bin.id) != nullptr) {
+              return error(EditErrorCode::DuplicateId, "a bin with the same id already exists");
+            }
+            if (const auto issue = validateBin(project, command.bin)) {
+              return issue;
+            }
+            project.bins.push_back(command.bin);
+            return std::nullopt;
+          },
+          [&](const RenameBinCommand& command) -> std::optional<EditError> {
+            if (command.bin_id.isNil()) {
+              return error(EditErrorCode::InvalidArgument, "bin id cannot be nil");
+            }
+            const auto found =
+                std::find_if(project.bins.begin(), project.bins.end(),
+                             [&](const MediaBin& bin) { return bin.id == command.bin_id; });
+            if (found == project.bins.end()) {
+              return error(EditErrorCode::EntityNotFound, "bin was not found");
+            }
+            if (const auto issue = validateBinName(command.name)) {
+              return issue;
+            }
+            found->name = command.name;
+            return std::nullopt;
+          },
+          [&](const MoveBinCommand& command) -> std::optional<EditError> {
+            if (command.bin_id.isNil()) {
+              return error(EditErrorCode::InvalidArgument, "bin id cannot be nil");
+            }
+            const auto found =
+                std::find_if(project.bins.begin(), project.bins.end(),
+                             [&](const MediaBin& bin) { return bin.id == command.bin_id; });
+            if (found == project.bins.end()) {
+              return error(EditErrorCode::EntityNotFound, "bin was not found");
+            }
+            if (found->kind == MediaBinKind::Smart && command.parent_id.has_value()) {
+              return error(EditErrorCode::InvalidArgument, "smart bins cannot have a parent");
+            }
+            MediaBin candidate = *found;
+            candidate.parent_id = command.parent_id;
+            if (const auto issue = validateBinParent(project, candidate)) {
+              return issue;
+            }
+            found->parent_id = command.parent_id;
+            return std::nullopt;
+          },
+          [&](const RemoveBinCommand& command) -> std::optional<EditError> {
+            if (command.bin_id.isNil()) {
+              return error(EditErrorCode::InvalidArgument, "bin id cannot be nil");
+            }
+            const auto found =
+                std::find_if(project.bins.begin(), project.bins.end(),
+                             [&](const MediaBin& bin) { return bin.id == command.bin_id; });
+            if (found == project.bins.end()) {
+              return error(EditErrorCode::EntityNotFound, "bin was not found");
+            }
+            if (found->kind == MediaBinKind::Folder &&
+                (binHasChildBins(project, command.bin_id) ||
+                 binHasAssignedAssets(project, command.bin_id))) {
+              return error(EditErrorCode::AssetInUse,
+                           "folder bins with children or assigned media cannot be removed");
+            }
+            project.bins.erase(found);
+            return std::nullopt;
+          },
+          [&](const SetAssetBinCommand& command) -> std::optional<EditError> {
+            if (command.asset_id.isNil()) {
+              return error(EditErrorCode::InvalidArgument, "asset id cannot be nil");
+            }
+            const auto found =
+                std::find_if(project.assets.begin(), project.assets.end(),
+                             [&](const Asset& asset) { return asset.id == command.asset_id; });
+            if (found == project.assets.end()) {
+              return error(EditErrorCode::EntityNotFound, "asset was not found");
+            }
+            if (command.bin_id.has_value()) {
+              if (command.bin_id->isNil()) {
+                return error(EditErrorCode::InvalidArgument, "asset bin id cannot be nil");
+              }
+              const auto* bin = findBin(project, *command.bin_id);
+              if (bin == nullptr) {
+                return error(EditErrorCode::EntityNotFound, "bin was not found");
+              }
+              if (bin->kind != MediaBinKind::Folder) {
+                return error(EditErrorCode::InvalidArgument,
+                             "assets may only be filed in folder bins");
+              }
+            }
+            found->bin_id = command.bin_id;
+            return std::nullopt;
+          },
+          [&](const SetAssetMetadataCommand& command) -> std::optional<EditError> {
+            if (command.asset_id.isNil()) {
+              return error(EditErrorCode::InvalidArgument, "asset id cannot be nil");
+            }
+            const auto found =
+                std::find_if(project.assets.begin(), project.assets.end(),
+                             [&](const Asset& asset) { return asset.id == command.asset_id; });
+            if (found == project.assets.end()) {
+              return error(EditErrorCode::EntityNotFound, "asset was not found");
+            }
+            found->display_title = command.display_title;
+            found->tags = command.tags;
+            found->notes = command.notes;
+            found->rating = command.rating;
+            if (const auto issue = validateAssetMetadata(*found)) {
+              return issue;
+            }
+            return std::nullopt;
+          },
+          [&](const SetSmartQueryCommand& command) -> std::optional<EditError> {
+            if (command.bin_id.isNil()) {
+              return error(EditErrorCode::InvalidArgument, "bin id cannot be nil");
+            }
+            const auto found =
+                std::find_if(project.bins.begin(), project.bins.end(),
+                             [&](const MediaBin& bin) { return bin.id == command.bin_id; });
+            if (found == project.bins.end()) {
+              return error(EditErrorCode::EntityNotFound, "bin was not found");
+            }
+            if (found->kind != MediaBinKind::Smart) {
+              return error(EditErrorCode::InvalidArgument,
+                           "smart queries may only be set on smart bins");
+            }
+            found->query = command.query;
+            return std::nullopt;
           }},
       op);
 }
@@ -2377,6 +2526,20 @@ std::string commandName(const EditCommand& command) {
           return "Update transition";
         if constexpr (std::is_same_v<T, RemoveTransitionCommand>)
           return "Remove transition";
+        if constexpr (std::is_same_v<T, CreateBinCommand>)
+          return "Create bin";
+        if constexpr (std::is_same_v<T, RenameBinCommand>)
+          return "Rename bin";
+        if constexpr (std::is_same_v<T, MoveBinCommand>)
+          return "Move bin";
+        if constexpr (std::is_same_v<T, RemoveBinCommand>)
+          return "Remove bin";
+        if constexpr (std::is_same_v<T, SetAssetBinCommand>)
+          return "Set asset bin";
+        if constexpr (std::is_same_v<T, SetAssetMetadataCommand>)
+          return "Set asset metadata";
+        if constexpr (std::is_same_v<T, SetSmartQueryCommand>)
+          return "Set smart query";
         return "Edit";
       },
       command.operation);

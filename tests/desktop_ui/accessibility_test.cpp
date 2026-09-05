@@ -54,11 +54,15 @@ void AccessibilityTest::interactiveControlsHaveAccessibleNames() {
 
   QCOMPARE(window.accessibleName(), QStringLiteral("Video Editor"));
   QCOMPARE(window.mediaBin()->accessibleName(), QStringLiteral("Media bin"));
+  auto* media_bin_tree = window.findChild<QTreeWidget*>(QStringLiteral("mediaBinTree"));
+  QVERIFY(media_bin_tree != nullptr);
+  QCOMPARE(media_bin_tree->accessibleName(), QStringLiteral("Media bins"));
   QCOMPARE(window.timeline()->accessibleName(), QStringLiteral("Timeline"));
   QCOMPARE(window.programViewer()->accessibleName(), QStringLiteral("Program viewer"));
   QCOMPARE(window.captionsPanel()->accessibleName(), QStringLiteral("Captions and transcript"));
   QCOMPARE(window.deliverPanel()->accessibleName(), QStringLiteral("Deliver and export"));
   QCOMPARE(window.audioMixer()->accessibleName(), QStringLiteral("Audio mixer"));
+  QCOMPARE(window.scopesWidget()->accessibleName(), QStringLiteral("Video scopes"));
 
   auto* mediaSearch = window.findChild<QLineEdit*>(QStringLiteral("mediaSearch"));
   QVERIFY(mediaSearch != nullptr);

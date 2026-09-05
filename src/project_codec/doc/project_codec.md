@@ -12,7 +12,7 @@ not form part of the application API.
 ## Version constants
 
 `kCurrentSchemaVersion` is 3 and is written by `serialize_project`. `kMinimumReaderVersion` is 1.
-The reader accepts declared versions 1, 2, and 3, rejects future schemas, and validates the embedded
+The reader accepts declared versions 1 through 4, rejects future schemas, and validates the embedded
 minimum-reader declaration independently.
 
 Schema v2 adds canonical title payloads and sequence-owned transitions. It also carries track
@@ -22,11 +22,15 @@ title clip has no title payload, so the backward reader creates the default `Tit
 the clip name as its text. A declared-v1 document containing v2 fields is rejected rather than
 reinterpreted.
 
+Schema v4 adds media bins (folder and smart), project-owned asset metadata, and nested-sequence clip
+fields. Genuine v1–v3 payloads upgrade to canonical defaults. A declared older payload carrying v4
+fields is rejected. The SQLite project-store envelope remains schema v2; current journal entries use
+type `project.snapshot.v4` with payload schema version 4. Readers still accept
+`project.snapshot.v1`, `v2`, and `v3`.
+
 Schema v3 adds stable caption words, exact ranges/probabilities, word provenance/model identity, and
 alignment/vertical/safe-margin/outline style fields. Genuine v1/v2 payloads upgrade to canonical
-pre-v3 defaults. A declared older payload carrying v3 fields is rejected. The SQLite project-store
-envelope remains schema v2; current journal entries use type `project.snapshot.v3` with payload
-schema version 3.
+pre-v3 defaults. A declared older payload carrying v3 fields is rejected.
 
 ## `serialize_project`
 

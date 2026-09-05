@@ -15,14 +15,14 @@ three tables:
   flag, and heartbeat timestamp;
 - `command_journal`: one monotonically increasing revision per committed payload, including the
   deterministic `project.snapshot.v1`/`project.snapshot.v2` records retained from older projects
-  and `project.snapshot.v3` records written by the current application, plus a positive
+  and `project.snapshot.v3`/`project.snapshot.v4` records written by the current application, plus a positive
   `payload_schema_version` column recording the schema carried by each entry;
 - `schema_migrations`: applied forward migration records.
 
 The snapshot Protobuf has independent `schema_version` and `minimum_reader_version` fields and
 serializes assets, sequences, tracks, clips, source/timeline ranges, transform and audio fields,
 typed effects/keyframes, markers, captions with timed words/provenance/canonical style, canonical
-title payloads, and sequence-owned transitions. The current snapshot schema is v3; v1 and v2
+title payloads, sequence-owned transitions, media bins, asset metadata, and nested-sequence clip fields. The current snapshot schema is v4; v1–v3
 payloads remain readable with their historical caption defaults, while older declared schemas may
 not smuggle newer fields. Track name/order, lock, output visibility, targeting, mute/solo, gain/pan,
 and typed audio effects are serialized with the sequence; transient clip/marker/gap selection and
@@ -70,7 +70,7 @@ need a sibling WAL file to open. Save As appends `.veproj` when no matching suff
 
 The desktop copies the checkpoint into a newly named local working database, opens and validates
 it, then reads the latest supported `project.snapshot.v1`, `project.snapshot.v2`, or
-`project.snapshot.v3` entry. The
+`project.snapshot.v4` entry. The
 journal type must agree with `payload_schema_version`, and the embedded snapshot declaration is
 validated independently. Declared schema-v1 snapshots are upgraded by the codec's backward reader;
 declared schema-v2 snapshots round-trip title, transition, track-interaction, and track-audio state
@@ -131,6 +131,7 @@ of important `.veproj` checkpoints during the engineering-preview phase.
 
 See [ADR 0002](../architecture/0002-project-persistence.md) and
 [ADR 0008](../architecture/0008-recovery-catalog.md), plus
-[ADR 0013](../architecture/0013-schema-v2-titles-transitions.md) and
+[ADR 0013](../architecture/0013-schema-v2-titles-transitions.md),
+[ADR 0020](../architecture/0020-schema-v4-bins-nests.md), and
 [ADR 0014](../architecture/0014-professional-timeline-interaction.md), and
 [ADR 0018](../architecture/0018-local-transcription-and-caption-proposals.md).

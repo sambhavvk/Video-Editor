@@ -37,12 +37,31 @@ struct MediaItemView {
   QString durationText;
   QString formatText;
   QString metadataTitle;
+  QString binId;
+  QStringList tags;
+  QString notes;
+  int rating{0};
   QImage thumbnail;
   bool offline{false};
   bool contentChanged{false};
   bool proxyAvailable{false};
   bool proxyRecommended{false};
   bool proxyGenerating{false};
+};
+
+struct MediaBinView {
+  QString id;
+  QString name;
+  QString parentId;
+  bool isSmart{false};
+  QStringList smartTags;
+  int smartMinRating{0};
+  QString smartNotesContains;
+  QString smartNameContains;
+  bool smartHasVideoFilter{false};
+  bool smartHasVideo{false};
+  bool smartHasAudioFilter{false};
+  bool smartHasAudio{false};
 };
 
 struct TimelineTrackView {

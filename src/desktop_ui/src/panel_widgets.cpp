@@ -102,6 +102,34 @@ QWidget* makeInspectorField(const QString& id, const QString& suffix, double min
   return row;
 }
 
+constexpr const char* kAllMediaBinId = "__all_media__";
+
+bool assetMatchesSmartBin(const MediaItemView& item, const MediaBinView& bin) {
+  if (!bin.isSmart) {
+    return false;
+  }
+  for (const QString& tag : bin.smartTags) {
+    if (!item.tags.contains(tag, Qt::CaseInsensitive)) {
+      return false;
+    }
+  }
+  if (bin.smartMinRating > 0 && item.rating < bin.smartMinRating) {
+    return false;
+  }
+  if (!bin.smartNotesContains.isEmpty() &&
+      !item.notes.contains(bin.smartNotesContains, Qt::CaseInsensitive)) {
+    return false;
+  }
+  if (!bin.smartNameContains.isEmpty()) {
+    const auto haystack =
+        (item.metadataTitle.isEmpty() ? item.displayName : item.metadataTitle).toLower();
+    if (!haystack.contains(bin.smartNameContains, Qt::CaseInsensitive)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 } // namespace
 
 MediaBinWidget::MediaBinWidget(QWidget* parent) : QWidget(parent) {
@@ -130,7 +158,17 @@ MediaBinWidget::MediaBinWidget(QWidget* parent) : QWidget(parent) {
   tools->addWidget(import);
   layout->addLayout(tools);
 
-  content_ = new QStackedWidget(this);
+  splitter_ = new QSplitter(Qt::Horizontal, this);
+  splitter_->setObjectName(QStringLiteral("mediaBinSplitter"));
+
+  bin_tree_ = new QTreeWidget(splitter_);
+  bin_tree_->setObjectName(QStringLiteral("mediaBinTree"));
+  bin_tree_->setAccessibleName(tr("Media bins"));
+  bin_tree_->setHeaderHidden(true);
+  bin_tree_->setContextMenuPolicy(Qt::CustomContextMenu);
+  splitter_->addWidget(bin_tree_);
+
+  content_ = new QStackedWidget(splitter_);
   content_->setObjectName(QStringLiteral("mediaBinContent"));
 
   auto* empty = new QWidget(content_);
@@ -177,11 +215,41 @@ MediaBinWidget::MediaBinWidget(QWidget* parent) : QWidget(parent) {
   table_->setSortingEnabled(true);
   table_->setContextMenuPolicy(Qt::CustomContextMenu);
   content_->addWidget(table_);
-  layout->addWidget(content_, 1);
+  splitter_->addWidget(content_);
+  splitter_->setStretchFactor(0, 0);
+  splitter_->setStretchFactor(1, 1);
+  splitter_->setSizes({160, 480});
+  layout->addWidget(splitter_, 1);
 
   connect(import, &QToolButton::clicked, this, &MediaBinWidget::importRequested);
   connect(emptyImport, &QPushButton::clicked, this, &MediaBinWidget::importRequested);
   connect(search_, &QLineEdit::textChanged, this, &MediaBinWidget::applyFilter);
+  connect(bin_tree_, &QTreeWidget::itemSelectionChanged, this,
+          &MediaBinWidget::handleBinSelectionChanged);
+  connect(bin_tree_, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& point) {
+    auto* item = bin_tree_->itemAt(point);
+    const QString bin_id =
+        item == nullptr ? QString{} : item->data(0, Qt::UserRole).toString();
+    QMenu menu(this);
+    auto* create_folder = menu.addAction(tr("New folder"));
+    QAction* rename = nullptr;
+    QAction* remove = nullptr;
+    if (!bin_id.isEmpty() && bin_id != QString::fromUtf8(kAllMediaBinId)) {
+      rename = menu.addAction(tr("Rename bin"));
+      remove = menu.addAction(tr("Remove bin"));
+    }
+    connect(create_folder, &QAction::triggered, this,
+            [this, bin_id] { emit createBinRequested(bin_id); });
+    if (rename != nullptr) {
+      connect(rename, &QAction::triggered, this, [this, bin_id] {
+        emit renameBinRequested(bin_id, QString{});
+      });
+    }
+    if (remove != nullptr) {
+      connect(remove, &QAction::triggered, this, [this, bin_id] { emit removeBinRequested(bin_id); });
+    }
+    menu.exec(bin_tree_->viewport()->mapToGlobal(point));
+  });
   connect(table_, &QTableWidget::itemDoubleClicked, this, [this] { activateCurrent(); });
   connect(table_, &QTableWidget::itemSelectionChanged, this,
           &MediaBinWidget::emitCurrentMediaSelection);
@@ -203,6 +271,20 @@ MediaBinWidget::MediaBinWidget(QWidget* parent) : QWidget(parent) {
     menu.addSeparator();
     auto* relink = menu.addAction(tr("Relink media…"));
     relink->setEnabled(item != items_.cend() && (item->offline || item->contentChanged));
+    if (item != items_.cend()) {
+      auto* move_menu = menu.addMenu(tr("Move to bin"));
+      auto* unfiled = move_menu->addAction(tr("Unfiled"));
+      connect(unfiled, &QAction::triggered, this,
+              [this, id] { emit setAssetBinRequested(id, QString{}); });
+      for (const auto& bin : bins_) {
+        if (bin.isSmart) {
+          continue;
+        }
+        auto* action = move_menu->addAction(bin.name);
+        connect(action, &QAction::triggered, this,
+                [this, id, bin] { emit setAssetBinRequested(id, bin.id); });
+      }
+    }
     QAction* proxy = nullptr;
     if (item != items_.cend() && !item->offline && !item->proxyAvailable) {
       proxy = menu.addAction(item->proxyGenerating ? tr("Cancel proxy generation")
@@ -215,6 +297,13 @@ MediaBinWidget::MediaBinWidget(QWidget* parent) : QWidget(parent) {
     }
     menu.exec(table_->viewport()->mapToGlobal(point));
   });
+  rebuildTree();
+}
+
+void MediaBinWidget::setBins(const QVector<MediaBinView>& bins) {
+  bins_ = bins;
+  rebuildTree();
+  applyFilter(search_->text());
 }
 
 void MediaBinWidget::setItems(const QVector<MediaItemView>& items) {
@@ -225,14 +314,95 @@ void MediaBinWidget::setItems(const QVector<MediaItemView>& items) {
 
 void MediaBinWidget::applyFilter(const QString& query) {
   for (int row = 0; row < table_->rowCount(); ++row) {
-    const auto* name = table_->item(row, kMediaNameColumn);
-    const auto* format = table_->item(row, kMediaFormatColumn);
-    const auto matches = query.trimmed().isEmpty() ||
-                         (name != nullptr && name->text().contains(query, Qt::CaseInsensitive)) ||
-                         (format != nullptr && format->text().contains(query, Qt::CaseInsensitive));
-    table_->setRowHidden(row, !matches);
+    const auto id = mediaIdAtRow(row);
+    const auto item =
+        std::find_if(items_.cbegin(), items_.cend(),
+                     [&id](const MediaItemView& candidate) { return candidate.id == id; });
+    const bool visible =
+        item != items_.cend() && itemMatchesSelectedBin(*item) && itemMatchesSearch(*item, query);
+    table_->setRowHidden(row, !visible);
   }
   emit searchChanged(query);
+}
+
+void MediaBinWidget::handleBinSelectionChanged() {
+  applyFilter(search_->text());
+}
+
+QString MediaBinWidget::selectedBinId() const {
+  if (bin_tree_ == nullptr || bin_tree_->currentItem() == nullptr) {
+    return QString::fromUtf8(kAllMediaBinId);
+  }
+  return bin_tree_->currentItem()->data(0, Qt::UserRole).toString();
+}
+
+bool MediaBinWidget::itemMatchesSelectedBin(const MediaItemView& item) const {
+  const QString bin_id = selectedBinId();
+  if (bin_id.isEmpty() || bin_id == QString::fromUtf8(kAllMediaBinId)) {
+    return true;
+  }
+  const auto bin = std::find_if(bins_.cbegin(), bins_.cend(),
+                                [&bin_id](const MediaBinView& candidate) {
+                                  return candidate.id == bin_id;
+                                });
+  if (bin == bins_.cend()) {
+    return true;
+  }
+  if (bin->isSmart) {
+    return assetMatchesSmartBin(item, *bin);
+  }
+  return item.binId == bin_id;
+}
+
+bool MediaBinWidget::itemMatchesSearch(const MediaItemView& item, const QString& query) const {
+  const auto trimmed = query.trimmed();
+  if (trimmed.isEmpty()) {
+    return true;
+  }
+  const QString visible_name =
+      item.metadataTitle.isEmpty() ? item.displayName : item.metadataTitle;
+  if (visible_name.contains(trimmed, Qt::CaseInsensitive) ||
+      item.displayName.contains(trimmed, Qt::CaseInsensitive) ||
+      item.formatText.contains(trimmed, Qt::CaseInsensitive) ||
+      item.notes.contains(trimmed, Qt::CaseInsensitive)) {
+    return true;
+  }
+  if (trimmed.toInt() > 0 && item.rating == trimmed.toInt()) {
+    return true;
+  }
+  for (const QString& tag : item.tags) {
+    if (tag.contains(trimmed, Qt::CaseInsensitive)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void MediaBinWidget::rebuildTree() {
+  if (bin_tree_ == nullptr) {
+    return;
+  }
+  bin_tree_->clear();
+  auto* all_media = new QTreeWidgetItem(bin_tree_, {tr("All media")});
+  all_media->setData(0, Qt::UserRole, QString::fromUtf8(kAllMediaBinId));
+  QHash<QString, QTreeWidgetItem*> nodes;
+  nodes.insert(QString::fromUtf8(kAllMediaBinId), all_media);
+  for (const auto& bin : bins_) {
+    auto* node = new QTreeWidgetItem();
+    node->setText(0, bin.isSmart ? tr("%1 (smart)").arg(bin.name) : bin.name);
+    node->setData(0, Qt::UserRole, bin.id);
+    nodes.insert(bin.id, node);
+  }
+  for (const auto& bin : bins_) {
+    auto* node = nodes.value(bin.id);
+    if (bin.parentId.isEmpty() || !nodes.contains(bin.parentId)) {
+      bin_tree_->addTopLevelItem(node);
+    } else {
+      nodes.value(bin.parentId)->addChild(node);
+    }
+  }
+  bin_tree_->expandAll();
+  bin_tree_->setCurrentItem(all_media);
 }
 
 void MediaBinWidget::activateCurrent() {

@@ -79,9 +79,13 @@ private slots:
   void timelineCanCreateTracksWithoutAnExistingTrack();
   void timelineGapContextMenuCanAddTracks();
   void mediaBinContextMenuCanInsertAtPlayhead();
+  void mediaBinTreeFiltersByTags();
   void inspectorExposesKeyframeAuthoring();
   void deliverPanelShowsCancelableProgress();
   void audioMixerShowsSystemDefaultAndAuthoritativeLufsStates();
+  void audioMixerExposesBufferSizeAndSyncDiagnostics();
+  void programFullscreenActionTogglesAndEscRestores();
+  void programOutputDisplayMenuDoesNotCrashWithOneScreen();
 };
 
 namespace {
@@ -1164,6 +1168,54 @@ void EditorWindowTest::mediaBinContextMenuCanInsertAtPlayhead() {
                                     Q_ARG(QPoint, menuPoint)));
   QTRY_COMPARE_WITH_TIMEOUT(insertRequested.count(), 1, 2'000);
   QCOMPARE(insertRequested.at(0).at(0).toString(), media_id);
+}
+
+void EditorWindowTest::mediaBinTreeFiltersByTags() {
+  video_editor::desktop_ui::MediaBinWidget media_bin;
+  auto* tree = media_bin.findChild<QTreeWidget*>(QStringLiteral("mediaBinTree"));
+  auto* search = media_bin.findChild<QLineEdit*>(QStringLiteral("mediaSearch"));
+  auto* table = media_bin.findChild<QTableWidget*>(QStringLiteral("mediaTable"));
+  QVERIFY(tree != nullptr);
+  QVERIFY(search != nullptr);
+  QVERIFY(table != nullptr);
+
+  const QString folder_id = QStringLiteral("folder-1");
+  media_bin.setBins({{.id = folder_id,
+                      .name = QStringLiteral("Camera"),
+                      .isSmart = false},
+                     {.id = QStringLiteral("smart-1"),
+                      .name = QStringLiteral("Hero shots"),
+                      .isSmart = true,
+                      .smartTags = {QStringLiteral("hero")}}});
+  media_bin.setItems(
+      {{.id = QStringLiteral("asset-a"),
+        .displayName = QStringLiteral("wide.mov"),
+        .metadataTitle = QStringLiteral("Wide"),
+        .binId = folder_id,
+        .tags = {QStringLiteral("hero")}},
+       {.id = QStringLiteral("asset-b"),
+        .displayName = QStringLiteral("tight.mov"),
+        .metadataTitle = QStringLiteral("Tight"),
+        .tags = {QStringLiteral("b-roll")}}});
+
+  for (int row = 0; row < table->rowCount(); ++row) {
+    QVERIFY(!table->isRowHidden(row));
+  }
+
+  search->setText(QStringLiteral("hero"));
+  QCoreApplication::processEvents();
+  QVERIFY(table->isRowHidden(1));
+  QVERIFY(!table->isRowHidden(0));
+
+  search->clear();
+  QCoreApplication::processEvents();
+  const auto smart_items = tree->findItems(QStringLiteral("Hero shots (smart)"),
+                                           Qt::MatchExactly | Qt::MatchRecursive);
+  QVERIFY(!smart_items.isEmpty());
+  tree->setCurrentItem(smart_items.front());
+  QCoreApplication::processEvents();
+  QVERIFY(!table->isRowHidden(0));
+  QVERIFY(table->isRowHidden(1));
 }
 
 void EditorWindowTest::deliverPanelShowsCancelableProgress() {

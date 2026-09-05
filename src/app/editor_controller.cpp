@@ -785,6 +785,9 @@ std::optional<std::uint32_t> projectSnapshotSchema(const store::JournalEntry& en
   if (entry.command_type == "project.snapshot.v3") {
     return 3U;
   }
+  if (entry.command_type == "project.snapshot.v4") {
+    return 4U;
+  }
   return std::nullopt;
 }
 
@@ -1217,6 +1220,14 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::generateProxy);
   connect(window_.mediaBin(), &desktop_ui::MediaBinWidget::relinkRequested, this,
           &EditorController::relinkMedia);
+  connect(window_.mediaBin(), &desktop_ui::MediaBinWidget::createBinRequested, this,
+          &EditorController::createBin);
+  connect(window_.mediaBin(), &desktop_ui::MediaBinWidget::renameBinRequested, this,
+          &EditorController::renameBin);
+  connect(window_.mediaBin(), &desktop_ui::MediaBinWidget::removeBinRequested, this,
+          &EditorController::removeBin);
+  connect(window_.mediaBin(), &desktop_ui::MediaBinWidget::setAssetBinRequested, this,
+          &EditorController::setAssetBin);
   connect(&window_, &desktop_ui::EditorWindow::mediaSelectionChanged, this,
           &EditorController::selectMedia);
   connect(&window_, &desktop_ui::EditorWindow::assetMetadataEdited, this,
@@ -6353,13 +6364,14 @@ void EditorController::persistSnapshot(const std::string_view reason) {
   const auto project = editor_->projectAt(editor_->revision());
   const project_codec::ProjectBytes bytes = project_codec::serialize_project(*project);
   const auto metadata = store_->metadata();
-  store_->append_command("project.snapshot.v3", std::span<const std::byte>(bytes),
+  store_->append_command("project.snapshot.v4", std::span<const std::byte>(bytes),
                          metadata.head_revision, project_codec::kCurrentSchemaVersion);
   store_->update_heartbeat();
   (void)reason;
 }
 
-bool EditorController::apply(edit::EditCommand command, const QString& failureContext) {
+bool EditorController::apply(edit::EditCommand command, const QString& failureContext,
+                             const bool persist) {
   const std::string operation = edit::commandName(command);
   const auto result = editor_->apply(std::move(command), editor_->revision());
   if (!result) {
@@ -6859,6 +6871,42 @@ void EditorController::refreshViews() {
 
 void EditorController::refreshMediaView() {
   const auto project = editor_->projectAt(editor_->revision());
+  QVector<desktop_ui::MediaBinView> bins;
+  bins.reserve(static_cast<qsizetype>(project->bins.size()));
+  for (const edit::MediaBin& bin : project->bins) {
+    desktop_ui::MediaBinView view;
+    view.id = QString::fromStdString(bin.id.toString());
+    view.name = QString::fromStdString(bin.name);
+    view.isSmart = bin.kind == edit::MediaBinKind::Smart;
+    if (bin.parent_id.has_value()) {
+      view.parentId = QString::fromStdString(bin.parent_id->toString());
+    }
+    if (view.isSmart) {
+      for (const std::string& tag : bin.query.tags) {
+        view.smartTags.push_back(QString::fromStdString(tag));
+      }
+      if (bin.query.min_rating.has_value()) {
+        view.smartMinRating = *bin.query.min_rating;
+      }
+      if (bin.query.notes_contains.has_value()) {
+        view.smartNotesContains = QString::fromStdString(*bin.query.notes_contains);
+      }
+      if (bin.query.name_contains.has_value()) {
+        view.smartNameContains = QString::fromStdString(*bin.query.name_contains);
+      }
+      if (bin.query.has_video.has_value()) {
+        view.smartHasVideoFilter = true;
+        view.smartHasVideo = *bin.query.has_video;
+      }
+      if (bin.query.has_audio.has_value()) {
+        view.smartHasAudioFilter = true;
+        view.smartHasAudio = *bin.query.has_audio;
+      }
+    }
+    bins.push_back(std::move(view));
+  }
+  window_.setMediaBins(bins);
+
   QVector<MediaItemView> items;
   items.reserve(static_cast<qsizetype>(project->assets.size()));
   for (const edit::Asset& asset : project->assets) {
@@ -6875,13 +6923,28 @@ void EditorController::refreshMediaView() {
         record != nullptr && assets::AssetService::should_recommend_proxy(*record);
     const auto title = media_metadata_titles_.find(asset.id.toString());
     const auto thumbnail = media_thumbnails_.find(asset.id.toString());
+    const QString display_title = asset.display_title.empty()
+                                        ? QString{}
+                                        : QString::fromStdString(asset.display_title);
+    QStringList tags;
+    for (const std::string& tag : asset.tags) {
+      tags.push_back(QString::fromStdString(tag));
+    }
     items.push_back({
         .id = QString::fromStdString(asset.id.toString()),
         .displayName = QString::fromStdString(asset.name),
         .filePath = qStringFromPath(pathFromUtf8String(asset.source_uri)),
         .durationText = durationText(asset.duration),
         .formatText = format.trimmed(),
-        .metadataTitle = title == media_metadata_titles_.end() ? QString{} : title->second,
+        .metadataTitle = display_title.isEmpty()
+                             ? (title == media_metadata_titles_.end() ? QString{}
+                                                                      : title->second)
+                             : display_title,
+        .binId = asset.bin_id.has_value() ? QString::fromStdString(asset.bin_id->toString())
+                                          : QString{},
+        .tags = std::move(tags),
+        .notes = QString::fromStdString(asset.notes),
+        .rating = asset.rating,
         .thumbnail = thumbnail == media_thumbnails_.end() ? QImage{} : thumbnail->second,
         .offline = record == nullptr || record->availability == assets::AssetAvailability::Missing,
         .contentChanged =
@@ -8572,6 +8635,22 @@ void EditorController::presentAssetMetadata(const QString& assetId) {
   desktop_ui::AssetMetadataView view;
   view.assetId = assetId;
   const std::string key = assetId.toStdString();
+  const auto project = editor_->projectAt(editor_->revision());
+  const edit::EntityId entity_id =
+      edit::EntityId::parse(key).value_or(edit::EntityId{});
+  const edit::Asset* asset = edit::findAsset(*project, entity_id);
+  if (asset != nullptr) {
+    view.title = QString::fromStdString(asset->display_title);
+    view.notes = QString::fromStdString(asset->notes);
+    view.rating = asset->rating;
+    for (const std::string& tag : asset->tags) {
+      view.tags.push_back(QString::fromStdString(tag));
+    }
+    if (!view.title.isEmpty() || !view.notes.isEmpty() || view.rating != 0 || !view.tags.isEmpty()) {
+      window_.inspector()->setAssetMetadata(view);
+      return;
+    }
+  }
   if (media_cache_ != nullptr && !cache_job_running_) {
     if (auto loaded = media_cache::load_metadata(key, *media_cache_)) {
       view.title = QString::fromStdString(loaded.value().title);
@@ -8595,29 +8674,132 @@ void EditorController::saveAssetMetadata(const desktop_ui::AssetMetadataView& me
   if (metadata.assetId.isEmpty()) {
     return;
   }
-  if (media_cache_ == nullptr) {
-    window_.showTransientMessage(tr("Media cache is unavailable"));
+  const auto asset_id = edit::EntityId::parse(metadata.assetId.toStdString());
+  if (!asset_id.has_value()) {
     return;
   }
-  if (cache_job_running_) {
-    window_.showTransientMessage(tr("Media cache is busy; try again in a moment"));
-    return;
-  }
-  media_cache::MetadataDocument document;
-  document.title = metadata.title.toStdString();
-  document.notes = metadata.notes.toStdString();
-  document.rating = metadata.rating;
-  document.tags.reserve(static_cast<std::size_t>(metadata.tags.size()));
+  edit::SetAssetMetadataCommand command;
+  command.asset_id = *asset_id;
+  command.display_title = metadata.title.toStdString();
+  command.notes = metadata.notes.toStdString();
+  command.rating = metadata.rating;
+  command.tags.reserve(static_cast<std::size_t>(metadata.tags.size()));
   for (const QString& tag : metadata.tags) {
-    document.tags.push_back(tag.toStdString());
+    command.tags.push_back(tag.toStdString());
   }
-  const auto saved = media_cache::save_metadata(metadata.assetId.toStdString(), document, *media_cache_);
-  if (!saved) {
-    showError(tr("Could not save media metadata"), QString::fromStdString(saved.error().message));
+  if (!apply(edit::EditCommand{.operation = command}, tr("Could not save asset metadata"))) {
     return;
+  }
+  if (media_cache_ != nullptr && !cache_job_running_) {
+    media_cache::MetadataDocument document;
+    document.title = command.display_title;
+    document.notes = command.notes;
+    document.rating = command.rating;
+    document.tags = command.tags;
+    (void)media_cache::save_metadata(metadata.assetId.toStdString(), document, *media_cache_);
   }
   media_metadata_titles_[metadata.assetId.toStdString()] = metadata.title;
   refreshMediaView();
+}
+
+void EditorController::migrateCacheMetadataToProject() {
+  if (editor_ == nullptr || media_cache_ == nullptr || cache_job_running_) {
+    return;
+  }
+  std::vector<edit::EditCommand> commands;
+  const auto project = editor_->projectAt(editor_->revision());
+  for (const edit::Asset& asset : project->assets) {
+    const bool project_empty = asset.display_title.empty() && asset.tags.empty() &&
+                               asset.notes.empty() && asset.rating == 0;
+    if (!project_empty) {
+      continue;
+    }
+    const auto loaded = media_cache::load_metadata(asset.id.toString(), *media_cache_);
+    if (!loaded) {
+      continue;
+    }
+    const auto& document = loaded.value();
+    if (document.title.empty() && document.notes.empty() && document.rating == 0 &&
+        document.tags.empty()) {
+      continue;
+    }
+    edit::SetAssetMetadataCommand command;
+    command.asset_id = asset.id;
+    command.display_title = document.title;
+    command.notes = document.notes;
+    command.rating = document.rating;
+    command.tags = document.tags;
+    commands.push_back(edit::EditCommand{.operation = command});
+  }
+  if (commands.empty()) {
+    return;
+  }
+  (void)applyBatch(std::move(commands), tr("Could not migrate media metadata"));
+}
+
+void EditorController::createBin(const QString& parentBinId) {
+  edit::MediaBin bin;
+  bin.name = tr("New folder").toStdString();
+  bin.kind = edit::MediaBinKind::Folder;
+  if (!parentBinId.isEmpty() && parentBinId != QStringLiteral("__all_media__")) {
+    if (const auto parent_id = edit::EntityId::parse(parentBinId.toStdString())) {
+      bin.parent_id = *parent_id;
+    }
+  }
+  (void)apply(edit::EditCommand{.operation = edit::CreateBinCommand{.bin = std::move(bin)}},
+              tr("Could not create media bin"));
+}
+
+void EditorController::renameBin(const QString& binId, const QString& name) {
+  if (binId.isEmpty()) {
+    return;
+  }
+  QString new_name = name;
+  if (new_name.isEmpty()) {
+    new_name = QInputDialog::getText(&window_, tr("Rename bin"), tr("Bin name"));
+    if (new_name.trimmed().isEmpty()) {
+      return;
+    }
+  }
+  const auto parsed_bin_id = edit::EntityId::parse(binId.toStdString());
+  if (!parsed_bin_id.has_value()) {
+    return;
+  }
+  edit::RenameBinCommand command;
+  command.bin_id = *parsed_bin_id;
+  command.name = new_name.trimmed().toStdString();
+  (void)apply(edit::EditCommand{.operation = command}, tr("Could not rename media bin"));
+}
+
+void EditorController::removeBin(const QString& binId) {
+  if (binId.isEmpty()) {
+    return;
+  }
+  const auto parsed_bin_id = edit::EntityId::parse(binId.toStdString());
+  if (!parsed_bin_id.has_value()) {
+    return;
+  }
+  edit::RemoveBinCommand command;
+  command.bin_id = *parsed_bin_id;
+  (void)apply(edit::EditCommand{.operation = command}, tr("Could not remove media bin"));
+}
+
+void EditorController::setAssetBin(const QString& assetId, const QString& binId) {
+  if (assetId.isEmpty()) {
+    return;
+  }
+  const auto parsed_asset_id = edit::EntityId::parse(assetId.toStdString());
+  if (!parsed_asset_id.has_value()) {
+    return;
+  }
+  edit::SetAssetBinCommand command;
+  command.asset_id = *parsed_asset_id;
+  if (!binId.isEmpty()) {
+    if (const auto parsed_bin_id = edit::EntityId::parse(binId.toStdString())) {
+      command.bin_id = *parsed_bin_id;
+    }
+  }
+  (void)apply(edit::EditCommand{.operation = command}, tr("Could not move media to bin"));
 }
 
 void EditorController::showMediaCacheBrowser() {

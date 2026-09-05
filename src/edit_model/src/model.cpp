@@ -11,6 +11,12 @@ const Asset* findAsset(const Project& project, EntityId id) noexcept {
   return found == project.assets.end() ? nullptr : &*found;
 }
 
+const MediaBin* findBin(const Project& project, EntityId id) noexcept {
+  const auto found = std::find_if(project.bins.begin(), project.bins.end(),
+                                  [id](const MediaBin& bin) { return bin.id == id; });
+  return found == project.bins.end() ? nullptr : &*found;
+}
+
 const Sequence* findSequence(const Project& project, EntityId id) noexcept {
   const auto found = std::find_if(project.sequences.begin(), project.sequences.end(),
                                   [id](const Sequence& sequence) { return sequence.id == id; });

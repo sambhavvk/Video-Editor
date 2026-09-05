@@ -280,6 +280,35 @@ struct RemoveTransitionCommand final {
   EntityId sequence_id;
   EntityId transition_id;
 };
+struct CreateBinCommand final {
+  MediaBin bin;
+};
+struct RenameBinCommand final {
+  EntityId bin_id;
+  std::string name;
+};
+struct MoveBinCommand final {
+  EntityId bin_id;
+  std::optional<EntityId> parent_id;
+};
+struct RemoveBinCommand final {
+  EntityId bin_id;
+};
+struct SetAssetBinCommand final {
+  EntityId asset_id;
+  std::optional<EntityId> bin_id;
+};
+struct SetAssetMetadataCommand final {
+  EntityId asset_id;
+  std::string display_title;
+  std::vector<std::string> tags;
+  std::string notes;
+  int rating{0};
+};
+struct SetSmartQueryCommand final {
+  EntityId bin_id;
+  SmartQuery query;
+};
 
 using EditOperation = std::variant<
     AddAssetCommand, RemoveAssetCommand, AddSequenceCommand, RemoveSequenceCommand, AddTrackCommand,
@@ -293,7 +322,9 @@ using EditOperation = std::variant<
     RemoveTransitionCommand, RenameTrackCommand, ReorderTrackCommand, SetTrackLockedCommand,
     SetTrackVisibilityCommand, SetTrackTargetedCommand, CloseGapCommand, SetTrackAudioMixCommand,
     AddTrackEffectCommand, RemoveTrackEffectCommand, SetTrackEffectParameterCommand,
-    ApplyCaptionChangeSetCommand, ApplyTimelineCutChangeSetCommand, RelinkAssetCommand>;
+    ApplyCaptionChangeSetCommand, ApplyTimelineCutChangeSetCommand, RelinkAssetCommand,
+    CreateBinCommand, RenameBinCommand, MoveBinCommand, RemoveBinCommand, SetAssetBinCommand,
+    SetAssetMetadataCommand, SetSmartQueryCommand>;
 
 struct EditCommand final {
   EditOperation operation;

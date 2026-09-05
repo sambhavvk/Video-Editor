@@ -723,5 +723,65 @@ TEST(ProjectCodecTest, PreservesRawRationalRepresentationsAndUuidBytes) {
   EXPECT_EQ(decoded.value().id.bytes(), project.id.bytes());
 }
 
+TEST(ProjectCodecTest, SchemaV4RoundTripsBinsMetadataAndNestedSequenceClip) {
+  auto project = makeComplexProject();
+  edit::MediaBin folder;
+  folder.name = "Camera";
+  folder.kind = edit::MediaBinKind::Folder;
+  project.bins.push_back(folder);
+
+  project.assets[0].bin_id = folder.id;
+  project.assets[0].display_title = "Hero";
+  project.assets[0].tags = {"day", "wide"};
+  project.assets[0].notes = "Slate 1";
+  project.assets[0].rating = 4;
+
+  edit::MediaBin smart;
+  smart.name = "Rated";
+  smart.kind = edit::MediaBinKind::Smart;
+  smart.query.min_rating = 4;
+  smart.query.tags = {"day"};
+  project.bins.push_back(smart);
+
+  edit::Sequence nested;
+  nested.name = "Nested";
+  nested.width = 1920;
+  nested.height = 1080;
+  nested.audio_sample_rate = 48'000;
+  project.sequences.push_back(nested);
+
+  edit::Clip nested_clip;
+  nested_clip.kind = edit::ClipKind::NestedSequence;
+  nested_clip.name = "Nest";
+  nested_clip.timeline_range = edit::TimeRange(edit::Time(390'000, 30'000), edit::Time(90'000, 30'000));
+  nested_clip.source_range = edit::TimeRange(edit::Time(0, 30'000), edit::Time(90'000, 30'000));
+  nested_clip.nested_sequence_id = nested.id;
+  project.sequences[0].tracks[0].clips.push_back(nested_clip);
+
+  const auto bytes = serialize_project(project);
+  ASSERT_GE(bytes.size(), 4U);
+  EXPECT_EQ(bytes[1], std::byte{0x04});
+
+  auto decoded = deserialize_project(bytes);
+  ASSERT_TRUE(decoded) << (decoded ? "" : decoded.error().message);
+  EXPECT_EQ(decoded.value(), project);
+}
+
+TEST(ProjectCodecTest, DeclaredVersionThreeSnapshotsStillDeserialize) {
+  const auto canonical = serialize_project(makeComplexProject());
+  video_editor::persistence::v1::ProjectSnapshot snapshot;
+  ASSERT_TRUE(snapshot.ParseFromArray(canonical.data(), static_cast<int>(canonical.size())));
+  snapshot.set_schema_version(3);
+  std::string bytes;
+  ASSERT_TRUE(snapshot.SerializeToString(&bytes));
+  ProjectBytes declared_v3;
+  declared_v3.reserve(bytes.size());
+  for (const char byte : bytes) {
+    declared_v3.push_back(static_cast<std::byte>(byte));
+  }
+  auto decoded = deserialize_project(declared_v3);
+  ASSERT_TRUE(decoded) << (decoded ? "" : decoded.error().message);
+}
+
 } // namespace
 } // namespace video_editor::project_codec

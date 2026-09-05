@@ -215,6 +215,10 @@ void EditorWindow::setMediaItems(const QVector<MediaItemView>& items) {
   media_bin_->setItems(items);
 }
 
+void EditorWindow::setMediaBins(const QVector<MediaBinView>& bins) {
+  media_bin_->setBins(bins);
+}
+
 void EditorWindow::setTimelineView(qint64 duration, qint64 timeScale,
                                    QVector<TimelineTrackView> tracks,
                                    QVector<TimelineClipView> clips) {

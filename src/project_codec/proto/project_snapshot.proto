@@ -128,6 +128,11 @@ message Asset {
   uint32 audio_sample_rate = 11;
   uint32 audio_channels = 12;
   repeated StringEntry metadata = 13;
+  optional EntityId bin_id = 14;
+  optional string display_title = 15;
+  repeated string tags = 16;
+  optional string notes = 17;
+  optional int32 rating = 18;
 }
 
 enum TrackKind {
@@ -142,6 +147,7 @@ enum ClipKind {
   CLIP_KIND_VIDEO = 1;
   CLIP_KIND_AUDIO = 2;
   CLIP_KIND_TITLE = 3;
+  CLIP_KIND_NESTED_SEQUENCE = 4;
 }
 
 enum BlendMode {
@@ -186,6 +192,7 @@ message Clip {
   Time fade_out = 15;
   repeated Effect effects = 16;
   optional Title title = 17;
+  optional EntityId nested_sequence_id = 18;
 }
 
 message Track {
@@ -277,12 +284,36 @@ message Sequence {
   repeated Transition transitions = 10;
 }
 
+enum MediaBinKind {
+  MEDIA_BIN_KIND_UNSPECIFIED = 0;
+  MEDIA_BIN_KIND_FOLDER = 1;
+  MEDIA_BIN_KIND_SMART = 2;
+}
+
+message SmartQuery {
+  repeated string tags = 1;
+  optional int32 min_rating = 2;
+  optional string notes_contains = 3;
+  optional bool has_video = 4;
+  optional bool has_audio = 5;
+  optional string name_contains = 6;
+}
+
+message MediaBin {
+  EntityId id = 1;
+  string name = 2;
+  optional EntityId parent_id = 3;
+  MediaBinKind kind = 4;
+  SmartQuery query = 5;
+}
+
 message Project {
   EntityId id = 1;
   string name = 2;
   repeated Asset assets = 3;
   repeated Sequence sequences = 4;
   repeated StringEntry metadata = 5;
+  repeated MediaBin bins = 6;
 }
 
 message ProjectSnapshot {

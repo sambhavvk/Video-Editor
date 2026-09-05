@@ -93,6 +93,27 @@ struct Transform final {
   friend bool operator==(const Transform&, const Transform&) = default;
 };
 
+enum class MediaBinKind { Folder, Smart };
+
+struct SmartQuery final {
+  std::vector<std::string> tags;
+  std::optional<int> min_rating;
+  std::optional<std::string> notes_contains;
+  std::optional<bool> has_video;
+  std::optional<bool> has_audio;
+  std::optional<std::string> name_contains;
+  friend bool operator==(const SmartQuery&, const SmartQuery&) = default;
+};
+
+struct MediaBin final {
+  EntityId id{EntityId::generate()};
+  std::string name;
+  std::optional<EntityId> parent_id;
+  MediaBinKind kind{MediaBinKind::Folder};
+  SmartQuery query{};
+  friend bool operator==(const MediaBin&, const MediaBin&) = default;
+};
+
 struct Asset final {
   EntityId id{EntityId::generate()};
   std::string name;
@@ -107,11 +128,16 @@ struct Asset final {
   std::uint32_t audio_sample_rate{0};
   std::uint32_t audio_channels{0};
   std::map<std::string, std::string, std::less<>> metadata;
+  std::optional<EntityId> bin_id;
+  std::string display_title;
+  std::vector<std::string> tags;
+  std::string notes;
+  int rating{0};
   friend bool operator==(const Asset&, const Asset&) = default;
 };
 
 enum class TrackKind { Video, Audio, Caption };
-enum class ClipKind { Video, Audio, Title };
+enum class ClipKind { Video, Audio, Title, NestedSequence };
 enum class BlendMode { Normal, Add, Multiply, Screen, Overlay };
 enum class TransitionKind { CrossDissolve, DipToBlack };
 
@@ -246,11 +272,13 @@ struct Project final {
   std::string name{"Untitled project"};
   std::vector<Asset> assets;
   std::vector<Sequence> sequences;
+  std::vector<MediaBin> bins;
   std::map<std::string, std::string, std::less<>> metadata;
   friend bool operator==(const Project&, const Project&) = default;
 };
 
 [[nodiscard]] const Asset* findAsset(const Project& project, EntityId id) noexcept;
+[[nodiscard]] const MediaBin* findBin(const Project& project, EntityId id) noexcept;
 [[nodiscard]] const Sequence* findSequence(const Project& project, EntityId id) noexcept;
 [[nodiscard]] const Track* findTrack(const Sequence& sequence, EntityId id) noexcept;
 [[nodiscard]] const Clip* findClip(const Sequence& sequence, EntityId id) noexcept;

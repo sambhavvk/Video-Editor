@@ -91,7 +91,14 @@ TEST(ClipPropertiesTest, AppendsOperationsWithoutChangingExistingVariantOrdinals
   EXPECT_EQ(EditOperation{CloseGapCommand{}}.index(), 38U);
   EXPECT_EQ(EditOperation{SetTrackAudioMixCommand{}}.index(), 39U);
   EXPECT_EQ(EditOperation{RelinkAssetCommand{}}.index(), 45U);
-  EXPECT_EQ(std::variant_size_v<EditOperation>, 46U);
+  EXPECT_EQ(EditOperation{CreateBinCommand{}}.index(), 46U);
+  EXPECT_EQ(EditOperation{RenameBinCommand{}}.index(), 47U);
+  EXPECT_EQ(EditOperation{MoveBinCommand{}}.index(), 48U);
+  EXPECT_EQ(EditOperation{RemoveBinCommand{}}.index(), 49U);
+  EXPECT_EQ(EditOperation{SetAssetBinCommand{}}.index(), 50U);
+  EXPECT_EQ(EditOperation{SetAssetMetadataCommand{}}.index(), 51U);
+  EXPECT_EQ(EditOperation{SetSmartQueryCommand{}}.index(), 52U);
+  EXPECT_EQ(std::variant_size_v<EditOperation>, 53U);
 }
 
 TEST(ClipPropertiesTest, AppliesAndRoundTripsTypedPropertiesAsExactRevisions) {

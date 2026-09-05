@@ -427,6 +427,11 @@ private:
   void relinkMedia(const QString& assetId);
   void selectMedia(const QString& mediaId);
   void saveAssetMetadata(const desktop_ui::AssetMetadataView& metadata);
+  void createBin(const QString& parentBinId);
+  void renameBin(const QString& binId, const QString& name);
+  void removeBin(const QString& binId);
+  void setAssetBin(const QString& assetId, const QString& binId);
+  void migrateCacheMetadataToProject();
   void showMediaCacheBrowser();
   void finishProxyJob(const std::string& asset_id, const ProxyOutcome& outcome);
   void finishVideoExport(const VideoExportOutcome& outcome);
