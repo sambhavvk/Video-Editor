@@ -661,6 +661,21 @@ void EditorWindow::createActions() {
          tr("Trim clip heads to the playhead without rippling"), QKeySequence{tr("Shift+Q")});
   create(QStringLiteral("overwriteTrimTailToPlayhead"), tr("Overwrite Trim Tail to Playhead"),
          tr("Trim clip tails to the playhead without rippling"), QKeySequence{tr("Shift+E")});
+  create(QStringLiteral("copyClips"), tr("Copy"), tr("Copy the selected clips"),
+         QKeySequence::Copy);
+  create(QStringLiteral("cutClips"), tr("Cut"), tr("Cut the selected clips"), QKeySequence::Cut);
+  create(QStringLiteral("pasteClipsInsert"), tr("Paste Insert"),
+         tr("Paste copied clips at the playhead and ripple"), QKeySequence::Paste);
+  create(QStringLiteral("pasteClipsOverwrite"), tr("Paste Overwrite"),
+         tr("Paste copied clips at the playhead and overwrite"),
+         QKeySequence{tr("Ctrl+Alt+V")});
+  create(QStringLiteral("duplicateClips"), tr("Duplicate"),
+         tr("Duplicate the selection at the playhead"), QKeySequence{tr("Ctrl+Shift+D")});
+  create(QStringLiteral("pasteClipAttributes"), tr("Paste Attributes"),
+         tr("Paste copied clip attributes onto the selection"),
+         QKeySequence{tr("Ctrl+Alt+A")});
+  create(QStringLiteral("replaceClipMedia"), tr("Replace Clip Media"),
+         tr("Replace the selected clip media from the loaded source"));
   create(QStringLiteral("deleteSelection"), tr("Delete"), tr("Delete the selection"),
          QKeySequence{Qt::Key_Delete});
   create(QStringLiteral("rippleDelete"), tr("Ripple Delete"),
@@ -809,6 +824,20 @@ void EditorWindow::createActions() {
           &EditorWindow::overwriteTrimHeadToPlayheadRequested);
   connect(action(QStringLiteral("overwriteTrimTailToPlayhead")), &QAction::triggered, this,
           &EditorWindow::overwriteTrimTailToPlayheadRequested);
+  connect(action(QStringLiteral("copyClips")), &QAction::triggered, this,
+          &EditorWindow::copyClipsRequested);
+  connect(action(QStringLiteral("cutClips")), &QAction::triggered, this,
+          &EditorWindow::cutClipsRequested);
+  connect(action(QStringLiteral("pasteClipsInsert")), &QAction::triggered, this,
+          &EditorWindow::pasteClipsInsertRequested);
+  connect(action(QStringLiteral("pasteClipsOverwrite")), &QAction::triggered, this,
+          &EditorWindow::pasteClipsOverwriteRequested);
+  connect(action(QStringLiteral("duplicateClips")), &QAction::triggered, this,
+          &EditorWindow::duplicateClipsRequested);
+  connect(action(QStringLiteral("pasteClipAttributes")), &QAction::triggered, this,
+          &EditorWindow::pasteClipAttributesRequested);
+  connect(action(QStringLiteral("replaceClipMedia")), &QAction::triggered, this,
+          [this] { emit replaceClipMediaRequested(QString{}); });
   connect(trackSelectForward, &QAction::triggered, this, [this] {
     if (timeline_->toolMode() == TimelineWidget::ToolMode::Select) {
       emit selectForwardOnTargetedTrackRequested();

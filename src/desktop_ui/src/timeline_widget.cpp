@@ -1183,6 +1183,7 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
         clickTime > clip.start && clickTime < clip.start + std::max<qint64>(1, clip.duration);
     QMenu menu(this);
     auto* properties = menu.addAction(tr("Properties"));
+    auto* replaceMedia = menu.addAction(tr("Replace from Source"));
     auto* cutHere = menu.addAction(tr("Cut here"));
     cutHere->setEnabled(cutInside);
     cutHere->setToolTip(tr("Split the clip at the clicked position"));
@@ -1194,6 +1195,8 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
     const auto* chosen = menu.exec(event->globalPos());
     if (chosen == properties) {
       emit clipInspectorRequested(clip.id);
+    } else if (chosen == replaceMedia) {
+      emit clipReplaceMediaRequested(clip.id);
     } else if (chosen == cutHere && cutInside) {
       emit clipCutAtRequested(clip.id, clickTime);
     } else if (chosen == remove) {

@@ -151,6 +151,13 @@ signals:
   void overwriteTrimTailToPlayheadRequested();
   void selectForwardRequested();
   void selectForwardOnTargetedTrackRequested();
+  void copyClipsRequested();
+  void cutClipsRequested();
+  void pasteClipsInsertRequested();
+  void pasteClipsOverwriteRequested();
+  void duplicateClipsRequested();
+  void pasteClipAttributesRequested();
+  void replaceClipMediaRequested(const QString& clipId = QString());
   void deleteSelectionRequested(bool ripple);
   void playbackRateRequested(double rate);
   void seekRequested(qint64 position);

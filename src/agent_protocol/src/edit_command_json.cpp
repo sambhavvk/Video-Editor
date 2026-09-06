@@ -1885,6 +1885,15 @@ void encodeOperationFields(QJsonObject& object, const EditOperation& operation) 
         } else if constexpr (std::is_same_v<T, edit::SetSmartQueryCommand>) {
           object.insert(QStringLiteral("bin_id"), encodeEntityId(command.bin_id));
           object.insert(QStringLiteral("query"), encodeSmartQuery(command.query));
+        } else if constexpr (std::is_same_v<T, edit::ReplaceClipMediaCommand>) {
+          object.insert(QStringLiteral("sequence_id"), encodeEntityId(command.sequence_id));
+          object.insert(QStringLiteral("clip_id"), encodeEntityId(command.clip_id));
+          object.insert(QStringLiteral("asset_id"), encodeEntityId(command.asset_id));
+          object.insert(QStringLiteral("source_range"), encodeTimeRange(command.source_range));
+        } else if constexpr (std::is_same_v<T, edit::SetClipNameCommand>) {
+          object.insert(QStringLiteral("sequence_id"), encodeEntityId(command.sequence_id));
+          object.insert(QStringLiteral("clip_id"), encodeEntityId(command.clip_id));
+          object.insert(QStringLiteral("name"), stdToQstr(command.name));
         }
       },
       operation);
@@ -2582,6 +2591,34 @@ void encodeOperationFields(QJsonObject& object, const EditOperation& operation) 
     const auto query = decodeSmartQuery(object.value(QStringLiteral("query")), "set_smart_query.query");
     if (!query) return fail<EditOperation>(query.error().message);
     return DecodeResult<EditOperation>::success(edit::SetSmartQueryCommand{bin_id.value(), query.value()});
+  }
+  if (type == QStringLiteral("replace_clip_media")) {
+    const auto sequence_id =
+        decodeEntityIdRequired(object.value(QStringLiteral("sequence_id")), "replace_clip_media.sequence_id");
+    if (!sequence_id) return fail<EditOperation>(sequence_id.error().message);
+    const auto clip_id =
+        decodeEntityIdRequired(object.value(QStringLiteral("clip_id")), "replace_clip_media.clip_id");
+    if (!clip_id) return fail<EditOperation>(clip_id.error().message);
+    const auto asset_id =
+        decodeEntityIdRequired(object.value(QStringLiteral("asset_id")), "replace_clip_media.asset_id");
+    if (!asset_id) return fail<EditOperation>(asset_id.error().message);
+    const auto source_range =
+        decodeTimeRange(object.value(QStringLiteral("source_range")), "replace_clip_media.source_range");
+    if (!source_range) return fail<EditOperation>(source_range.error().message);
+    return DecodeResult<EditOperation>::success(
+        edit::ReplaceClipMediaCommand{sequence_id.value(), clip_id.value(), asset_id.value(),
+                                      source_range.value()});
+  }
+  if (type == QStringLiteral("set_clip_name")) {
+    const auto sequence_id =
+        decodeEntityIdRequired(object.value(QStringLiteral("sequence_id")), "set_clip_name.sequence_id");
+    if (!sequence_id) return fail<EditOperation>(sequence_id.error().message);
+    const auto clip_id =
+        decodeEntityIdRequired(object.value(QStringLiteral("clip_id")), "set_clip_name.clip_id");
+    if (!clip_id) return fail<EditOperation>(clip_id.error().message);
+    return DecodeResult<EditOperation>::success(
+        edit::SetClipNameCommand{sequence_id.value(), clip_id.value(),
+                                 qstrToStd(object.value(QStringLiteral("name")).toString())});
   }
   return fail<EditOperation>("unknown command type: " + qstrToStd(type));
 }

@@ -2650,6 +2650,49 @@ struct PlannedClip final {
             }
             found->query = command.query;
             return std::nullopt;
+          },
+          [&](const ReplaceClipMediaCommand& command) -> std::optional<EditError> {
+            auto* sequence = mutableSequence(project, command.sequence_id);
+            if (sequence == nullptr) {
+              return error(EditErrorCode::EntityNotFound, "sequence was not found");
+            }
+            auto location = mutableClip(*sequence, command.clip_id);
+            if (!location) {
+              return error(EditErrorCode::EntityNotFound, "clip was not found");
+            }
+            if (location->track->locked) {
+              return error(EditErrorCode::TrackLocked,
+                           "cannot replace media on a locked track");
+            }
+            if (command.asset_id.isNil()) {
+              return error(EditErrorCode::InvalidArgument, "asset id cannot be nil");
+            }
+            if (findAsset(project, command.asset_id) == nullptr) {
+              return error(EditErrorCode::EntityNotFound, "asset was not found");
+            }
+            Clip changed = *location->clip;
+            changed.asset_id = command.asset_id;
+            changed.source_range = command.source_range;
+            if (const auto issue = validateClip(project, *sequence, *location->track, changed)) {
+              return issue;
+            }
+            *location->clip = std::move(changed);
+            return std::nullopt;
+          },
+          [&](const SetClipNameCommand& command) -> std::optional<EditError> {
+            auto* sequence = mutableSequence(project, command.sequence_id);
+            if (sequence == nullptr) {
+              return error(EditErrorCode::EntityNotFound, "sequence was not found");
+            }
+            auto location = mutableClip(*sequence, command.clip_id);
+            if (!location) {
+              return error(EditErrorCode::EntityNotFound, "clip was not found");
+            }
+            if (location->track->locked) {
+              return error(EditErrorCode::TrackLocked, "cannot rename a clip on a locked track");
+            }
+            location->clip->name = command.name;
+            return std::nullopt;
           }},
       op);
 }
@@ -2767,6 +2810,10 @@ std::string commandName(const EditCommand& command) {
           return "Set asset metadata";
         if constexpr (std::is_same_v<T, SetSmartQueryCommand>)
           return "Set smart query";
+        if constexpr (std::is_same_v<T, ReplaceClipMediaCommand>)
+          return "Replace clip media";
+        if constexpr (std::is_same_v<T, SetClipNameCommand>)
+          return "Set clip name";
         return "Edit";
       },
       command.operation);
@@ -2882,6 +2929,10 @@ std::string commandType(const EditCommand& command) {
           return "set_asset_metadata";
         if constexpr (std::is_same_v<T, SetSmartQueryCommand>)
           return "set_smart_query";
+        if constexpr (std::is_same_v<T, ReplaceClipMediaCommand>)
+          return "replace_clip_media";
+        if constexpr (std::is_same_v<T, SetClipNameCommand>)
+          return "set_clip_name";
         return "unknown";
       },
       command.operation);

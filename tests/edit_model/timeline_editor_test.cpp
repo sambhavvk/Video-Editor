@@ -394,6 +394,40 @@ TEST(TimelineEditorTest, SplitsClipAndMapsSourceRanges) {
   EXPECT_EQ(right->name, "Video[14:20]");
 }
 
+TEST(TimelineEditorTest, ReplacesClipMediaAndRenames) {
+  auto fixture = makeProject();
+  Asset replacement;
+  replacement.name = "take2.mov";
+  replacement.source_uri = "memory://take2";
+  replacement.duration = Time(30, 1);
+  replacement.has_video = true;
+  fixture.project.assets.push_back(replacement);
+
+  TimelineEditor editor(fixture.project);
+  auto clip = makeClip(fixture.asset_id, 0, 10);
+  auto revision = insert(editor, Revision{0}, fixture.sequence_id, fixture.video_track_id, clip);
+
+  auto replace = editor.apply(
+      EditCommand{ReplaceClipMediaCommand{fixture.sequence_id, clip.id, replacement.id,
+                                          TimeRange(Time(5, 1), Time(8, 1))},
+                  {}},
+      revision);
+  ASSERT_TRUE(replace) << (replace ? "" : replace.error().message);
+  revision = replace.value();
+
+  const auto current = snapshot(editor, fixture.sequence_id, revision);
+  const auto* updated = current.findClip(clip.id);
+  ASSERT_NE(updated, nullptr);
+  EXPECT_EQ(updated->asset_id, replacement.id);
+  EXPECT_EQ(updated->source_range, TimeRange(Time(5, 1), Time(8, 1)));
+
+  auto rename = editor.apply(
+      EditCommand{SetClipNameCommand{fixture.sequence_id, clip.id, "Hero shot"}, {}}, revision);
+  ASSERT_TRUE(rename);
+  EXPECT_EQ(snapshot(editor, fixture.sequence_id, rename.value()).findClip(clip.id)->name,
+            "Hero shot");
+}
+
 TEST(TimelineEditorTest, SplitRenamesHalvesWithWholeSecondRanges) {
   auto fixture = makeProject();
   fixture.project.assets[0].duration = Time(600, 1);

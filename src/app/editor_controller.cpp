@@ -1033,6 +1033,22 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           [this] { trimTailToPlayhead(true); });
   connect(&window_, &desktop_ui::EditorWindow::selectForwardOnTargetedTrackRequested, this,
           [this] { selectForwardAtPlayhead(false); });
+  connect(&window_, &desktop_ui::EditorWindow::copyClipsRequested, this,
+          &EditorController::copySelectedClips);
+  connect(&window_, &desktop_ui::EditorWindow::cutClipsRequested, this,
+          &EditorController::cutSelectedClips);
+  connect(&window_, &desktop_ui::EditorWindow::pasteClipsInsertRequested, this,
+          &EditorController::pasteClipsInsert);
+  connect(&window_, &desktop_ui::EditorWindow::pasteClipsOverwriteRequested, this,
+          &EditorController::pasteClipsOverwrite);
+  connect(&window_, &desktop_ui::EditorWindow::duplicateClipsRequested, this,
+          &EditorController::duplicateSelectedClips);
+  connect(&window_, &desktop_ui::EditorWindow::pasteClipAttributesRequested, this,
+          &EditorController::pasteClipAttributes);
+  connect(&window_, &desktop_ui::EditorWindow::replaceClipMediaRequested, this,
+          &EditorController::replaceSelectedClipMedia);
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::clipReplaceMediaRequested, this,
+          &EditorController::replaceClipMediaFromSource);
   connect(&window_, &desktop_ui::EditorWindow::deleteSelectionRequested, this,
           &EditorController::deleteSelectedClip);
   connect(&window_, &desktop_ui::EditorWindow::undoRequested, this, &EditorController::undo);
@@ -3897,6 +3913,280 @@ void EditorController::selectForwardAtPlayhead(const bool includeTracksBelow) {
     return;
   }
   setClipSelection(ids, active);
+}
+
+void EditorController::remintClipForPaste(edit::Clip& clip) {
+  clip.id = edit::EntityId::generate();
+  for (auto& effect : clip.effects) {
+    effect.id = edit::EntityId::generate();
+    for (auto& [_, parameter] : effect.parameters) {
+      for (auto& keyframe : parameter.keyframes) {
+        keyframe.id = edit::EntityId::generate();
+      }
+    }
+  }
+}
+
+std::optional<edit::EntityId>
+EditorController::targetedTrackForKind(const edit::Sequence& sequence, const edit::TrackKind kind,
+                                     const int kind_index) const {
+  int seen = 0;
+  for (const auto& track : sequence.tracks) {
+    if (track.locked || !track.targeted || track.kind != kind) {
+      continue;
+    }
+    if (seen == kind_index) {
+      return track.id;
+    }
+    ++seen;
+  }
+  return std::nullopt;
+}
+
+std::vector<EditorController::ClipboardClipEntry>
+EditorController::snapshotSelectionForClipboard() const {
+  const edit::Sequence* sequence = currentSequence();
+  const auto selected = selectedClipIds();
+  if (sequence == nullptr || selected.empty()) {
+    return {};
+  }
+  std::unordered_set<edit::EntityId> expanded;
+  for (const auto& id : selected) {
+    const auto linked = expandLinkedSelection(*sequence, {id});
+    expanded.insert(linked.begin(), linked.end());
+  }
+  edit::Time anchor_start{};
+  bool anchor_set = false;
+  std::vector<ClipboardClipEntry> entries;
+  for (const auto& id : expanded) {
+    const edit::Clip* clip = edit::findClip(*sequence, id);
+    if (clip == nullptr) {
+      continue;
+    }
+    const edit::Track* track = nullptr;
+    int track_index = -1;
+    for (std::size_t index = 0; index < sequence->tracks.size(); ++index) {
+      const auto& candidate = sequence->tracks[index];
+      if (std::any_of(candidate.clips.begin(), candidate.clips.end(),
+                      [&](const edit::Clip& item) { return item.id == id; })) {
+        track = &candidate;
+        track_index = static_cast<int>(index);
+        break;
+      }
+    }
+    if (track == nullptr) {
+      continue;
+    }
+    if (!anchor_set || clip->timeline_range.start < anchor_start) {
+      anchor_start = clip->timeline_range.start;
+      anchor_set = true;
+    }
+    int kind_index = 0;
+    for (int index = 0; index < track_index; ++index) {
+      if (sequence->tracks[static_cast<std::size_t>(index)].kind == track->kind) {
+        ++kind_index;
+      }
+    }
+    entries.push_back({.clip = *clip,
+                       .track_kind = track->kind,
+                       .track_kind_index = kind_index,
+                       .relative_start = clip->timeline_range.start});
+  }
+  for (auto& entry : entries) {
+    entry.relative_start = entry.relative_start - anchor_start;
+  }
+  std::sort(entries.begin(), entries.end(), [](const ClipboardClipEntry& lhs,
+                                               const ClipboardClipEntry& rhs) {
+    if (lhs.relative_start != rhs.relative_start) {
+      return lhs.relative_start < rhs.relative_start;
+    }
+    return lhs.clip.id < rhs.clip.id;
+  });
+  return entries;
+}
+
+bool EditorController::pasteClipboardEntries(const edit::InsertMode mode) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || clipboard_clips_.empty()) {
+    window_.showTransientMessage(tr("Copy clips before pasting"));
+    return false;
+  }
+  const edit::Time paste_start = playheadTime();
+  std::unordered_map<std::string, edit::EntityId> linked_groups;
+  std::vector<edit::EditCommand> commands;
+  QStringList inserted_ids;
+  for (const auto& entry : clipboard_clips_) {
+    const auto track_id = targetedTrackForKind(*sequence, entry.track_kind, entry.track_kind_index);
+    if (!track_id.has_value()) {
+      window_.showTransientMessage(tr("No targeted track is available for pasted clips"));
+      return false;
+    }
+    edit::Clip clip = entry.clip;
+    remintClipForPaste(clip);
+    if (clip.linked_group.has_value()) {
+      const std::string key = clip.linked_group->toString();
+      auto found = linked_groups.find(key);
+      if (found == linked_groups.end()) {
+        found = linked_groups.emplace(key, edit::EntityId::generate()).first;
+      }
+      clip.linked_group = found->second;
+    }
+    clip.timeline_range = edit::TimeRange(paste_start + entry.relative_start, clip.timeline_range.duration);
+    commands.push_back({.operation = edit::InsertClipCommand{.sequence_id = sequence->id,
+                                                            .track_id = *track_id,
+                                                            .clip = clip,
+                                                            .mode = mode},
+                        .coalescing_key = {}});
+    inserted_ids.push_back(QString::fromStdString(clip.id.toString()));
+  }
+  if (!applyBatch(std::move(commands), tr("Could not paste the copied clips"))) {
+    return false;
+  }
+  if (!inserted_ids.isEmpty()) {
+    setClipSelection(inserted_ids, inserted_ids.front());
+  }
+  return true;
+}
+
+void EditorController::copySelectedClips() {
+  clipboard_clips_ = snapshotSelectionForClipboard();
+  if (clipboard_clips_.empty()) {
+    window_.showTransientMessage(tr("Select clips to copy"));
+    return;
+  }
+  if (clipboard_clips_.size() == 1U) {
+    attribute_clipboard_ = clipboard_clips_.front().clip;
+  }
+}
+
+void EditorController::cutSelectedClips() {
+  copySelectedClips();
+  if (!clipboard_clips_.empty()) {
+    deleteSelectedClip(false);
+  }
+}
+
+void EditorController::pasteClipsInsert() {
+  (void)pasteClipboardEntries(edit::InsertMode::Ripple);
+}
+
+void EditorController::pasteClipsOverwrite() {
+  (void)pasteClipboardEntries(edit::InsertMode::Overwrite);
+}
+
+void EditorController::duplicateSelectedClips() {
+  const auto snapshot = snapshotSelectionForClipboard();
+  if (snapshot.empty()) {
+    window_.showTransientMessage(tr("Select clips to duplicate"));
+    return;
+  }
+  clipboard_clips_ = snapshot;
+  if (!pasteClipboardEntries(edit::InsertMode::RejectOverlap)) {
+    return;
+  }
+  clipboard_clips_ = snapshot;
+}
+
+void EditorController::pasteClipAttributes() {
+  const edit::Sequence* sequence = currentSequence();
+  const auto selected = selectedClipIds();
+  if (sequence == nullptr || selected.empty() || !attribute_clipboard_.has_value()) {
+    window_.showTransientMessage(tr("Copy a clip before pasting attributes"));
+    return;
+  }
+  const edit::Clip& source = *attribute_clipboard_;
+  std::vector<edit::EditCommand> commands;
+  for (const auto& clip_id : selected) {
+    const edit::Clip* target = edit::findClip(*sequence, clip_id);
+    if (target == nullptr) {
+      continue;
+    }
+    commands.push_back(
+        {.operation = edit::SetClipTransformCommand{.sequence_id = sequence->id,
+                                                   .clip_id = clip_id,
+                                                   .transform = source.transform},
+         .coalescing_key = {}});
+    commands.push_back({.operation = edit::SetClipAudioPropertiesCommand{
+                            .sequence_id = sequence->id,
+                            .clip_id = clip_id,
+                            .gain_db = source.audio_gain_db,
+                            .pan = source.audio_pan,
+                            .fade_in = source.fade_in,
+                            .fade_out = source.fade_out},
+                        .coalescing_key = {}});
+    commands.push_back(
+        {.operation = edit::SetClipSpeedCommand{.sequence_id = sequence->id,
+                                               .clip_id = clip_id,
+                                               .playback_rate = source.playback_rate,
+                                               .reversed = source.reversed},
+         .coalescing_key = {}});
+    commands.push_back({.operation = edit::SetClipBlendModeCommand{.sequence_id = sequence->id,
+                                                                   .clip_id = clip_id,
+                                                                   .blend_mode = source.blend_mode},
+                        .coalescing_key = {}});
+    for (const auto& effect : target->effects) {
+      commands.push_back({.operation = edit::RemoveClipEffectCommand{.sequence_id = sequence->id,
+                                                                     .clip_id = clip_id,
+                                                                     .effect_id = effect.id},
+                          .coalescing_key = {}});
+    }
+    for (const auto& effect : source.effects) {
+      edit::Effect copied = effect;
+      copied.id = edit::EntityId::generate();
+      for (auto& [_, parameter] : copied.parameters) {
+        for (auto& keyframe : parameter.keyframes) {
+          keyframe.id = edit::EntityId::generate();
+        }
+      }
+      commands.push_back({.operation = edit::AddClipEffectCommand{.sequence_id = sequence->id,
+                                                                  .clip_id = clip_id,
+                                                                  .effect = copied},
+                          .coalescing_key = {}});
+    }
+  }
+  if (commands.empty()) {
+    window_.showTransientMessage(tr("Select clips to receive attributes"));
+    return;
+  }
+  (void)applyBatch(std::move(commands), tr("Could not paste clip attributes"));
+}
+
+void EditorController::replaceSelectedClipMedia() {
+  if (!active_clip_id_.has_value()) {
+    window_.showTransientMessage(tr("Select a clip to replace"));
+    return;
+  }
+  replaceClipMediaFromSource(QString::fromStdString(active_clip_id_->toString()));
+}
+
+void EditorController::replaceClipMediaFromSource(const QString& clipIdText) {
+  const edit::Sequence* sequence = currentSequence();
+  const auto clip_id = parseId(clipIdText.isEmpty() && active_clip_id_.has_value()
+                                   ? QString::fromStdString(active_clip_id_->toString())
+                                   : clipIdText);
+  if (sequence == nullptr || !clip_id.has_value()) {
+    return;
+  }
+  if (!source_asset_id_.has_value()) {
+    if (!selected_media_id_.isEmpty()) {
+      loadSourceAsset(selected_media_id_);
+    }
+  }
+  if (!source_asset_id_.has_value()) {
+    window_.showTransientMessage(tr("Load source media before replacing a clip"));
+    return;
+  }
+  const auto project = editor_->projectAt(editor_->revision());
+  const edit::Asset* asset = edit::findAsset(*project, *source_asset_id_);
+  if (asset == nullptr) {
+    return;
+  }
+  (void)apply({.operation = edit::ReplaceClipMediaCommand{.sequence_id = sequence->id,
+                                                         .clip_id = *clip_id,
+                                                         .asset_id = *source_asset_id_,
+                                                         .source_range = markedSourceRange()},
+              .coalescing_key = {}},
+             tr("Could not replace the clip media"));
 }
 
 void EditorController::deleteSelectedClip(const bool ripple) {

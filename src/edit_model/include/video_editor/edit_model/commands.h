@@ -309,6 +309,17 @@ struct SetSmartQueryCommand final {
   EntityId bin_id;
   SmartQuery query;
 };
+struct ReplaceClipMediaCommand final {
+  EntityId sequence_id;
+  EntityId clip_id;
+  EntityId asset_id;
+  TimeRange source_range;
+};
+struct SetClipNameCommand final {
+  EntityId sequence_id;
+  EntityId clip_id;
+  std::string name;
+};
 
 using EditOperation = std::variant<
     AddAssetCommand, RemoveAssetCommand, AddSequenceCommand, RemoveSequenceCommand, AddTrackCommand,
@@ -324,7 +335,7 @@ using EditOperation = std::variant<
     AddTrackEffectCommand, RemoveTrackEffectCommand, SetTrackEffectParameterCommand,
     ApplyCaptionChangeSetCommand, ApplyTimelineCutChangeSetCommand, RelinkAssetCommand,
     CreateBinCommand, RenameBinCommand, MoveBinCommand, RemoveBinCommand, SetAssetBinCommand,
-    SetAssetMetadataCommand, SetSmartQueryCommand>;
+    SetAssetMetadataCommand, SetSmartQueryCommand, ReplaceClipMediaCommand, SetClipNameCommand>;
 
 struct EditCommand final {
   EditOperation operation;

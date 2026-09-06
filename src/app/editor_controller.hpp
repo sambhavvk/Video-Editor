@@ -239,6 +239,14 @@ private slots:
   void trimHeadToPlayhead(bool overwrite);
   void trimTailToPlayhead(bool overwrite);
   void selectForwardAtPlayhead(bool includeTracksBelow);
+  void replaceSelectedClipMedia();
+  void copySelectedClips();
+  void cutSelectedClips();
+  void pasteClipsInsert();
+  void pasteClipsOverwrite();
+  void duplicateSelectedClips();
+  void pasteClipAttributes();
+  void replaceClipMediaFromSource(const QString& clipId);
   void deleteSelectedClip(bool ripple);
   void undo();
   void redo();
@@ -546,6 +554,19 @@ private:
     std::string coalescing_key;
   };
 
+  struct ClipboardClipEntry final {
+    edit::Clip clip;
+    edit::TrackKind track_kind{edit::TrackKind::Video};
+    int track_kind_index{0};
+    edit::Time relative_start{};
+  };
+
+  [[nodiscard]] std::vector<ClipboardClipEntry> snapshotSelectionForClipboard() const;
+  [[nodiscard]] bool pasteClipboardEntries(edit::InsertMode mode);
+  void remintClipForPaste(edit::Clip& clip);
+  [[nodiscard]] std::optional<edit::EntityId>
+  targetedTrackForKind(const edit::Sequence& sequence, edit::TrackKind kind, int kind_index) const;
+
   desktop_ui::EditorWindow& window_;
   std::unique_ptr<edit::TimelineEditor> editor_;
   std::unique_ptr<store::ProjectStore> store_;
@@ -719,6 +740,8 @@ private:
   bool source_preview_in_flight_{false};
   QTimer source_playback_timer_;
   QElapsedTimer source_playback_clock_;
+  std::vector<ClipboardClipEntry> clipboard_clips_;
+  std::optional<edit::Clip> attribute_clipboard_;
 };
 
 } // namespace video_editor::app
