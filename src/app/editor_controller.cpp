@@ -56,7 +56,11 @@
 #include <QCloseEvent>
 #include <QCoreApplication>
 #include <QCryptographicHash>
-#include <QDateTime>
+#include <QDesktopServices>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QFormLayout>
+#include <QSpinBox>
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
@@ -64,6 +68,7 @@
 #include <QFutureWatcher>
 #include <QImage>
 #include <QInputDialog>
+#include <QLineEdit>
 #include <QLocale>
 #include <QMessageBox>
 #include <QNetworkAccessManager>
@@ -103,6 +108,62 @@ QSettings& windowSettings(desktop_ui::EditorWindow& window) {
   QSettings* settings = window.settings();
   Q_ASSERT(settings != nullptr);
   return *settings;
+}
+
+edit::ColorRgba markerColorForIndex(const std::size_t index) {
+  static const std::array<edit::ColorRgba, 6> palette = {
+      edit::ColorRgba{1.0, 0.75, 0.0, 1.0},
+      edit::ColorRgba{0.35, 0.75, 1.0, 1.0},
+      edit::ColorRgba{0.45, 0.9, 0.55, 1.0},
+      edit::ColorRgba{0.95, 0.45, 0.75, 1.0},
+      edit::ColorRgba{0.85, 0.55, 0.25, 1.0},
+      edit::ColorRgba{0.7, 0.7, 0.95, 1.0},
+  };
+  return palette[index % palette.size()];
+}
+
+void remintClipIds(edit::Clip& clip) {
+  clip.id = edit::EntityId::generate();
+  for (auto& effect : clip.effects) {
+    effect.id = edit::EntityId::generate();
+    for (auto& [_, parameter] : effect.parameters) {
+      for (auto& keyframe : parameter.keyframes) {
+        keyframe.id = edit::EntityId::generate();
+      }
+    }
+  }
+}
+
+edit::Sequence duplicateSequenceWithNewIds(const edit::Sequence& source, const std::string& name) {
+  edit::Sequence copy = source;
+  copy.id = edit::EntityId::generate();
+  copy.name = name;
+  std::unordered_map<edit::EntityId, edit::EntityId> clip_ids;
+  for (auto& track : copy.tracks) {
+    for (auto& clip : track.clips) {
+      const edit::EntityId old_id = clip.id;
+      remintClipIds(clip);
+      clip_ids.emplace(old_id, clip.id);
+    }
+  }
+  for (auto& transition : copy.transitions) {
+    transition.id = edit::EntityId::generate();
+    if (const auto outgoing = clip_ids.find(transition.outgoing_clip_id);
+        outgoing != clip_ids.end()) {
+      transition.outgoing_clip_id = outgoing->second;
+    }
+    if (const auto incoming = clip_ids.find(transition.incoming_clip_id);
+        incoming != clip_ids.end()) {
+      transition.incoming_clip_id = incoming->second;
+    }
+  }
+  for (auto& marker : copy.markers) {
+    marker.id = edit::EntityId::generate();
+  }
+  for (auto& caption : copy.captions) {
+    caption.id = edit::EntityId::generate();
+  }
+  return copy;
 }
 
 } // namespace
@@ -1140,6 +1201,33 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
   });
   connect(&window_, &desktop_ui::EditorWindow::defaultTransitionRequested, this,
           &EditorController::applyDefaultTransition);
+  connect(&window_, &desktop_ui::EditorWindow::grabFrameRequested, this,
+          &EditorController::grabProgramFrame);
+  connect(&window_, &desktop_ui::EditorWindow::sequenceSettingsRequested, this,
+          &EditorController::showSequenceSettings);
+  connect(&window_, &desktop_ui::EditorWindow::duplicateSequenceRequested, this,
+          &EditorController::duplicateActiveSequence);
+  connect(&window_, &desktop_ui::EditorWindow::markerListJumpRequested, this,
+          [this](const QString& markerId) {
+            const edit::Sequence* sequence = currentSequence();
+            const auto id = parseId(markerId);
+            if (sequence == nullptr || !id.has_value()) {
+              return;
+            }
+            const auto found = std::find_if(sequence->markers.begin(), sequence->markers.end(),
+                                            [&id](const auto& marker) { return marker.id == *id; });
+            if (found == sequence->markers.end()) {
+              return;
+            }
+            selectMarker(markerId);
+            seek(timelineValue(found->range.start));
+          });
+  connect(&window_, &desktop_ui::EditorWindow::programClipInfoToggled, this,
+          &EditorController::toggleProgramClipInfo);
+  connect(&window_, &desktop_ui::EditorWindow::sourceTimecodeToggled, this,
+          &EditorController::toggleSourceTimecodeDisplay);
+  connect(window_.mediaBin(), &desktop_ui::MediaBinWidget::hoverScrubRequested, this,
+          &EditorController::scrubMediaPreview);
   connect(&window_, &desktop_ui::EditorWindow::zoomToSelectionRequested, this, [this] {
     window_.timeline()->zoomToSelection();
   });
@@ -1372,6 +1460,11 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           [this](const QString& markerId, const qint64 start,
                  const desktop_ui::TimelineSnapResult& snap) {
             moveMarker(markerId, snap.snapped() ? snap.time : start);
+          });
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::markerDurationCommitted, this,
+          [this](const QString& markerId, const qint64 duration,
+                 const desktop_ui::TimelineSnapResult&) {
+            setMarkerDuration(markerId, duration);
           });
   connect(window_.timeline(), &desktop_ui::TimelineWidget::markerRenameRequested, this,
           &EditorController::renameMarker);
@@ -5052,6 +5145,9 @@ void EditorController::advancePlayback() {
         window_.audioMixer()->setMasterMeter(toDb(peak), toDb(rms), loudness.integrated_lufs,
                                              meter.sample_count != 0U, loudness.integrated_valid,
                                              loudness.stale);
+        window_.programViewer()->setPeakMeters(peak_dbfs.value(0, -60.0F),
+                                               peak_dbfs.value(1, peak_dbfs.value(0, -60.0F)),
+                                               meter.sample_count != 0U);
         if (playback_audio_renderer_ != nullptr) {
           // The renderer may be several blocks ahead in the pre-render ring.
           // Select telemetry using the latency-compensated device master clock,
@@ -7174,6 +7270,191 @@ void EditorController::applyDefaultTransition() {
   (void)applyBatch(std::move(commands), tr("Could not add the default transition"));
 }
 
+void EditorController::grabProgramFrame() {
+  QImage image = window_.programViewer()->currentDisplayImage();
+  if (image.isNull() && last_preview_frame_ != nullptr) {
+    image = displayImage(*last_preview_frame_);
+  }
+  if (image.isNull()) {
+    window_.showTransientMessage(tr("No program frame is available to save"));
+    return;
+  }
+  const QString path =
+      QFileDialog::getSaveFileName(&window_, tr("Save frame"), QStringLiteral("frame.png"),
+                                   tr("PNG image (*.png);;JPEG image (*.jpg *.jpeg)"));
+  if (path.isEmpty()) {
+    return;
+  }
+  if (!image.save(path)) {
+    window_.showTransientMessage(tr("Could not save %1").arg(path));
+    return;
+  }
+  window_.showTransientMessage(tr("Saved frame to %1").arg(path));
+}
+
+void EditorController::showSequenceSettings() {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    return;
+  }
+  QDialog dialog(&window_);
+  dialog.setWindowTitle(tr("Sequence Settings"));
+  auto* form = new QFormLayout(&dialog);
+  auto* name = new QLineEdit(QString::fromStdString(sequence->name), &dialog);
+  auto* width = new QSpinBox(&dialog);
+  width->setRange(16, 16'384);
+  width->setValue(static_cast<int>(sequence->width));
+  auto* height = new QSpinBox(&dialog);
+  height->setRange(16, 16'384);
+  height->setValue(static_cast<int>(sequence->height));
+  auto* fps = new QDoubleSpinBox(&dialog);
+  fps->setRange(1.0, 240.0);
+  fps->setDecimals(3);
+  fps->setValue(static_cast<double>(sequence->frame_rate.numerator()) /
+                static_cast<double>(std::max(1U, sequence->frame_rate.denominator())));
+  const QString start_tc =
+      formatTimecode(sequence->start_time.value() != 0 ? sequence->start_time : edit::Time{},
+                     sequence->frame_rate);
+  auto* start_time = new QLineEdit(start_tc, &dialog);
+  start_time->setPlaceholderText(tr("HH:MM:SS:FF"));
+  form->addRow(tr("Name"), name);
+  form->addRow(tr("Width"), width);
+  form->addRow(tr("Height"), height);
+  form->addRow(tr("Frame rate"), fps);
+  form->addRow(tr("Start timecode"), start_time);
+  auto* buttons =
+      new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+  form->addRow(buttons);
+  QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+  QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+  if (dialog.exec() != QDialog::Accepted) {
+    return;
+  }
+  std::vector<edit::EditCommand> commands;
+  const std::string new_name = name->text().trimmed().toStdString();
+  if (!new_name.empty() && new_name != sequence->name) {
+    commands.push_back({.operation = edit::SetSequenceNameCommand{.sequence_id = sequence->id,
+                                                                 .name = new_name}});
+  }
+  const double fps_value = fps->value();
+  const edit::Rate new_rate{
+      static_cast<std::uint32_t>(std::lround(fps_value * 1'000.0)),
+      1'000U};
+  if (new_rate != sequence->frame_rate || static_cast<std::uint32_t>(width->value()) != sequence->width ||
+      static_cast<std::uint32_t>(height->value()) != sequence->height) {
+    commands.push_back(
+        {.operation = edit::SetSequenceFormatCommand{.sequence_id = sequence->id,
+                                                     .frame_rate = new_rate,
+                                                     .width = static_cast<std::uint32_t>(width->value()),
+                                                     .height = static_cast<std::uint32_t>(height->value())}});
+  }
+  const auto parsed_start =
+      parseTimecodeInput(start_time->text().trimmed(), sequence->frame_rate, timeline_time_scale_);
+  if (parsed_start.has_value()) {
+    const edit::Time start = *parsed_start;
+    if (start != sequence->start_time) {
+      commands.push_back({.operation = edit::SetSequenceStartTimeCommand{.sequence_id = sequence->id,
+                                                                        .start_time = start}});
+    }
+  } else if (!start_time->text().trimmed().isEmpty()) {
+    window_.showTransientMessage(tr("Start timecode was not recognized"));
+    return;
+  }
+  if (commands.empty()) {
+    return;
+  }
+  (void)applyBatch(std::move(commands), tr("Could not update sequence settings"));
+}
+
+void EditorController::duplicateActiveSequence() {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    return;
+  }
+  edit::Sequence copy =
+      duplicateSequenceWithNewIds(*sequence, sequence->name + " Copy");
+  const edit::EntityId new_sequence_id = copy.id;
+  if (apply({.operation = edit::AddSequenceCommand{.sequence = std::move(copy)},
+             .coalescing_key = {}},
+            tr("Could not duplicate the sequence"))) {
+    setActiveSequence(new_sequence_id);
+  }
+}
+
+void EditorController::scrubMediaPreview(const QString& mediaId, const double normalizedPosition) {
+  if (mediaId.isEmpty()) {
+    return;
+  }
+  loadSourceAsset(mediaId);
+  const qint64 duration = sourceDurationUi();
+  if (duration <= 0) {
+    return;
+  }
+  source_playhead_ =
+      static_cast<qint64>(std::clamp(normalizedPosition, 0.0, 1.0) * static_cast<double>(duration));
+  updateSourceMonitorChrome();
+  requestSourcePreview();
+}
+
+void EditorController::toggleProgramClipInfo(const bool enabled) {
+  program_clip_info_visible_ = enabled;
+  refreshProgramViewerChrome();
+}
+
+void EditorController::toggleSourceTimecodeDisplay(const bool enabled) {
+  show_source_timecode_ = enabled;
+  refreshProgramViewerChrome();
+}
+
+void EditorController::refreshJobActivitySummary() {
+  QStringList parts;
+  if (!proxy_jobs_.empty()) {
+    parts.push_back(tr("%1 proxy").arg(proxy_jobs_.size()));
+  }
+  if (export_in_flight_) {
+    parts.push_back(tr("export"));
+  }
+  if (transcription_session_ != nullptr || model_download_reply_ != nullptr) {
+    parts.push_back(tr("transcribe"));
+  }
+  if (cache_job_running_) {
+    parts.push_back(tr("cache"));
+  }
+  window_.setJobActivitySummary(parts.isEmpty() ? tr("Jobs: idle")
+                                                : tr("Jobs: %1").arg(parts.join(QStringLiteral(" · "))));
+}
+
+void EditorController::refreshProgramViewerChrome() {
+  if (window_.programViewer() == nullptr) {
+    return;
+  }
+  const edit::Sequence* sequence = currentSequence();
+  QString clip_name;
+  QString source_tc;
+  if (program_clip_info_visible_ && sequence != nullptr) {
+    for (const auto& track : sequence->tracks) {
+      for (const auto& clip : track.clips) {
+        if (!clip.enabled || !clip.timeline_range.contains(playheadTime())) {
+          continue;
+        }
+        if (track.kind == edit::TrackKind::Video) {
+          clip_name = QString::fromStdString(clip.name);
+          if (show_source_timecode_) {
+            const edit::Time source_time = edit::sourceTimeAtTimelineTime(clip, playheadTime());
+            source_tc = formatTimecode(source_time, sequence->frame_rate);
+          }
+          break;
+        }
+      }
+      if (!clip_name.isEmpty()) {
+        break;
+      }
+    }
+  }
+  window_.programViewer()->setClipInfoOverlay(program_clip_info_visible_ && !clip_name.isEmpty(),
+                                              clip_name, source_tc);
+}
+
 void EditorController::clearTrimTwoUpPreview() {
   window_.programViewer()->clearTrimCompareFrames();
 }
@@ -8105,6 +8386,7 @@ void EditorController::addMarker(const qint64 start) {
   edit::Marker marker;
   marker.range = edit::TimeRange(timelineTime(std::max<qint64>(0, start)), edit::Time{});
   marker.label = tr("Marker").toStdString();
+  marker.color = markerColorForIndex(sequence->markers.size());
   if (apply({.operation = edit::AddMarkerCommand{.sequence_id = sequence->id, .marker = marker},
              .coalescing_key = {}},
             tr("Could not add a marker"))) {
@@ -8132,6 +8414,27 @@ void EditorController::moveMarker(const QString& markerId, const qint64 start) {
                                                       .marker = std::move(marker)},
                .coalescing_key = {}},
               tr("Could not move the marker"));
+}
+
+void EditorController::setMarkerDuration(const QString& markerId, const qint64 duration) {
+  const edit::Sequence* sequence = currentSequence();
+  const auto id = parseId(markerId);
+  if (sequence == nullptr || !id.has_value()) {
+    return;
+  }
+  const auto found = std::find_if(sequence->markers.begin(), sequence->markers.end(),
+                                  [&id](const auto& marker) { return marker.id == *id; });
+  if (found == sequence->markers.end()) {
+    window_.showTransientMessage(tr("The marker no longer exists"));
+    refreshTimelineView();
+    return;
+  }
+  auto marker = *found;
+  marker.range.duration = timelineTime(std::max<qint64>(0, duration));
+  (void)apply({.operation = edit::UpdateMarkerCommand{.sequence_id = sequence->id,
+                                                      .marker = std::move(marker)},
+               .coalescing_key = {}},
+              tr("Could not resize the marker"));
 }
 
 void EditorController::renameMarker(const QString& markerId, const QString& name) {
@@ -8213,6 +8516,8 @@ void EditorController::refreshViews() {
   refreshMixerView();
   refreshCaptionView();
   requestPreview();
+  refreshJobActivitySummary();
+  refreshProgramViewerChrome();
 }
 
 void EditorController::refreshMediaView() {
@@ -8471,7 +8776,20 @@ void EditorController::refreshTimelineView() {
                                    sequence->frame_rate.denominator());
   window_.timeline()->setPlayhead(timelineValue(playheadTime()));
   window_.timeline()->setProgramMarks(program_mark_in_, program_mark_out_);
-  window_.programViewer()->setTimecode(timecodeText(playhead_, sequence->frame_rate));
+  const edit::Time display_time = playheadTime() + sequence->start_time;
+  window_.programViewer()->setTimecode(timecodeText(timelineValue(display_time), sequence->frame_rate));
+  window_.setSequenceFormatStatus(
+      tr("%1×%2 · %3 fps")
+          .arg(sequence->width)
+          .arg(sequence->height)
+          .arg(QString::number(static_cast<double>(sequence->frame_rate.numerator()) /
+                               static_cast<double>(std::max(1U, sequence->frame_rate.denominator())),
+                               'f', 3)));
+  if (window_.markerList() != nullptr) {
+    window_.markerList()->setMarkers(markers);
+  }
+  refreshJobActivitySummary();
+  refreshProgramViewerChrome();
 }
 
 void EditorController::refreshInspectorView() {

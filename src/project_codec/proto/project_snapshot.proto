@@ -284,6 +284,7 @@ message Sequence {
   repeated Marker markers = 8;
   repeated Caption captions = 9;
   repeated Transition transitions = 10;
+  optional Time start_time = 11;
 }
 
 enum MediaBinKind {

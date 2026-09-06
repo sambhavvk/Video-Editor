@@ -411,6 +411,42 @@ void ProgramViewer::paintEvent(QPaintEvent* event) {
                          kBottomBarHeight},
                    Qt::AlignHCenter | Qt::AlignVCenter, timecode_);
 
+  if (clip_info_visible_ && !clip_info_name_.isEmpty()) {
+    painter.setFont(labelFont);
+    painter.setPen(QColor{216, 220, 228});
+    painter.drawText(frameRect.adjusted(10, 8, -10, -8), Qt::AlignLeft | Qt::AlignTop,
+                     clip_info_name_);
+    if (!clip_info_source_timecode_.isEmpty()) {
+      painter.setFont(timecodeFont);
+      painter.setPen(QColor{184, 190, 202});
+      painter.drawText(frameRect.adjusted(10, 28, -10, -8), Qt::AlignLeft | Qt::AlignTop,
+                       clip_info_source_timecode_);
+    }
+  }
+
+  if (meters_active_) {
+    const auto dbToHeight = [](const float dbfs) {
+      const float clamped = std::clamp(dbfs, -60.0F, 0.0F);
+      return static_cast<int>(std::lround((clamped + 60.0F) / 60.0F * 48.0F));
+    };
+    const QRect meterArea = frameRect.adjusted(8, 8, -8, -8);
+    const int barWidth = 6;
+    const int gap = 4;
+    const int x = meterArea.right() - (2 * barWidth + gap);
+    const int baseY = meterArea.bottom();
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor{40, 44, 52, 200});
+    painter.drawRect(x - 2, baseY - 50, 2 * barWidth + gap + 4, 52);
+    const auto drawBar = [&](const int column, const float dbfs) {
+      const int height = dbToHeight(dbfs);
+      const QColor color = dbfs > -6.0F ? QColor{235, 126, 126} : QColor{100, 200, 160};
+      painter.setBrush(color);
+      painter.drawRect(x + column * (barWidth + gap), baseY - height, barWidth, height);
+    };
+    drawBar(0, meter_left_dbfs_);
+    drawBar(1, meter_right_dbfs_);
+  }
+
   if (hasFocus()) {
     painter.setPen(QPen{QColor{100, 139, 212}, 2});
     painter.drawRect(rect().adjusted(1, 1, -2, -2));
@@ -583,6 +619,28 @@ void ProgramViewer::setCanvasSize(const int width, const int height) {
 void ProgramViewer::setViewerOverlay(const ViewerOverlay& overlay) {
   overlay_ = overlay;
   updateTransformHud();
+}
+
+void ProgramViewer::setClipInfoOverlay(const bool visible, const QString& clipName,
+                                       const QString& sourceTimecode) {
+  clip_info_visible_ = visible;
+  clip_info_name_ = clipName;
+  clip_info_source_timecode_ = sourceTimecode;
+  update();
+}
+
+void ProgramViewer::setPeakMeters(const float leftDbfs, const float rightDbfs, const bool active) {
+  meter_left_dbfs_ = leftDbfs;
+  meter_right_dbfs_ = rightDbfs;
+  meters_active_ = active;
+  update();
+}
+
+QImage ProgramViewer::currentDisplayImage() const {
+  if (!frame_.isNull()) {
+    return frame_;
+  }
+  return {};
 }
 
 void ProgramViewer::updateTransformHud() {

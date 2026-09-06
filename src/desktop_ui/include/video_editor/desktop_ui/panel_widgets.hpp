@@ -31,6 +31,7 @@ class QToolButton;
 class QTreeWidget;
 class QTreeWidgetItem;
 class QSplitter;
+class QListWidget;
 
 namespace video_editor::desktop_ui {
 
@@ -48,6 +49,9 @@ public:
     return items_;
   }
 
+protected:
+  bool eventFilter(QObject* watched, QEvent* event) override;
+
 signals:
   void importRequested();
   void insertRequested(const QString& mediaId);
@@ -61,28 +65,52 @@ signals:
   void moveBinRequested(const QString& binId, const QString& parentBinId);
   void removeBinRequested(const QString& binId);
   void setAssetBinRequested(const QString& assetId, const QString& binId);
+  void revealInFilesRequested(const QString& mediaId);
+  void hoverScrubRequested(const QString& mediaId, double normalizedPosition);
 
 private slots:
   void applyFilter(const QString& query);
   void activateCurrent();
   void handleBinSelectionChanged();
+  void toggleViewMode();
 
 private:
   void rebuildTree();
   void rebuildTable();
+  void rebuildIconView();
   void emitCurrentMediaSelection();
   [[nodiscard]] QString mediaIdAtRow(int row) const;
   [[nodiscard]] bool itemMatchesSelectedBin(const MediaItemView& item) const;
   [[nodiscard]] bool itemMatchesSearch(const MediaItemView& item, const QString& query) const;
   [[nodiscard]] QString selectedBinId() const;
+  [[nodiscard]] QVector<MediaItemView> filteredItems() const;
 
   QLineEdit* search_{nullptr};
+  QToolButton* view_mode_{nullptr};
   QSplitter* splitter_{nullptr};
   QTreeWidget* bin_tree_{nullptr};
   QStackedWidget* content_{nullptr};
   QTableWidget* table_{nullptr};
+  QListWidget* icon_view_{nullptr};
   QVector<MediaBinView> bins_;
   QVector<MediaItemView> items_;
+  bool icon_view_mode_{false};
+};
+
+class MarkerListWidget final : public QWidget {
+  Q_OBJECT
+
+public:
+  explicit MarkerListWidget(QWidget* parent = nullptr);
+
+  void setMarkers(const QVector<TimelineMarkerView>& markers);
+
+signals:
+  void markerActivated(const QString& markerId);
+  void markerRenameRequested(const QString& markerId, const QString& name);
+
+private:
+  QListWidget* list_{nullptr};
 };
 
 class InspectorWidget final : public QWidget {

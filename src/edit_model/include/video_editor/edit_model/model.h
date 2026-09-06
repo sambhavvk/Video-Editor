@@ -267,6 +267,7 @@ struct Sequence final {
   std::vector<Marker> markers;
   std::vector<Caption> captions;
   std::vector<Transition> transitions;
+  edit::Time start_time{};
   friend bool operator==(const Sequence&, const Sequence&) = default;
 };
 

@@ -1535,6 +1535,22 @@ struct PlannedClip final {
             sequence->height = command.height;
             return std::nullopt;
           },
+          [&](const SetSequenceNameCommand& command) -> std::optional<EditError> {
+            auto* sequence = mutableSequence(project, command.sequence_id);
+            if (sequence == nullptr) {
+              return error(EditErrorCode::EntityNotFound, "sequence was not found");
+            }
+            sequence->name = command.name;
+            return std::nullopt;
+          },
+          [&](const SetSequenceStartTimeCommand& command) -> std::optional<EditError> {
+            auto* sequence = mutableSequence(project, command.sequence_id);
+            if (sequence == nullptr) {
+              return error(EditErrorCode::EntityNotFound, "sequence was not found");
+            }
+            sequence->start_time = command.start_time;
+            return std::nullopt;
+          },
           [&](const AddTrackCommand& command) -> std::optional<EditError> {
             auto* sequence = mutableSequence(project, command.sequence_id);
             if (sequence == nullptr) {
@@ -2747,6 +2763,10 @@ std::string commandName(const EditCommand& command) {
           return "Remove sequence";
         if constexpr (std::is_same_v<T, SetSequenceFormatCommand>)
           return "Set sequence format";
+        if constexpr (std::is_same_v<T, SetSequenceNameCommand>)
+          return "Set sequence name";
+        if constexpr (std::is_same_v<T, SetSequenceStartTimeCommand>)
+          return "Set sequence start time";
         if constexpr (std::is_same_v<T, AddTrackCommand>)
           return "Add track";
         if constexpr (std::is_same_v<T, RemoveTrackCommand>)
@@ -2871,6 +2891,10 @@ std::string commandType(const EditCommand& command) {
           return "remove_sequence";
         if constexpr (std::is_same_v<T, SetSequenceFormatCommand>)
           return "set_sequence_format";
+        if constexpr (std::is_same_v<T, SetSequenceNameCommand>)
+          return "set_sequence_name";
+        if constexpr (std::is_same_v<T, SetSequenceStartTimeCommand>)
+          return "set_sequence_start_time";
         if constexpr (std::is_same_v<T, AddTrackCommand>)
           return "add_track";
         if constexpr (std::is_same_v<T, RemoveTrackCommand>)

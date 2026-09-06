@@ -21,6 +21,7 @@
 #include <QDialog>
 #include <QDockWidget>
 #include <QFileDialog>
+#include <QDesktopServices>
 #include <QFileInfo>
 #include <QFrame>
 #include <QGroupBox>
@@ -270,6 +271,18 @@ void EditorWindow::showTransientMessage(const QString& message, int timeoutMs) {
 void EditorWindow::setAudioSyncStatus(const QString& text) {
   if (av_sync_label_ != nullptr) {
     av_sync_label_->setText(text);
+  }
+}
+
+void EditorWindow::setSequenceFormatStatus(const QString& text) {
+  if (sequence_format_label_ != nullptr) {
+    sequence_format_label_->setText(text);
+  }
+}
+
+void EditorWindow::setJobActivitySummary(const QString& summary) {
+  if (job_activity_label_ != nullptr) {
+    job_activity_label_->setText(summary);
   }
 }
 
@@ -542,6 +555,9 @@ void EditorWindow::createCentralArea() {
                              {QStringLiteral("audio-4"), tr("A4 · Ambience"), TrackKind::Audio},
                          },
                          {});
+  marker_list_ = new MarkerListWidget(timelineArea);
+  marker_list_->setMaximumHeight(110);
+  timelineLayout->addWidget(marker_list_);
   timelineLayout->addWidget(timeline_, 1);
 
   vertical->addWidget(viewerArea);
@@ -692,6 +708,13 @@ void EditorWindow::createActions() {
          tr("Disable the selected clip for playback and export"));
   create(QStringLiteral("enableClip"), tr("Enable Clip"),
          tr("Re-enable the selected clip for playback and export"));
+  create(QStringLiteral("grabFrame"), tr("Grab Frame"),
+         tr("Save the current program monitor frame as an image"),
+         QKeySequence{tr("Ctrl+Shift+E")});
+  create(QStringLiteral("sequenceSettings"), tr("Sequence Settings…"),
+         tr("Edit the active sequence name and format"));
+  create(QStringLiteral("duplicateSequence"), tr("Duplicate Sequence"),
+         tr("Duplicate the active sequence with new clip IDs"));
   create(QStringLiteral("gotoTimecode"), tr("Go to Timecode"), tr("Seek to a typed timecode"),
          QKeySequence{tr("Ctrl+G")});
   create(QStringLiteral("toggleLoopPlayback"), tr("Toggle Loop Playback"),
@@ -800,6 +823,13 @@ void EditorWindow::createActions() {
   auto* safeGuides = create(QStringLiteral("safeGuides"), tr("Safe Guides"),
                             tr("Show title and action safe guides"));
   safeGuides->setCheckable(true);
+  auto* viewerClipInfo = create(QStringLiteral("viewerClipInfo"), tr("Clip Info Overlay"),
+                                tr("Show the active clip name on the program monitor"));
+  viewerClipInfo->setCheckable(true);
+  viewerClipInfo->setChecked(true);
+  auto* viewerSourceTc = create(QStringLiteral("viewerSourceTimecode"), tr("Source Timecode"),
+                                tr("Show source timecode in the program monitor overlay"));
+  viewerSourceTc->setCheckable(true);
   auto* programFullscreen =
       create(QStringLiteral("programFullscreen"), tr("Program Monitor Fullscreen"),
              tr("Show the program monitor fullscreen on this display"), QKeySequence{Qt::Key_F11});
@@ -895,6 +925,12 @@ void EditorWindow::createActions() {
           &EditorWindow::toggleSnapRequested);
   connect(action(QStringLiteral("toggleFollowPlayhead")), &QAction::triggered, this,
           &EditorWindow::toggleFollowPlayheadRequested);
+  connect(action(QStringLiteral("grabFrame")), &QAction::triggered, this,
+          &EditorWindow::grabFrameRequested);
+  connect(action(QStringLiteral("sequenceSettings")), &QAction::triggered, this,
+          &EditorWindow::sequenceSettingsRequested);
+  connect(action(QStringLiteral("duplicateSequence")), &QAction::triggered, this,
+          &EditorWindow::duplicateSequenceRequested);
   connect(action(QStringLiteral("gotoTimecode")), &QAction::triggered, this,
           &EditorWindow::gotoTimecodeRequested);
   connect(action(QStringLiteral("toggleLoopPlayback")), &QAction::triggered, this,
@@ -1065,7 +1101,8 @@ void EditorWindow::createMenus() {
   timelineMenu->addAction(action(QStringLiteral("toggleSnap")));
   timelineMenu->addAction(action(QStringLiteral("toggleFollowPlayhead")));
   timelineMenu->addSeparator();
-  timelineMenu->addAction(action(QStringLiteral("nestSelectedClips")));
+  timelineMenu->addAction(action(QStringLiteral("duplicateSequence")));
+  timelineMenu->addAction(action(QStringLiteral("sequenceSettings")));
   timelineMenu->addSeparator();
   for (const auto* id : {"tool.select", "tool.rippleTrim", "tool.overwriteTrim", "tool.roll",
                          "tool.slip", "tool.slide"}) {
@@ -1087,6 +1124,8 @@ void EditorWindow::createMenus() {
   view->addAction(action(QStringLiteral("precisionTrim")));
   view->addAction(action(QStringLiteral("scopes")));
   view->addAction(action(QStringLiteral("safeGuides")));
+  view->addAction(action(QStringLiteral("viewerClipInfo")));
+  view->addAction(action(QStringLiteral("viewerSourceTimecode")));
   view->addAction(action(QStringLiteral("programFullscreen")));
   program_output_menu_ = view->addMenu(tr("Program monitor on display…"));
   program_output_menu_->setObjectName(QStringLiteral("programOutputMenu"));
@@ -1184,7 +1223,15 @@ void EditorWindow::createStatusBar() {
   auto* format = new QLabel(tr("Rec.709 SDR · 48 kHz Stereo"), statusBar());
   format->setObjectName(QStringLiteral("sequenceFormatStatus"));
   format->setAccessibleName(tr("Sequence output format"));
+  sequence_format_label_ = format;
   statusBar()->addPermanentWidget(format);
+  auto* jobs_separator = new QLabel(QStringLiteral("  •  "), statusBar());
+  jobs_separator->setProperty("muted", true);
+  statusBar()->addPermanentWidget(jobs_separator);
+  job_activity_label_ = new QLabel(tr("Jobs: idle"), statusBar());
+  job_activity_label_->setObjectName(QStringLiteral("jobActivityStatus"));
+  job_activity_label_->setAccessibleName(tr("Background job activity"));
+  statusBar()->addPermanentWidget(job_activity_label_);
   auto* sync_separator = new QLabel(QStringLiteral("  •  "), statusBar());
   sync_separator->setProperty("muted", true);
   statusBar()->addPermanentWidget(sync_separator);
@@ -1275,6 +1322,25 @@ void EditorWindow::connectControllerSurface() {
           [this](const QString& presetId) { showExportDialog(presetId); });
   connect(action(QStringLiteral("safeGuides")), &QAction::toggled, program_viewer_,
           &ProgramViewer::setSafeGuidesVisible);
+  connect(action(QStringLiteral("viewerClipInfo")), &QAction::toggled, this,
+          &EditorWindow::programClipInfoToggled);
+  connect(action(QStringLiteral("viewerSourceTimecode")), &QAction::toggled, this,
+          &EditorWindow::sourceTimecodeToggled);
+  connect(marker_list_, &MarkerListWidget::markerActivated, this,
+          &EditorWindow::markerListJumpRequested);
+  connect(media_bin_, &MediaBinWidget::revealInFilesRequested, this,
+          [this](const QString& mediaId) {
+            if (media_bin_ != nullptr) {
+              const auto items = media_bin_->items();
+              const auto found = std::find_if(items.begin(), items.end(),
+                                              [&mediaId](const MediaItemView& item) {
+                                                return item.id == mediaId;
+                                              });
+              if (found != items.end() && !found->filePath.isEmpty()) {
+                QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(found->filePath).absolutePath()));
+              }
+            }
+          });
   connect(action(QStringLiteral("zoomInTimeline")), &QAction::triggered, timeline_,
           &TimelineWidget::zoomIn);
   connect(action(QStringLiteral("zoomOutTimeline")), &QAction::triggered, timeline_,

@@ -72,6 +72,9 @@ public slots:
   void setNativePresented(bool presented);
   void setCanvasSize(int width, int height);
   void setViewerOverlay(const ViewerOverlay& overlay);
+  void setClipInfoOverlay(bool visible, const QString& clipName, const QString& sourceTimecode);
+  void setPeakMeters(float leftDbfs, float rightDbfs, bool active);
+  [[nodiscard]] QImage currentDisplayImage() const;
 
 signals:
   void filesDropped(const QStringList& localFiles);
@@ -130,6 +133,12 @@ private:
   int canvas_width_{1920};
   int canvas_height_{1080};
   ViewerOverlay overlay_{};
+  bool clip_info_visible_{false};
+  QString clip_info_name_;
+  QString clip_info_source_timecode_;
+  float meter_left_dbfs_{0.0F};
+  float meter_right_dbfs_{0.0F};
+  bool meters_active_{false};
   bool viewer_drag_active_{false};
   QWidget* transform_hud_{nullptr};
 

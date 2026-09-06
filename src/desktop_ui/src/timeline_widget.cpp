@@ -918,11 +918,19 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
     const auto markerIndex = markerAt(position);
     if (markerIndex >= 0) {
       selectMarker(markerIndex);
+      const auto& marker = markers_.at(markerIndex);
+      const auto x = xForTime(marker.start + marker.duration);
+      const bool onDurationEdge =
+          marker.duration > 0 && std::abs(position.x() - x) <= transition_handle_pixels_;
       marker_gesture_ = {.pointerDown = true,
+                         .dragging = false,
+                         .resizingDuration = onDurationEdge,
                          .markerIndex = markerIndex,
                          .pressPosition = position,
-                         .originalStart = markers_.at(markerIndex).start,
-                         .targetStart = markers_.at(markerIndex).start,
+                         .originalStart = marker.start,
+                         .originalDuration = marker.duration,
+                         .targetStart = marker.start,
+                         .targetDuration = marker.duration,
                          .snap = {}};
       event->accept();
       return;
@@ -1018,12 +1026,20 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
     }
     if (marker_gesture_.dragging && marker_gesture_.markerIndex >= 0 &&
         marker_gesture_.markerIndex < markers_.size()) {
-      auto target = timeForX(static_cast<int>(event->position().x()));
-      marker_gesture_.snap = resolveSnap(target, {}, true, event->modifiers(),
-                                         markers_.at(marker_gesture_.markerIndex).id);
-      marker_gesture_.targetStart = marker_gesture_.snap.time;
-      emit markerMovePreview(markers_.at(marker_gesture_.markerIndex).id,
-                             marker_gesture_.targetStart, marker_gesture_.snap);
+      if (marker_gesture_.resizingDuration) {
+        const qint64 endTime =
+            timeForX(static_cast<int>(event->position().x()));
+        marker_gesture_.targetDuration =
+            std::max<qint64>(0, endTime - marker_gesture_.originalStart);
+        markers_[marker_gesture_.markerIndex].duration = marker_gesture_.targetDuration;
+      } else {
+        auto target = timeForX(static_cast<int>(event->position().x()));
+        marker_gesture_.snap = resolveSnap(target, {}, true, event->modifiers(),
+                                           markers_.at(marker_gesture_.markerIndex).id);
+        marker_gesture_.targetStart = marker_gesture_.snap.time;
+        emit markerMovePreview(markers_.at(marker_gesture_.markerIndex).id,
+                               marker_gesture_.targetStart, marker_gesture_.snap);
+      }
       viewport()->update();
     }
     event->accept();
@@ -1109,8 +1125,13 @@ void TimelineWidget::mouseReleaseEvent(QMouseEvent* event) {
     const auto gesture = marker_gesture_;
     marker_gesture_ = MarkerGesture{};
     if (gesture.dragging && gesture.markerIndex >= 0 && gesture.markerIndex < markers_.size()) {
-      emit markerMoveCommitted(markers_.at(gesture.markerIndex).id, gesture.targetStart,
-                               gesture.snap);
+      if (gesture.resizingDuration) {
+        emit markerDurationCommitted(markers_.at(gesture.markerIndex).id, gesture.targetDuration,
+                                     gesture.snap);
+      } else {
+        emit markerMoveCommitted(markers_.at(gesture.markerIndex).id, gesture.targetStart,
+                                 gesture.snap);
+      }
     }
     viewport()->update();
     event->accept();

@@ -21,6 +21,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMenu>
+#include <QMouseEvent>
 #include <QPixmap>
 #include <QPlainTextEdit>
 #include <QProgressBar>
@@ -148,6 +149,14 @@ MediaBinWidget::MediaBinWidget(QWidget* parent) : QWidget(parent) {
   search_->setFocusPolicy(Qt::StrongFocus);
   tools->addWidget(search_, 1);
 
+  view_mode_ = new QToolButton(this);
+  view_mode_->setObjectName(QStringLiteral("mediaViewModeButton"));
+  view_mode_->setAccessibleName(tr("Toggle media view mode"));
+  view_mode_->setToolTip(tr("Switch between list and filmstrip view"));
+  view_mode_->setText(tr("Filmstrip"));
+  view_mode_->setCheckable(true);
+  tools->addWidget(view_mode_);
+
   auto* import = new QToolButton(this);
   import->setObjectName(QStringLiteral("importMediaButton"));
   import->setAccessibleName(tr("Import media"));
@@ -215,6 +224,22 @@ MediaBinWidget::MediaBinWidget(QWidget* parent) : QWidget(parent) {
   table_->setSortingEnabled(true);
   table_->setContextMenuPolicy(Qt::CustomContextMenu);
   content_->addWidget(table_);
+
+  icon_view_ = new QListWidget(content_);
+  icon_view_->setObjectName(QStringLiteral("mediaIconView"));
+  icon_view_->setAccessibleName(tr("Media filmstrip"));
+  icon_view_->setViewMode(QListView::IconMode);
+  icon_view_->setMovement(QListView::Static);
+  icon_view_->setResizeMode(QListView::Adjust);
+  icon_view_->setSpacing(8);
+  icon_view_->setIconSize(QSize{96, 54});
+  icon_view_->setGridSize(QSize{112, 88});
+  icon_view_->setWrapping(true);
+  icon_view_->setUniformItemSizes(true);
+  icon_view_->setContextMenuPolicy(Qt::CustomContextMenu);
+  icon_view_->setMouseTracking(true);
+  icon_view_->viewport()->setMouseTracking(true);
+  content_->addWidget(icon_view_);
   splitter_->addWidget(content_);
   splitter_->setStretchFactor(0, 0);
   splitter_->setStretchFactor(1, 1);
@@ -222,6 +247,7 @@ MediaBinWidget::MediaBinWidget(QWidget* parent) : QWidget(parent) {
   layout->addWidget(splitter_, 1);
 
   connect(import, &QToolButton::clicked, this, &MediaBinWidget::importRequested);
+  connect(view_mode_, &QToolButton::toggled, this, &MediaBinWidget::toggleViewMode);
   connect(emptyImport, &QPushButton::clicked, this, &MediaBinWidget::importRequested);
   connect(search_, &QLineEdit::textChanged, this, &MediaBinWidget::applyFilter);
   connect(bin_tree_, &QTreeWidget::itemSelectionChanged, this,
@@ -269,6 +295,8 @@ MediaBinWidget::MediaBinWidget(QWidget* parent) : QWidget(parent) {
     insert->setEnabled(item != items_.cend() && !item->offline);
     insert->setToolTip(tr("Insert the selected media at the timeline playhead"));
     menu.addSeparator();
+    auto* reveal = menu.addAction(tr("Reveal in Files"));
+    reveal->setEnabled(item != items_.cend() && !item->filePath.isEmpty());
     auto* relink = menu.addAction(tr("Relink media…"));
     relink->setEnabled(item != items_.cend() && (item->offline || item->contentChanged));
     if (item != items_.cend()) {
@@ -291,13 +319,62 @@ MediaBinWidget::MediaBinWidget(QWidget* parent) : QWidget(parent) {
                                                    : tr("Create editing proxy"));
     }
     connect(insert, &QAction::triggered, this, [this, id] { emit insertRequested(id); });
+    connect(reveal, &QAction::triggered, this, [this, id] { emit revealInFilesRequested(id); });
     connect(relink, &QAction::triggered, this, [this, id] { emit relinkRequested(id); });
     if (proxy != nullptr) {
       connect(proxy, &QAction::triggered, this, [this, id] { emit proxyRequested(id); });
     }
     menu.exec(table_->viewport()->mapToGlobal(point));
   });
+  connect(icon_view_, &QListWidget::itemDoubleClicked, this, [this] { activateCurrent(); });
+  connect(icon_view_, &QListWidget::currentItemChanged, this,
+          [this](QListWidgetItem*, QListWidgetItem*) { emitCurrentMediaSelection(); });
+  connect(icon_view_, &QListWidget::customContextMenuRequested, this, [this](const QPoint& point) {
+    const auto* item = icon_view_->itemAt(point);
+    if (item == nullptr) {
+      return;
+    }
+    const auto id = item->data(Qt::UserRole).toString();
+    const auto found =
+        std::find_if(items_.cbegin(), items_.cend(),
+                     [&id](const MediaItemView& candidate) { return candidate.id == id; });
+    QMenu menu(this);
+    auto* insert = menu.addAction(tr("Insert at playhead"));
+    insert->setEnabled(found != items_.cend() && !found->offline);
+    menu.addSeparator();
+    auto* reveal = menu.addAction(tr("Reveal in Files"));
+    reveal->setEnabled(found != items_.cend() && !found->filePath.isEmpty());
+    auto* relink = menu.addAction(tr("Relink media…"));
+    relink->setEnabled(found != items_.cend() && (found->offline || found->contentChanged));
+    auto* proxy = menu.addAction(tr("Create proxy"));
+    proxy->setEnabled(found != items_.cend() && found->proxyRecommended && !found->proxyGenerating);
+    connect(insert, &QAction::triggered, this, [this, id] { emit insertRequested(id); });
+    connect(reveal, &QAction::triggered, this, [this, id] { emit revealInFilesRequested(id); });
+    connect(relink, &QAction::triggered, this, [this, id] { emit relinkRequested(id); });
+    connect(proxy, &QAction::triggered, this, [this, id] { emit proxyRequested(id); });
+    menu.exec(icon_view_->viewport()->mapToGlobal(point));
+  });
+  icon_view_->viewport()->installEventFilter(this);
   rebuildTree();
+}
+
+bool MediaBinWidget::eventFilter(QObject* watched, QEvent* event) {
+  if (icon_view_ != nullptr && watched == icon_view_->viewport() &&
+      event->type() == QEvent::MouseMove) {
+    const auto* mouse = static_cast<QMouseEvent*>(event);
+    const auto* item = icon_view_->itemAt(mouse->pos());
+    if (item != nullptr) {
+      const QRect itemRect = icon_view_->visualItemRect(item);
+      const double normalized =
+          itemRect.width() > 0
+              ? std::clamp(static_cast<double>(mouse->pos().x() - itemRect.left()) /
+                               static_cast<double>(itemRect.width()),
+                           0.0, 1.0)
+              : 0.0;
+      emit hoverScrubRequested(item->data(Qt::UserRole).toString(), normalized);
+    }
+  }
+  return QWidget::eventFilter(watched, event);
 }
 
 void MediaBinWidget::setBins(const QVector<MediaBinView>& bins) {
@@ -309,7 +386,31 @@ void MediaBinWidget::setBins(const QVector<MediaBinView>& bins) {
 void MediaBinWidget::setItems(const QVector<MediaItemView>& items) {
   items_ = items;
   rebuildTable();
+  rebuildIconView();
   applyFilter(search_->text());
+}
+
+void MediaBinWidget::toggleViewMode() {
+  icon_view_mode_ = view_mode_ != nullptr && view_mode_->isChecked();
+  if (view_mode_ != nullptr) {
+    view_mode_->setText(icon_view_mode_ ? tr("List") : tr("Filmstrip"));
+  }
+  if (content_ != nullptr) {
+    content_->setCurrentIndex(items_.isEmpty() ? 0 : (icon_view_mode_ ? 2 : 1));
+  }
+  applyFilter(search_->text());
+}
+
+QVector<MediaItemView> MediaBinWidget::filteredItems() const {
+  const QString query = search_ == nullptr ? QString{} : search_->text();
+  QVector<MediaItemView> filtered;
+  filtered.reserve(items_.size());
+  for (const auto& item : items_) {
+    if (itemMatchesSelectedBin(item) && itemMatchesSearch(item, query)) {
+      filtered.push_back(item);
+    }
+  }
+  return filtered;
 }
 
 void MediaBinWidget::applyFilter(const QString& query) {
@@ -321,6 +422,17 @@ void MediaBinWidget::applyFilter(const QString& query) {
     const bool visible =
         item != items_.cend() && itemMatchesSelectedBin(*item) && itemMatchesSearch(*item, query);
     table_->setRowHidden(row, !visible);
+  }
+  if (icon_view_ != nullptr) {
+    for (int row = 0; row < icon_view_->count(); ++row) {
+      const auto id = icon_view_->item(row)->data(Qt::UserRole).toString();
+      const auto item =
+          std::find_if(items_.cbegin(), items_.cend(),
+                       [&id](const MediaItemView& candidate) { return candidate.id == id; });
+      const bool visible =
+          item != items_.cend() && itemMatchesSelectedBin(*item) && itemMatchesSearch(*item, query);
+      icon_view_->item(row)->setHidden(!visible);
+    }
   }
   emit searchChanged(query);
 }
@@ -406,6 +518,10 @@ void MediaBinWidget::rebuildTree() {
 }
 
 void MediaBinWidget::activateCurrent() {
+  if (icon_view_mode_ && icon_view_ != nullptr && icon_view_->currentItem() != nullptr) {
+    emit mediaActivated(icon_view_->currentItem()->data(Qt::UserRole).toString());
+    return;
+  }
   const auto id = mediaIdAtRow(table_->currentRow());
   if (!id.isEmpty()) {
     emit mediaActivated(id);
@@ -413,6 +529,10 @@ void MediaBinWidget::activateCurrent() {
 }
 
 void MediaBinWidget::emitCurrentMediaSelection() {
+  if (icon_view_mode_ && icon_view_ != nullptr && icon_view_->currentItem() != nullptr) {
+    emit mediaSelectionChanged(icon_view_->currentItem()->data(Qt::UserRole).toString());
+    return;
+  }
   emit mediaSelectionChanged(mediaIdAtRow(table_->currentRow()));
 }
 
@@ -481,7 +601,69 @@ void MediaBinWidget::rebuildTable() {
     table_->setItem(row, kMediaStatusColumn, status);
   }
   table_->setSortingEnabled(true);
-  content_->setCurrentIndex(items_.isEmpty() ? 0 : 1);
+  rebuildIconView();
+  if (content_ != nullptr) {
+    content_->setCurrentIndex(items_.isEmpty() ? 0 : (icon_view_mode_ ? 2 : 1));
+  }
+}
+
+void MediaBinWidget::rebuildIconView() {
+  if (icon_view_ == nullptr) {
+    return;
+  }
+  icon_view_->clear();
+  for (const auto& item : items_) {
+    auto* row = new QListWidgetItem(item.metadataTitle.isEmpty() ? item.displayName
+                                                                 : item.metadataTitle);
+    row->setData(Qt::UserRole, item.id);
+    row->setToolTip(item.filePath);
+    if (!item.thumbnail.isNull()) {
+      row->setIcon(QIcon{QPixmap::fromImage(item.thumbnail)});
+    }
+    icon_view_->addItem(row);
+  }
+}
+
+MarkerListWidget::MarkerListWidget(QWidget* parent) : QWidget(parent) {
+  setObjectName(QStringLiteral("markerListPanel"));
+  setAccessibleName(tr("Markers"));
+  auto* layout = new QVBoxLayout(this);
+  layout->setContentsMargins(8, 8, 8, 8);
+  layout->setSpacing(4);
+  auto* heading = new QLabel(tr("Markers"), this);
+  heading->setObjectName(QStringLiteral("markerListHeading"));
+  QFont headingFont = heading->font();
+  headingFont.setWeight(QFont::DemiBold);
+  heading->setFont(headingFont);
+  layout->addWidget(heading);
+  list_ = new QListWidget(this);
+  list_->setObjectName(QStringLiteral("markerList"));
+  list_->setAccessibleName(tr("Sequence markers"));
+  layout->addWidget(list_, 1);
+  connect(list_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem* item) {
+    if (item != nullptr) {
+      emit markerActivated(item->data(Qt::UserRole).toString());
+    }
+  });
+}
+
+void MarkerListWidget::setMarkers(const QVector<TimelineMarkerView>& markers) {
+  if (list_ == nullptr) {
+    return;
+  }
+  list_->clear();
+  QVector<TimelineMarkerView> sorted = markers;
+  std::sort(sorted.begin(), sorted.end(),
+            [](const TimelineMarkerView& left, const TimelineMarkerView& right) {
+              return left.start < right.start;
+            });
+  for (const auto& marker : sorted) {
+    auto* item = new QListWidgetItem(
+        QStringLiteral("%1 — %2").arg(marker.displayName, QString::number(marker.start)));
+    item->setData(Qt::UserRole, marker.id);
+    item->setForeground(marker.color);
+    list_->addItem(item);
+  }
 }
 
 InspectorWidget::InspectorWidget(QWidget* parent) : QWidget(parent) {

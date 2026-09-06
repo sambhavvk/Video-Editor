@@ -35,6 +35,7 @@ class DeliverPanelWidget;
 class EffectsPanelWidget;
 class InspectorWidget;
 class MediaBinWidget;
+class MarkerListWidget;
 class ProgramOutputWindow;
 class ProgramViewer;
 class ScopeWidget;
@@ -71,6 +72,9 @@ public:
   }
   [[nodiscard]] TimelineWidget* timeline() const noexcept {
     return timeline_;
+  }
+  [[nodiscard]] MarkerListWidget* markerList() const noexcept {
+    return marker_list_;
   }
   [[nodiscard]] MediaBinWidget* mediaBin() const noexcept {
     return media_bin_;
@@ -112,6 +116,8 @@ public:
   void setSequenceTabs(const QVector<SequenceTabView>& tabs);
   void showTransientMessage(const QString& message, int timeoutMs = 4000);
   void setAudioSyncStatus(const QString& text);
+  void setSequenceFormatStatus(const QString& text);
+  void setJobActivitySummary(const QString& summary);
   void showExportDialog(const QString& presetId = {});
   void focusInspector();
   void refreshRecentProjectsMenu(const QStringList& paths, bool reopenLastOnStartup);
@@ -171,6 +177,13 @@ signals:
   void toggleFollowPlayheadRequested();
   void zoomToSelectionRequested();
   void defaultTransitionRequested();
+  void grabFrameRequested();
+  void revealMediaInFilesRequested();
+  void sequenceSettingsRequested();
+  void duplicateSequenceRequested();
+  void markerListJumpRequested(const QString& markerId);
+  void programClipInfoToggled(bool enabled);
+  void sourceTimecodeToggled(bool enabled);
   void gotoTimecodeRequested();
   void toggleLoopPlaybackRequested();
   void playAroundRequested();
@@ -280,6 +293,7 @@ private:
   QMenu* recent_projects_menu_{nullptr};
   QAction* reopen_last_on_startup_action_{nullptr};
   TimelineWidget* timeline_{nullptr};
+  MarkerListWidget* marker_list_{nullptr};
   QWidget* source_container_{nullptr};
   QFrame* precision_trim_{nullptr};
   QTabBar* sequence_tab_bar_{nullptr};
@@ -306,6 +320,8 @@ private:
   QLabel* workspace_label_{nullptr};
   QLabel* av_sync_label_{nullptr};
   QLabel* transport_label_{nullptr};
+  QLabel* sequence_format_label_{nullptr};
+  QLabel* job_activity_label_{nullptr};
   QToolBar* workspace_toolbar_{nullptr};
 };
 

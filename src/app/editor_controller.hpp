@@ -309,6 +309,12 @@ private slots:
   void removeTransition(const QString& transitionId);
   void changeTransitionPreset(const QString& transitionId, const QString& kind);
   void applyDefaultTransition();
+  void grabProgramFrame();
+  void showSequenceSettings();
+  void duplicateActiveSequence();
+  void scrubMediaPreview(const QString& mediaId, double normalizedPosition);
+  void toggleProgramClipInfo(bool enabled);
+  void toggleSourceTimecodeDisplay(bool enabled);
   void updateTrimTwoUpPreview(const QStringList& clipIds, int editMode, qint64 startDelta,
                               qint64 durationDelta);
   void clearTrimTwoUpPreview();
@@ -496,6 +502,8 @@ private:
   void refreshMixerView();
   void refreshCaptionView();
   void refreshTranscriptionState();
+  void refreshJobActivitySummary();
+  void refreshProgramViewerChrome();
   [[nodiscard]] bool selectedAudioInput(std::filesystem::path& path, edit::TimeRange& range,
                                         edit::EntityId& clipId) const;
   void handleTranscriptionEvent(const jobs::v1::WorkerEvent& event);
@@ -531,6 +539,7 @@ private:
   void removeTrack(const QString& trackId);
   void addMarker(qint64 start);
   void moveMarker(const QString& markerId, qint64 start);
+  void setMarkerDuration(const QString& markerId, qint64 duration);
   void renameMarker(const QString& markerId, const QString& name);
   void removeMarker(const QString& markerId);
   void closeGap(const QString& gapKey);
@@ -758,6 +767,7 @@ private:
   std::optional<qint64> program_mark_out_;
   bool loop_playback_{false};
   bool show_source_timecode_{false};
+  bool program_clip_info_visible_{true};
   QString pending_timecode_input_;
   std::optional<qint64> play_around_end_;
   double source_playback_rate_{0.0};

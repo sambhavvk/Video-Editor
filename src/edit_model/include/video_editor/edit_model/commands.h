@@ -46,6 +46,14 @@ struct SetSequenceFormatCommand final {
   std::uint32_t width{1920};
   std::uint32_t height{1080};
 };
+struct SetSequenceNameCommand final {
+  EntityId sequence_id;
+  std::string name;
+};
+struct SetSequenceStartTimeCommand final {
+  EntityId sequence_id;
+  Time start_time;
+};
 struct AddTrackCommand final {
   EntityId sequence_id;
   Track track;
@@ -346,7 +354,8 @@ using EditOperation = std::variant<
     ApplyCaptionChangeSetCommand, ApplyTimelineCutChangeSetCommand, RelinkAssetCommand,
     CreateBinCommand, RenameBinCommand, MoveBinCommand, RemoveBinCommand, SetAssetBinCommand,
     SetAssetMetadataCommand, SetSmartQueryCommand, ReplaceClipMediaCommand, SetClipNameCommand,
-    SetClipLinkedGroupCommand, SetClipEnabledCommand>;
+    SetClipLinkedGroupCommand, SetClipEnabledCommand, SetSequenceNameCommand,
+    SetSequenceStartTimeCommand>;
 
 struct EditCommand final {
   EditOperation operation;

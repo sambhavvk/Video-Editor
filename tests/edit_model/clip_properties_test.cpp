@@ -102,7 +102,9 @@ TEST(ClipPropertiesTest, AppendsOperationsWithoutChangingExistingVariantOrdinals
   EXPECT_EQ(EditOperation{SetClipNameCommand{}}.index(), 54U);
   EXPECT_EQ(EditOperation{SetClipLinkedGroupCommand{}}.index(), 55U);
   EXPECT_EQ(EditOperation{SetClipEnabledCommand{}}.index(), 56U);
-  EXPECT_EQ(std::variant_size_v<EditOperation>, 57U);
+  EXPECT_EQ(EditOperation{SetSequenceNameCommand{}}.index(), 57U);
+  EXPECT_EQ(EditOperation{SetSequenceStartTimeCommand{}}.index(), 58U);
+  EXPECT_EQ(std::variant_size_v<EditOperation>, 59U);
 }
 
 TEST(ClipPropertiesTest, AppliesAndRoundTripsTypedPropertiesAsExactRevisions) {

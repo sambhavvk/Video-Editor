@@ -1902,6 +1902,12 @@ void encodeOperationFields(QJsonObject& object, const EditOperation& operation) 
           object.insert(QStringLiteral("sequence_id"), encodeEntityId(command.sequence_id));
           object.insert(QStringLiteral("clip_id"), encodeEntityId(command.clip_id));
           object.insert(QStringLiteral("enabled"), command.enabled);
+        } else if constexpr (std::is_same_v<T, edit::SetSequenceNameCommand>) {
+          object.insert(QStringLiteral("sequence_id"), encodeEntityId(command.sequence_id));
+          object.insert(QStringLiteral("name"), stdToQstr(command.name));
+        } else if constexpr (std::is_same_v<T, edit::SetSequenceStartTimeCommand>) {
+          object.insert(QStringLiteral("sequence_id"), encodeEntityId(command.sequence_id));
+          object.insert(QStringLiteral("start_time"), encodeTime(command.start_time));
         }
       },
       operation);
@@ -2652,6 +2658,24 @@ void encodeOperationFields(QJsonObject& object, const EditOperation& operation) 
     return DecodeResult<EditOperation>::success(
         edit::SetClipEnabledCommand{sequence_id.value(), clip_id.value(),
                                     object.value(QStringLiteral("enabled")).toBool(true)});
+  }
+  if (type == QStringLiteral("set_sequence_name")) {
+    const auto sequence_id =
+        decodeEntityIdRequired(object.value(QStringLiteral("sequence_id")), "set_sequence_name.sequence_id");
+    if (!sequence_id) return fail<EditOperation>(sequence_id.error().message);
+    return DecodeResult<EditOperation>::success(
+        edit::SetSequenceNameCommand{sequence_id.value(),
+                                     qstrToStd(object.value(QStringLiteral("name")).toString())});
+  }
+  if (type == QStringLiteral("set_sequence_start_time")) {
+    const auto sequence_id = decodeEntityIdRequired(object.value(QStringLiteral("sequence_id")),
+                                                    "set_sequence_start_time.sequence_id");
+    if (!sequence_id) return fail<EditOperation>(sequence_id.error().message);
+    const auto start_time =
+        decodeTime(object.value(QStringLiteral("start_time")), "set_sequence_start_time.start_time");
+    if (!start_time) return fail<EditOperation>(start_time.error().message);
+    return DecodeResult<EditOperation>::success(
+        edit::SetSequenceStartTimeCommand{sequence_id.value(), start_time.value()});
   }
   return fail<EditOperation>("unknown command type: " + qstrToStd(type));
 }

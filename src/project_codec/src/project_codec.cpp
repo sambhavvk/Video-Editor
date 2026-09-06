@@ -683,6 +683,9 @@ void encodeSequence(const edit::Sequence& value, wire::Sequence* output, std::st
                   indexedPath(path, "captions", index), ids);
   }
   encodeTransitions(value, output, path, ids);
+  if (value.start_time.value() != 0) {
+    encodeTime(value.start_time, output->mutable_start_time());
+  }
 }
 
 [[nodiscard]] wire::MediaBinKind encodeMediaBinKind(const edit::MediaBinKind value,
@@ -1645,6 +1648,9 @@ decodeMetadata(const google::protobuf::RepeatedPtrField<wire::StringEntry>& entr
                                             declared_schema_version, ids));
   }
   assignDecodedTransitions(value, path, result, ids);
+  if (value.has_start_time()) {
+    result.start_time = decodeTime(value.start_time(), childPath(path, "start_time"));
+  }
   return result;
 }
 

@@ -193,6 +193,8 @@ signals:
   void markerMovePreview(const QString& markerId, qint64 start, const TimelineSnapResult& snap);
   void markerMoveCommitted(const QString& markerId, qint64 start, const TimelineSnapResult& snap);
   void markerMoveCanceled(const QString& markerId);
+  void markerDurationCommitted(const QString& markerId, qint64 duration,
+                               const TimelineSnapResult& snap);
   void markerAddRequested(qint64 start);
   void markerRenameRequested(const QString& markerId, const QString& displayName);
   void markerRemoveRequested(const QString& markerId);
@@ -320,10 +322,13 @@ private:
   struct MarkerGesture {
     bool pointerDown{false};
     bool dragging{false};
+    bool resizingDuration{false};
     int markerIndex{-1};
     QPoint pressPosition;
     qint64 originalStart{0};
+    qint64 originalDuration{0};
     qint64 targetStart{0};
+    qint64 targetDuration{0};
     TimelineSnapResult snap;
   };
   MarkerGesture marker_gesture_;

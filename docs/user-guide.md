@@ -66,6 +66,8 @@ registered application commands and their shortcuts.
    media and caches are not embedded.
 4. Use **File > Open Project** to open a checkpoint. The application copies it to a local working
    database and edits that copy.
+5. **File > Open Recent** lists recently opened `.veproj` paths. **Preferences > Reopen last project
+   on startup** restores the last saved project when recovery does not take precedence.
 
 Every accepted edit is journaled to the local working database. If the application did not close
 cleanly or has committed edits newer than its last checkpoint, the next startup scans the recovery
@@ -83,7 +85,10 @@ decoded frame. Selecting the first file of a numbered run (`shot0001.png`, `shot
 imports one sequence asset. Failed items are reported without discarding successful imports.
 
 The media bin shows a thumbnail, name, duration, detected format, and status (Original, Offline,
-Changed, Proxy recommended, Creating proxy…, or Proxy ready). Search filters by name or format.
+Changed, Proxy recommended, Creating proxy…, or Proxy ready). Use the **Filmstrip** toggle to
+switch between the table and an icon grid; hover-scrub in filmstrip mode previews the source at the
+mapped position. Right-click **Reveal in Files** opens the parent folder in your file manager.
+Search filters by name or format.
 The Inspector Asset group edits a cached display title, tags, notes, and rating; an empty title
 falls back to the file name. Double-click an item to load it in the source monitor (shown
 automatically). Mark **I**n / **O**ut on the source playhead, then **L** to ripple-insert or
@@ -164,8 +169,10 @@ reorders the active track. With a track header active, **L**, **V**, and **T** t
 visibility, and targeting. Locked tracks reject structural edits. Hidden video tracks do not
 contribute to preview or export. Targeted, unlocked compatible tracks receive media insertion.
 
-Double-click the ruler or press **M** to add a point marker. Click/drag markers to select and move
-them through canonical snapping; their context menu offers Rename and Remove.
+Double-click the ruler or press **M** to add a color-coded marker. Drag a ranged marker's right
+edge to set duration. The marker list below the timeline shows all markers in time order;
+double-click a row to jump the playhead. Click/drag markers to select and move them through
+canonical snapping; their context menu offers Rename and Remove.
 
 Empty track regions are derived gaps rather than stored media. Click a visible gap and press
 **Delete/Backspace**, or use **Close Gap** from its context menu, to shift later material left.
@@ -385,6 +392,22 @@ Qt maps standard shortcuts to the platform convention; the table uses the Window
 | Source monitor | `Shift+2` |
 | Precision trim panel | `T` |
 | Import / Edit / Audio & Captions / Deliver | `Ctrl+1` / `Ctrl+2` / `Ctrl+3` / `Ctrl+4` |
+| Open recent project | **File > Open Recent** |
+| Go to timecode | `Ctrl+G` |
+| Grab program frame | `Ctrl+Shift+E` |
+| Toggle snap | `S` |
+| Toggle follow playhead | `Ctrl+Shift+F` |
+| Zoom to selection | command palette / Timeline menu |
+| Default transition | `Ctrl+D` |
+| Linked selection toggle | `Ctrl+L` |
+| Unlink clips | `Ctrl+Shift+U` |
+| Duplicate clips | `Ctrl+Shift+D` |
+| Copy / Cut / Paste insert | `Ctrl+C` / `Ctrl+X` / `Ctrl+V` |
+| Paste overwrite / attributes | `Ctrl+Alt+V` / `Ctrl+Alt+A` |
+| Select at playhead / match frame | `D` / `F` |
+| Trim head/tail to playhead | `Q` / `E` |
+| Sequence settings / duplicate | Timeline menu |
+| Clip info / source TC overlay | View menu (next to Safe Guides) |
 | Command palette | `Ctrl+Shift+P` |
 
-Shortcuts are not remappable in the current build despite remapping being a beta requirement.
+Use **Edit > Keyboard Shortcuts** (or the command palette) to remap any registered `QAction`.
