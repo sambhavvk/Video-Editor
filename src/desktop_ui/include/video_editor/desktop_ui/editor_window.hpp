@@ -141,6 +141,16 @@ signals:
   void undoRequested();
   void redoRequested();
   void splitClipRequested();
+  void selectAtPlayheadRequested();
+  void seekPreviousEditRequested();
+  void seekNextEditRequested();
+  void matchFrameRequested();
+  void trimHeadToPlayheadRequested();
+  void trimTailToPlayheadRequested();
+  void overwriteTrimHeadToPlayheadRequested();
+  void overwriteTrimTailToPlayheadRequested();
+  void selectForwardRequested();
+  void selectForwardOnTargetedTrackRequested();
   void deleteSelectionRequested(bool ripple);
   void playbackRateRequested(double rate);
   void seekRequested(qint64 position);

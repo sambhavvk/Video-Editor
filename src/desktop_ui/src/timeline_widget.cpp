@@ -867,6 +867,13 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
   if (event->button() == Qt::LeftButton) {
     const auto clipIndex = clipAt(position);
     if (clipIndex >= 0) {
+      if (tool_mode_ == ToolMode::TrackSelectForward) {
+        selectForwardFromClip(clipIndex, event->modifiers().testFlag(Qt::ShiftModifier));
+        emit clipActivated(active_clip_id_);
+        viewport()->update();
+        event->accept();
+        return;
+      }
       selectClip(clipIndex, event->modifiers());
       emit clipActivated(active_clip_id_);
       const auto hitRegion = clipHitRegionAt(position);
@@ -1515,6 +1522,48 @@ void TimelineWidget::selectClip(int clipIndex, Qt::KeyboardModifiers modifiers) 
   emit clipSelectionChanged(selectedClipIds(), active_clip_id_);
 }
 
+void TimelineWidget::selectForwardFromClip(int clipIndex, bool includeTracksBelow) {
+  if (clipIndex < 0 || clipIndex >= clips_.size()) {
+    return;
+  }
+  const auto& anchor = clips_.at(clipIndex);
+  const int anchorTrack = anchor.trackIndex;
+  const qint64 anchorStart = anchor.start;
+  if (anchorTrack < 0 || anchorTrack >= tracks_.size()) {
+    return;
+  }
+  clearTransitionSelection();
+  clearClipSelection();
+  for (int index = 0; index < clips_.size(); ++index) {
+    const auto& clip = clips_.at(index);
+    if (clip.trackIndex < anchorTrack) {
+      continue;
+    }
+    if (!includeTracksBelow && clip.trackIndex != anchorTrack) {
+      continue;
+    }
+    if (clip.trackIndex == anchorTrack && clip.start < anchorStart) {
+      continue;
+    }
+    if (clip.trackIndex < 0 || clip.trackIndex >= tracks_.size() ||
+        tracks_.at(clip.trackIndex).locked) {
+      continue;
+    }
+    clips_[index].selected = true;
+  }
+  active_clip_id_ = anchor.id;
+  selection_anchor_id_ = anchor.id;
+  for (auto& marker : markers_) {
+    marker.selected = false;
+  }
+  for (auto& gap : gaps_) {
+    gap.selected = false;
+  }
+  active_marker_id_.clear();
+  active_gap_key_.clear();
+  emit clipSelectionChanged(selectedClipIds(), active_clip_id_);
+}
+
 void TimelineWidget::selectMarker(int markerIndex) {
   if (markerIndex < 0 || markerIndex >= markers_.size()) {
     return;
@@ -1910,6 +1959,10 @@ void TimelineWidget::updateHoverCursor(const QPoint& position) {
   if ((tool_mode_ == ToolMode::Slip || tool_mode_ == ToolMode::Slide) &&
       hit != ClipHitRegion::None) {
     viewport()->setCursor(Qt::ArrowCursor);
+    return;
+  }
+  if (tool_mode_ == ToolMode::TrackSelectForward && hit == ClipHitRegion::Body) {
+    viewport()->setCursor(Qt::PointingHandCursor);
     return;
   }
   switch (hit) {

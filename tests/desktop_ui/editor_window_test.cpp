@@ -163,6 +163,13 @@ void EditorWindowTest::constructsCompleteShell() {
   QCOMPARE(window.action(QStringLiteral("reverse"))->shortcut(), QKeySequence{Qt::Key_J});
   QCOMPARE(window.action(QStringLiteral("stop"))->shortcut(), QKeySequence{Qt::Key_K});
   QCOMPARE(window.action(QStringLiteral("forward"))->shortcut(), QKeySequence{Qt::Key_L});
+  QCOMPARE(window.action(QStringLiteral("selectAtPlayhead"))->shortcut(), QKeySequence{Qt::Key_D});
+  QCOMPARE(window.action(QStringLiteral("seekPreviousEdit"))->shortcut(), QKeySequence{Qt::Key_Up});
+  QCOMPARE(window.action(QStringLiteral("seekNextEdit"))->shortcut(), QKeySequence{Qt::Key_Down});
+  QCOMPARE(window.action(QStringLiteral("matchFrame"))->shortcut(), QKeySequence{Qt::Key_F});
+  QCOMPARE(window.action(QStringLiteral("trimHeadToPlayhead"))->shortcut(), QKeySequence{Qt::Key_Q});
+  QCOMPARE(window.action(QStringLiteral("trimTailToPlayhead"))->shortcut(), QKeySequence{Qt::Key_E});
+  QCOMPARE(window.action(QStringLiteral("tool.trackSelectForward"))->shortcut(), QKeySequence{Qt::Key_A});
   QCOMPARE(window.action(QStringLiteral("workspace.0"))->shortcut(),
            QKeySequence{QStringLiteral("Ctrl+1")});
   QCOMPARE(window.action(QStringLiteral("workspace.3"))->shortcut(),

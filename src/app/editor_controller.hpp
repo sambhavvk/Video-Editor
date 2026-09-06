@@ -232,6 +232,13 @@ private slots:
   void advanceSourcePlayback();
   void splitSelectedClip();
   void splitClipAt(const QString& clipId, qint64 uiTime);
+  void selectClipsAtPlayhead();
+  void seekPreviousEdit();
+  void seekNextEdit();
+  void matchFrame();
+  void trimHeadToPlayhead(bool overwrite);
+  void trimTailToPlayhead(bool overwrite);
+  void selectForwardAtPlayhead(bool includeTracksBelow);
   void deleteSelectedClip(bool ripple);
   void undo();
   void redo();

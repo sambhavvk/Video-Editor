@@ -645,6 +645,22 @@ void EditorWindow::createActions() {
   create(QStringLiteral("redo"), tr("Redo"), tr("Redo the last undone edit"), QKeySequence::Redo);
   create(QStringLiteral("splitClip"), tr("Split Clip"), tr("Split selected clips at the playhead"),
          QKeySequence{tr("Ctrl+B")});
+  create(QStringLiteral("selectAtPlayhead"), tr("Select at Playhead"),
+         tr("Select clips under the playhead on targeted unlocked tracks"), QKeySequence{Qt::Key_D});
+  create(QStringLiteral("seekPreviousEdit"), tr("Previous Edit"),
+         tr("Seek to the previous edit point"), QKeySequence{Qt::Key_Up});
+  create(QStringLiteral("seekNextEdit"), tr("Next Edit"), tr("Seek to the next edit point"),
+         QKeySequence{Qt::Key_Down});
+  create(QStringLiteral("matchFrame"), tr("Match Frame"),
+         tr("Open source media at the frame under the playhead"), QKeySequence{Qt::Key_F});
+  create(QStringLiteral("trimHeadToPlayhead"), tr("Ripple Trim Head to Playhead"),
+         tr("Trim clip heads to the playhead and ripple"), QKeySequence{Qt::Key_Q});
+  create(QStringLiteral("trimTailToPlayhead"), tr("Ripple Trim Tail to Playhead"),
+         tr("Trim clip tails to the playhead and ripple"), QKeySequence{Qt::Key_E});
+  create(QStringLiteral("overwriteTrimHeadToPlayhead"), tr("Overwrite Trim Head to Playhead"),
+         tr("Trim clip heads to the playhead without rippling"), QKeySequence{tr("Shift+Q")});
+  create(QStringLiteral("overwriteTrimTailToPlayhead"), tr("Overwrite Trim Tail to Playhead"),
+         tr("Trim clip tails to the playhead without rippling"), QKeySequence{tr("Shift+E")});
   create(QStringLiteral("deleteSelection"), tr("Delete"), tr("Delete the selection"),
          QKeySequence{Qt::Key_Delete});
   create(QStringLiteral("rippleDelete"), tr("Ripple Delete"),
@@ -704,6 +720,10 @@ void EditorWindow::createActions() {
                   tr("Change source timing without moving the clip"), QKeySequence{tr("Y")});
   addTimelineTool(QStringLiteral("tool.slide"), tr("Slide"),
                   tr("Move a clip and trim its neighbours"), QKeySequence{tr("U")});
+  auto* trackSelectForward = addTimelineTool(QStringLiteral("tool.trackSelectForward"),
+                                             tr("Track Select Forward"),
+                                             tr("Select this clip and all later clips on the track"),
+                                             QKeySequence{Qt::Key_A});
 
   auto* sourceMonitor =
       create(QStringLiteral("sourceMonitor"), tr("Source Monitor"),
@@ -773,6 +793,29 @@ void EditorWindow::createActions() {
   connect(action(QStringLiteral("redo")), &QAction::triggered, this, &EditorWindow::redoRequested);
   connect(action(QStringLiteral("splitClip")), &QAction::triggered, this,
           &EditorWindow::splitClipRequested);
+  connect(action(QStringLiteral("selectAtPlayhead")), &QAction::triggered, this,
+          &EditorWindow::selectAtPlayheadRequested);
+  connect(action(QStringLiteral("seekPreviousEdit")), &QAction::triggered, this,
+          &EditorWindow::seekPreviousEditRequested);
+  connect(action(QStringLiteral("seekNextEdit")), &QAction::triggered, this,
+          &EditorWindow::seekNextEditRequested);
+  connect(action(QStringLiteral("matchFrame")), &QAction::triggered, this,
+          &EditorWindow::matchFrameRequested);
+  connect(action(QStringLiteral("trimHeadToPlayhead")), &QAction::triggered, this,
+          &EditorWindow::trimHeadToPlayheadRequested);
+  connect(action(QStringLiteral("trimTailToPlayhead")), &QAction::triggered, this,
+          &EditorWindow::trimTailToPlayheadRequested);
+  connect(action(QStringLiteral("overwriteTrimHeadToPlayhead")), &QAction::triggered, this,
+          &EditorWindow::overwriteTrimHeadToPlayheadRequested);
+  connect(action(QStringLiteral("overwriteTrimTailToPlayhead")), &QAction::triggered, this,
+          &EditorWindow::overwriteTrimTailToPlayheadRequested);
+  connect(trackSelectForward, &QAction::triggered, this, [this] {
+    if (timeline_->toolMode() == TimelineWidget::ToolMode::Select) {
+      emit selectForwardOnTargetedTrackRequested();
+      return;
+    }
+    timeline_->setToolMode(TimelineWidget::ToolMode::TrackSelectForward);
+  });
   connect(action(QStringLiteral("deleteSelection")), &QAction::triggered, this,
           [this] { emit deleteSelectionRequested(false); });
   connect(action(QStringLiteral("rippleDelete")), &QAction::triggered, this,

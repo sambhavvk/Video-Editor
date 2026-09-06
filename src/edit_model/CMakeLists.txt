@@ -21,6 +21,7 @@ endif()
 
 add_library(video_editor_edit_model STATIC
   src/effect_evaluator.cpp
+  src/edit_points.cpp
   src/entity_id.cpp
   src/model.cpp
   src/snapping.cpp

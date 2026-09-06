@@ -58,6 +58,7 @@ public:
     Roll,
     Slip,
     Slide,
+    TrackSelectForward,
   };
   Q_ENUM(ToolMode)
 
@@ -222,6 +223,7 @@ private:
                                                const QString& excludedMarkerId = {}) const;
   [[nodiscard]] EditMode gestureMode(ClipHitRegion hit) const noexcept;
   void selectClip(int clipIndex, Qt::KeyboardModifiers modifiers);
+  void selectForwardFromClip(int clipIndex, bool includeTracksBelow);
   void clearClipSelection();
   void selectMarker(int markerIndex);
   void selectGap(int gapIndex);

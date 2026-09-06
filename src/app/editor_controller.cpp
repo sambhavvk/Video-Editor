@@ -1015,6 +1015,24 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::stepSourceFrame);
   connect(&window_, &desktop_ui::EditorWindow::splitClipRequested, this,
           &EditorController::splitSelectedClip);
+  connect(&window_, &desktop_ui::EditorWindow::selectAtPlayheadRequested, this,
+          &EditorController::selectClipsAtPlayhead);
+  connect(&window_, &desktop_ui::EditorWindow::seekPreviousEditRequested, this,
+          &EditorController::seekPreviousEdit);
+  connect(&window_, &desktop_ui::EditorWindow::seekNextEditRequested, this,
+          &EditorController::seekNextEdit);
+  connect(&window_, &desktop_ui::EditorWindow::matchFrameRequested, this,
+          &EditorController::matchFrame);
+  connect(&window_, &desktop_ui::EditorWindow::trimHeadToPlayheadRequested, this,
+          [this] { trimHeadToPlayhead(false); });
+  connect(&window_, &desktop_ui::EditorWindow::trimTailToPlayheadRequested, this,
+          [this] { trimTailToPlayhead(false); });
+  connect(&window_, &desktop_ui::EditorWindow::overwriteTrimHeadToPlayheadRequested, this,
+          [this] { trimHeadToPlayhead(true); });
+  connect(&window_, &desktop_ui::EditorWindow::overwriteTrimTailToPlayheadRequested, this,
+          [this] { trimTailToPlayhead(true); });
+  connect(&window_, &desktop_ui::EditorWindow::selectForwardOnTargetedTrackRequested, this,
+          [this] { selectForwardAtPlayhead(false); });
   connect(&window_, &desktop_ui::EditorWindow::deleteSelectionRequested, this,
           &EditorController::deleteSelectedClip);
   connect(&window_, &desktop_ui::EditorWindow::undoRequested, this, &EditorController::undo);
@@ -3611,6 +3629,274 @@ void EditorController::splitClipAt(const QString& clipIdText, const qint64 uiTim
   }
   (void)applyBatch({{.operation = std::move(split), .coalescing_key = {}}},
                    tr("Could not split the clip at this position"));
+}
+
+void EditorController::selectClipsAtPlayhead() {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    return;
+  }
+  const auto covering = edit::clipsCoveringPlayhead(
+      *sequence, edit::CoveringClipQuery{.playhead = playheadTime()});
+  if (covering.empty()) {
+    window_.showTransientMessage(tr("No clips under the playhead on targeted tracks"));
+    return;
+  }
+  std::unordered_set<edit::EntityId> expanded;
+  for (const auto& clip_id : covering) {
+    const auto linked = expandLinkedSelection(*sequence, {clip_id});
+    expanded.insert(linked.begin(), linked.end());
+  }
+  QStringList ids;
+  ids.reserve(static_cast<qsizetype>(expanded.size()));
+  for (const auto& id : expanded) {
+    ids.push_back(QString::fromStdString(id.toString()));
+  }
+  std::sort(ids.begin(), ids.end());
+  const QString active = ids.isEmpty() ? QString{} : ids.front();
+  setClipSelection(ids, active);
+}
+
+void EditorController::seekPreviousEdit() {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    return;
+  }
+  const auto target = edit::previousEditPoint(*sequence, playheadTime());
+  if (!target.has_value()) {
+    window_.showTransientMessage(tr("No previous edit point"));
+    return;
+  }
+  seek(timelineValue(*target));
+}
+
+void EditorController::seekNextEdit() {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    return;
+  }
+  const auto target = edit::nextEditPoint(*sequence, playheadTime());
+  if (!target.has_value()) {
+    window_.showTransientMessage(tr("No next edit point"));
+    return;
+  }
+  seek(timelineValue(*target));
+}
+
+void EditorController::matchFrame() {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    return;
+  }
+  const auto covering = edit::clipsCoveringPlayhead(
+      *sequence, edit::CoveringClipQuery{.playhead = playheadTime()});
+  const edit::Clip* clip = nullptr;
+  for (const auto& clip_id : covering) {
+    const edit::Clip* candidate = edit::findClip(*sequence, clip_id);
+    if (candidate != nullptr && candidate->kind == edit::ClipKind::Video) {
+      clip = candidate;
+      break;
+    }
+  }
+  if (clip == nullptr) {
+    for (const auto& clip_id : covering) {
+      const edit::Clip* candidate = edit::findClip(*sequence, clip_id);
+      if (candidate != nullptr && !candidate->asset_id.isNil()) {
+        clip = candidate;
+        break;
+      }
+    }
+  }
+  if (clip == nullptr || clip->asset_id.isNil()) {
+    window_.showTransientMessage(tr("No source media under the playhead"));
+    return;
+  }
+  const edit::Time source_time = edit::sourceTimeAtTimelineTime(*clip, playheadTime());
+  loadSourceAsset(QString::fromStdString(clip->asset_id.toString()));
+  seekSource(toUiTime(source_time));
+}
+
+namespace {
+edit::TimeRange sourceRangeForTimelineRange(const edit::Clip& clip,
+                                            const edit::TimeRange& timeline_range) {
+  const edit::Time head_delta = timeline_range.start - clip.timeline_range.start;
+  const edit::Time tail_delta = timeline_range.end() - clip.timeline_range.end();
+  const auto source_delta = [&clip](const edit::Time delta) {
+    return delta.scaled(clip.playback_rate.numerator(), clip.playback_rate.denominator(),
+                          edit::RoundingMode::NearestTiesEven)
+        .rescaledTo(clip.source_range.duration.timescale(), edit::RoundingMode::NearestTiesEven);
+  };
+  edit::Time source_start = clip.source_range.start;
+  edit::Time source_end = clip.source_range.end();
+  if (!clip.reversed) {
+    source_start = source_start + source_delta(head_delta);
+    source_end = source_end + source_delta(tail_delta);
+  } else {
+    source_start = source_start - source_delta(tail_delta);
+    source_end = source_end - source_delta(head_delta);
+  }
+  return edit::TimeRange(source_start, source_end - source_start);
+}
+} // namespace
+
+void EditorController::trimHeadToPlayhead(const bool overwrite) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    return;
+  }
+  const edit::Time playhead = playheadTime();
+  const auto covering = edit::clipsCoveringPlayhead(
+      *sequence, edit::CoveringClipQuery{.playhead = playhead});
+  if (covering.empty()) {
+    window_.showTransientMessage(tr("No clips under the playhead to trim"));
+    return;
+  }
+  const edit::InsertMode mode =
+      overwrite ? edit::InsertMode::Overwrite : edit::InsertMode::Ripple;
+  std::vector<edit::EditCommand> commands;
+  std::unordered_set<edit::EntityId> consumed;
+  for (const auto& clip_id : covering) {
+    if (consumed.contains(clip_id)) {
+      continue;
+    }
+    const edit::Clip* clip = edit::findClip(*sequence, clip_id);
+    if (clip == nullptr || playhead <= clip->timeline_range.start ||
+        playhead >= clip->timeline_range.end()) {
+      continue;
+    }
+    const auto linked = expandLinkedSelection(*sequence, {clip_id});
+    consumed.insert(linked.begin(), linked.end());
+    const edit::TimeRange timeline_range(playhead, clip->timeline_range.end() - playhead);
+    commands.push_back(
+        {.operation = edit::TrimClipCommand{.sequence_id = sequence->id,
+                                            .clip_id = clip_id,
+                                            .timeline_range = timeline_range,
+                                            .source_range =
+                                                sourceRangeForTimelineRange(*clip, timeline_range),
+                                            .include_linked = linked.size() > 1,
+                                            .mode = mode},
+         .coalescing_key = {}});
+  }
+  if (commands.empty()) {
+    window_.showTransientMessage(tr("Playhead must be inside a clip to trim its head"));
+    return;
+  }
+  (void)applyBatch(std::move(commands), tr("Could not trim clip heads to the playhead"));
+}
+
+void EditorController::trimTailToPlayhead(const bool overwrite) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    return;
+  }
+  const edit::Time playhead = playheadTime();
+  const auto covering = edit::clipsCoveringPlayhead(
+      *sequence, edit::CoveringClipQuery{.playhead = playhead});
+  if (covering.empty()) {
+    window_.showTransientMessage(tr("No clips under the playhead to trim"));
+    return;
+  }
+  const edit::InsertMode mode =
+      overwrite ? edit::InsertMode::Overwrite : edit::InsertMode::Ripple;
+  std::vector<edit::EditCommand> commands;
+  std::unordered_set<edit::EntityId> consumed;
+  for (const auto& clip_id : covering) {
+    if (consumed.contains(clip_id)) {
+      continue;
+    }
+    const edit::Clip* clip = edit::findClip(*sequence, clip_id);
+    if (clip == nullptr || playhead <= clip->timeline_range.start ||
+        playhead >= clip->timeline_range.end()) {
+      continue;
+    }
+    const auto linked = expandLinkedSelection(*sequence, {clip_id});
+    consumed.insert(linked.begin(), linked.end());
+    const edit::TimeRange timeline_range(clip->timeline_range.start, playhead - clip->timeline_range.start);
+    commands.push_back(
+        {.operation = edit::TrimClipCommand{.sequence_id = sequence->id,
+                                            .clip_id = clip_id,
+                                            .timeline_range = timeline_range,
+                                            .source_range =
+                                                sourceRangeForTimelineRange(*clip, timeline_range),
+                                            .include_linked = linked.size() > 1,
+                                            .mode = mode},
+         .coalescing_key = {}});
+  }
+  if (commands.empty()) {
+    window_.showTransientMessage(tr("Playhead must be inside a clip to trim its tail"));
+    return;
+  }
+  (void)applyBatch(std::move(commands), tr("Could not trim clip tails to the playhead"));
+}
+
+void EditorController::selectForwardAtPlayhead(const bool includeTracksBelow) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    return;
+  }
+  const edit::Time playhead = playheadTime();
+  int anchor_track = -1;
+  edit::Time anchor_start{};
+  edit::EntityId anchor_id{};
+  for (std::size_t track_index = 0; track_index < sequence->tracks.size(); ++track_index) {
+    const auto& track = sequence->tracks[track_index];
+    if (track.locked || !track.targeted) {
+      continue;
+    }
+    if (!includeTracksBelow && anchor_track >= 0 &&
+        static_cast<int>(track_index) != anchor_track) {
+      continue;
+    }
+    for (const auto& clip : track.clips) {
+      if (clip.timeline_range.contains(playhead) ||
+          clip.timeline_range.start >= playhead) {
+        if (anchor_track < 0) {
+          anchor_track = static_cast<int>(track_index);
+          anchor_start = clip.timeline_range.start;
+          anchor_id = clip.id;
+        }
+        break;
+      }
+    }
+    if (anchor_track >= 0 && !includeTracksBelow) {
+      break;
+    }
+  }
+  if (anchor_id.isNil()) {
+    window_.showTransientMessage(tr("No clip at or after the playhead on targeted tracks"));
+    return;
+  }
+  QStringList ids;
+  QString active;
+  for (std::size_t track_index = 0; track_index < sequence->tracks.size(); ++track_index) {
+    const auto& track = sequence->tracks[track_index];
+    if (track.locked) {
+      continue;
+    }
+    if (static_cast<int>(track_index) < anchor_track) {
+      continue;
+    }
+    if (!includeTracksBelow && static_cast<int>(track_index) != anchor_track) {
+      continue;
+    }
+    if (!track.targeted) {
+      continue;
+    }
+    for (const auto& clip : track.clips) {
+      if (static_cast<int>(track_index) == anchor_track && clip.timeline_range.start < anchor_start) {
+        continue;
+      }
+      ids.push_back(QString::fromStdString(clip.id.toString()));
+      if (active.isEmpty()) {
+        active = ids.back();
+      }
+    }
+  }
+  if (ids.isEmpty()) {
+    window_.showTransientMessage(tr("No clips to select forward"));
+    return;
+  }
+  setClipSelection(ids, active);
 }
 
 void EditorController::deleteSelectedClip(const bool ripple) {
