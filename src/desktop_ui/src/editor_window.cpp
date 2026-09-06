@@ -672,6 +672,9 @@ void EditorWindow::createActions() {
          QKeySequence{tr("Ctrl+Alt+V")});
   create(QStringLiteral("duplicateClips"), tr("Duplicate"),
          tr("Duplicate the selection at the playhead"), QKeySequence{tr("Ctrl+Shift+D")});
+  create(QStringLiteral("defaultTransition"), tr("Apply Default Transition"),
+         tr("Add a cross dissolve at the playhead or selected cuts"),
+         QKeySequence{tr("Ctrl+D")});
   create(QStringLiteral("pasteClipAttributes"), tr("Paste Attributes"),
          tr("Paste copied clip attributes onto the selection"),
          QKeySequence{tr("Ctrl+Alt+A")});
@@ -874,6 +877,8 @@ void EditorWindow::createActions() {
           &EditorWindow::pasteClipsOverwriteRequested);
   connect(action(QStringLiteral("duplicateClips")), &QAction::triggered, this,
           &EditorWindow::duplicateClipsRequested);
+  connect(action(QStringLiteral("defaultTransition")), &QAction::triggered, this,
+          &EditorWindow::defaultTransitionRequested);
   connect(action(QStringLiteral("pasteClipAttributes")), &QAction::triggered, this,
           &EditorWindow::pasteClipAttributesRequested);
   connect(action(QStringLiteral("replaceClipMedia")), &QAction::triggered, this,
@@ -1052,6 +1057,7 @@ void EditorWindow::createMenus() {
   timelineMenu->addAction(action(QStringLiteral("sourceRippleInsert")));
   timelineMenu->addAction(action(QStringLiteral("sourceOverwriteInsert")));
   timelineMenu->addSeparator();
+  timelineMenu->addAction(action(QStringLiteral("defaultTransition")));
   timelineMenu->addAction(action(QStringLiteral("zoomInTimeline")));
   timelineMenu->addAction(action(QStringLiteral("zoomOutTimeline")));
   timelineMenu->addAction(action(QStringLiteral("zoomFitTimeline")));

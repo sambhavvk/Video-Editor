@@ -130,6 +130,21 @@ void ProgramViewer::setSamplingFrameSize(const QSize& size) {
 
 void ProgramViewer::clearFrame() {
   frame_ = {};
+  compare_frame_ = {};
+  trim_compare_active_ = false;
+  update();
+}
+
+void ProgramViewer::setTrimCompareFrames(const QImage& outgoing, const QImage& incoming) {
+  frame_ = outgoing;
+  compare_frame_ = incoming;
+  trim_compare_active_ = !outgoing.isNull() || !incoming.isNull();
+  update();
+}
+
+void ProgramViewer::clearTrimCompareFrames() {
+  compare_frame_ = {};
+  trim_compare_active_ = false;
   update();
 }
 
@@ -332,14 +347,24 @@ void ProgramViewer::paintEvent(QPaintEvent* event) {
     if (!frame_.isNull()) {
       // A subtle checkerboard remains visible behind frames with transparency.
       constexpr int cell = 12;
-      for (int y = frameRect.top(); y <= frameRect.bottom(); y += cell) {
-        for (int x = frameRect.left(); x <= frameRect.right(); x += cell) {
-          painter.fillRect(QRect{x, y, cell, cell}, ((x / cell) + (y / cell)) % 2 == 0
-                                                        ? QColor{39, 41, 46}
-                                                        : QColor{29, 31, 35});
+      if (trim_compare_active_ && !compare_frame_.isNull()) {
+        const QRect leftRect = frameRect.adjusted(0, 0, -(frameRect.width() / 2), 0);
+        const QRect rightRect = frameRect.adjusted(frameRect.width() / 2, 0, 0, 0);
+        painter.drawImage(leftRect, frame_, frame_.rect());
+        painter.drawImage(rightRect, compare_frame_, compare_frame_.rect());
+        painter.setPen(QColor{226, 230, 237});
+        painter.drawText(leftRect.adjusted(8, 8, -8, -8), Qt::AlignLeft | Qt::AlignTop, tr("Out"));
+        painter.drawText(rightRect.adjusted(8, 8, -8, -8), Qt::AlignLeft | Qt::AlignTop, tr("In"));
+      } else {
+        for (int y = frameRect.top(); y <= frameRect.bottom(); y += cell) {
+          for (int x = frameRect.left(); x <= frameRect.right(); x += cell) {
+            painter.fillRect(QRect{x, y, cell, cell}, ((x / cell) + (y / cell)) % 2 == 0
+                                                          ? QColor{39, 41, 46}
+                                                          : QColor{29, 31, 35});
+          }
         }
+        painter.drawImage(frameRect, frame_, frame_.rect());
       }
-      painter.drawImage(frameRect, frame_, frame_.rect());
     } else if (!native_presented_) {
       const auto center = frameRect.center();
       QPainterPath play;

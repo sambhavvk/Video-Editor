@@ -308,6 +308,10 @@ private slots:
   void updateTransitionDuration(const QString& transitionId, qint64 duration);
   void removeTransition(const QString& transitionId);
   void changeTransitionPreset(const QString& transitionId, const QString& kind);
+  void applyDefaultTransition();
+  void updateTrimTwoUpPreview(const QStringList& clipIds, int editMode, qint64 startDelta,
+                              qint64 durationDelta);
+  void clearTrimTwoUpPreview();
   void setAudioTrackMuted(int trackIndex, bool muted);
   void setAudioTrackSolo(int trackIndex, bool soloed);
   void setAudioTrackGain(int trackIndex, double gainDb);
@@ -759,6 +763,7 @@ private:
   double source_playback_rate_{0.0};
   std::uint64_t source_preview_epoch_{0};
   std::uint64_t source_preview_serial_{0};
+  std::uint64_t trim_two_up_serial_{0};
   std::uint64_t source_presentation_count_{0};
   bool source_preview_in_flight_{false};
   QTimer source_playback_timer_;

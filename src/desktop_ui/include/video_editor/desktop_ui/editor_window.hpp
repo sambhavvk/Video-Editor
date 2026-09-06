@@ -170,6 +170,7 @@ signals:
   void toggleSnapRequested();
   void toggleFollowPlayheadRequested();
   void zoomToSelectionRequested();
+  void defaultTransitionRequested();
   void gotoTimecodeRequested();
   void toggleLoopPlaybackRequested();
   void playAroundRequested();

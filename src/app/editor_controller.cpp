@@ -1138,6 +1138,8 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
                                        action->isChecked());
     }
   });
+  connect(&window_, &desktop_ui::EditorWindow::defaultTransitionRequested, this,
+          &EditorController::applyDefaultTransition);
   connect(&window_, &desktop_ui::EditorWindow::zoomToSelectionRequested, this, [this] {
     window_.timeline()->zoomToSelection();
   });
@@ -1344,9 +1346,19 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
                  const desktop_ui::TimelineWidget::EditIntent intent,
                  const desktop_ui::TimelineSnapResult& snap) {
             Q_UNUSED(snap)
+            clearTrimTwoUpPreview();
             commitTimelineBatchEdit(clipIds, destinationTrackIndex, startDelta, durationDelta,
                                     static_cast<int>(mode), static_cast<int>(intent));
           });
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::clipBatchEditPreview, this,
+          [this](const QStringList& clipIds, const int, const qint64 startDelta,
+                 const qint64 durationDelta, const desktop_ui::TimelineWidget::EditMode mode,
+                 const desktop_ui::TimelineWidget::EditIntent,
+                 const desktop_ui::TimelineSnapResult&) {
+            updateTrimTwoUpPreview(clipIds, static_cast<int>(mode), startDelta, durationDelta);
+          });
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::clipBatchEditCanceled, this,
+          [this](const QStringList&) { clearTrimTwoUpPreview(); });
   connect(window_.timeline(), &desktop_ui::TimelineWidget::frameNudgeRequested, this,
           [this](const QStringList& clipIds, const int frameCount,
                  const desktop_ui::TimelineWidget::EditIntent intent) {
@@ -7109,6 +7121,142 @@ void EditorController::changeTransitionPreset(const QString& transitionId, const
       tr("Could not change the transition preset"));
 }
 
+void EditorController::applyDefaultTransition() {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    return;
+  }
+  const int frames =
+      windowSettings(window_).value(QStringLiteral("edit/defaultTransitionFrames"), 15).toInt();
+  const edit::Time transition_duration{
+      static_cast<std::int64_t>(std::max(1, frames)) *
+          static_cast<std::int64_t>(sequence->frame_rate.denominator()),
+      sequence->frame_rate.numerator()};
+  const edit::Time playhead = playheadTime();
+  std::vector<edit::EditCommand> commands;
+  const auto add_transition = [&](const edit::EntityId outgoing_id,
+                                    const edit::EntityId incoming_id) {
+    const edit::Clip* outgoing = edit::findClip(*sequence, outgoing_id);
+    const edit::Clip* incoming = edit::findClip(*sequence, incoming_id);
+    if (outgoing == nullptr || incoming == nullptr) {
+      return;
+    }
+    const edit::Time cut = outgoing->timeline_range.end();
+    edit::Transition transition;
+    transition.outgoing_clip_id = outgoing_id;
+    transition.incoming_clip_id = incoming_id;
+    transition.kind = edit::TransitionKind::CrossDissolve;
+    transition.enabled = true;
+    const edit::Time half_duration{transition_duration.value() / 2,
+                                   transition_duration.timescale()};
+    transition.range = edit::TimeRange(cut - half_duration, transition_duration);
+    commands.push_back(
+        {.operation = edit::AddTransitionCommand{.sequence_id = sequence->id,
+                                                 .transition = transition}});
+  };
+  for (const edit::Track& track : sequence->tracks) {
+    if (track.kind != edit::TrackKind::Video || track.locked || !track.targeted) {
+      continue;
+    }
+    for (std::size_t index = 0; index + 1 < track.clips.size(); ++index) {
+      const edit::Clip& outgoing = track.clips[index];
+      const edit::Clip& incoming = track.clips[index + 1];
+      if (outgoing.timeline_range.end() != playhead || incoming.timeline_range.start != playhead) {
+        continue;
+      }
+      add_transition(outgoing.id, incoming.id);
+    }
+  }
+  if (commands.empty()) {
+    window_.showTransientMessage(tr("No edit point at the playhead for a default transition"));
+    return;
+  }
+  (void)applyBatch(std::move(commands), tr("Could not add the default transition"));
+}
+
+void EditorController::clearTrimTwoUpPreview() {
+  window_.programViewer()->clearTrimCompareFrames();
+}
+
+void EditorController::updateTrimTwoUpPreview(const QStringList& clipIds, const int editMode,
+                                              const qint64 startDelta, const qint64 durationDelta) {
+  using desktop_ui::TimelineWidget;
+  const auto mode = static_cast<TimelineWidget::EditMode>(editMode);
+  if (mode != TimelineWidget::EditMode::TrimIn && mode != TimelineWidget::EditMode::TrimOut &&
+      mode != TimelineWidget::EditMode::Roll) {
+    clearTrimTwoUpPreview();
+    return;
+  }
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || clipIds.isEmpty() || frame_provider_ == nullptr) {
+    return;
+  }
+  const auto parsed = parseId(clipIds.front());
+  if (!parsed.has_value()) {
+    return;
+  }
+  const edit::Clip* primary = edit::findClip(*sequence, *parsed);
+  if (primary == nullptr) {
+    return;
+  }
+  const edit::Clip* outgoing = primary;
+  const edit::Clip* incoming = primary;
+  if (mode == TimelineWidget::EditMode::Roll) {
+    for (const edit::Track& track : sequence->tracks) {
+      for (std::size_t index = 0; index + 1 < track.clips.size(); ++index) {
+        if (track.clips[index].id == *parsed) {
+          outgoing = &track.clips[index];
+          incoming = &track.clips[index + 1];
+          break;
+        }
+        if (track.clips[index + 1].id == *parsed) {
+          outgoing = &track.clips[index];
+          incoming = &track.clips[index + 1];
+          break;
+        }
+      }
+    }
+  }
+  const qint64 outgoing_end =
+      timelineValue(outgoing->timeline_range.start + outgoing->timeline_range.duration) +
+      (outgoing->id == *parsed ? durationDelta : 0);
+  const qint64 incoming_start =
+      timelineValue(incoming->timeline_range.start) +
+      (incoming->id == *parsed ? startDelta : 0);
+  const edit::Time outgoing_time = timelineTime(std::max<qint64>(0, outgoing_end - 1));
+  const edit::Time incoming_time = timelineTime(incoming_start);
+  const edit::Time outgoing_source = edit::sourceTimeAtTimelineTime(*outgoing, outgoing_time);
+  const edit::Time incoming_source = edit::sourceTimeAtTimelineTime(*incoming, incoming_time);
+  const std::uint64_t serial = ++trim_two_up_serial_;
+  const auto provider = frame_provider_;
+  QtConcurrent::run([this, provider, outgoing = *outgoing, incoming = *incoming, outgoing_source,
+                     incoming_source, serial]() {
+    const auto fetch = [&](const edit::Clip& clip, const edit::Time source_time) -> QImage {
+      const auto result = provider->request({.asset_id = clip.asset_id,
+                                             .source_time = source_time,
+                                             .preferred_width = 0,
+                                             .preferred_height = 0,
+                                             .permit_proxy = true,
+                                             .request_epoch = 0});
+      if (!result || !result.value) {
+        return {};
+      }
+      return EditorController::displayImage(**result.value);
+    };
+    const QImage out_image = fetch(outgoing, outgoing_source);
+    const QImage in_image = fetch(incoming, incoming_source);
+    QMetaObject::invokeMethod(
+        this,
+        [this, serial, out_image, in_image]() {
+          if (serial != trim_two_up_serial_) {
+            return;
+          }
+          window_.programViewer()->setTrimCompareFrames(out_image, in_image);
+        },
+        Qt::QueuedConnection);
+  });
+}
+
 void EditorController::setAudioTrackMuted(const int trackIndex, const bool muted) {
   const edit::Sequence* sequence = currentSequence();
   if (sequence == nullptr || trackIndex < 0) {
@@ -8239,6 +8387,37 @@ void EditorController::refreshTimelineView() {
                                            static_cast<qint64>(timeline_time_scale_) * 10);
   window_.setTimelineView(duration, timeline_time_scale_, std::move(tracks), std::move(clips),
                           std::move(markers), std::move(gaps));
+  QVector<desktop_ui::TransitionView> transitions;
+  transitions.reserve(static_cast<qsizetype>(sequence->transitions.size()));
+  track_index = 0;
+  for (const auto& transition : sequence->transitions) {
+    int transition_track = -1;
+    for (std::size_t index = 0; index < sequence->tracks.size(); ++index) {
+      for (const auto& clip : sequence->tracks[index].clips) {
+        if (clip.id == transition.outgoing_clip_id) {
+          transition_track = static_cast<int>(index);
+          break;
+        }
+      }
+      if (transition_track >= 0) {
+        break;
+      }
+    }
+    const QString kind = transition.kind == edit::TransitionKind::DipToBlack
+                             ? QStringLiteral("dip_to_black")
+                             : QStringLiteral("cross_dissolve");
+    transitions.push_back({
+        .id = QString::fromStdString(transition.id.toString()),
+        .outgoingClipId = QString::fromStdString(transition.outgoing_clip_id.toString()),
+        .incomingClipId = QString::fromStdString(transition.incoming_clip_id.toString()),
+        .start = timelineValue(transition.range.start),
+        .duration = timelineValue(transition.range.duration),
+        .trackIndex = transition_track,
+        .kind = kind,
+        .selected = selected_transition_id_.has_value() && transition.id == *selected_transition_id_,
+    });
+  }
+  window_.timeline()->setTransitions(transitions);
   refreshSequenceTabs();
   window_.timeline()->setSnapResolver([this](const desktop_ui::TimelineSnapRequest& request) {
     const edit::Sequence* current = currentSequence();

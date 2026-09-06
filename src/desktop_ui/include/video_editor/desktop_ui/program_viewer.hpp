@@ -61,6 +61,8 @@ public slots:
   void setFrame(const QImage& frame);
   void setSamplingFrameSize(const QSize& size);
   void clearFrame();
+  void setTrimCompareFrames(const QImage& outgoing, const QImage& incoming);
+  void clearTrimCompareFrames();
   void setTimecode(const QString& timecode);
   void setTitle(const QString& title);
   void setSafeGuidesVisible(bool visible);
@@ -112,6 +114,8 @@ private:
   void teardownNativePresentation();
 
   QImage frame_;
+  QImage compare_frame_;
+  bool trim_compare_active_{false};
   QSize sampling_frame_size_{16, 9};
   QString timecode_{QStringLiteral("00:00:00:00")};
   QString title_{QStringLiteral("Program")};
