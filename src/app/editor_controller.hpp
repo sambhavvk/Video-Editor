@@ -260,6 +260,7 @@ private slots:
   void toggleLinkedSelection();
   void unlinkSelectedClips();
   void setClipEnabledFromTimeline(const QString& clipId, bool enabled);
+  void updateClipFadeFromTimeline(const QString& clipId, qint64 fadeIn, qint64 fadeOut);
   void deleteSelectedClip(bool ripple);
   void undo();
   void redo();

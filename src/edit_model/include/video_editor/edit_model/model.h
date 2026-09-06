@@ -161,6 +161,7 @@ struct Clip final {
   std::optional<Title> title;
   std::optional<EntityId> nested_sequence_id;
   bool enabled{true};
+  std::optional<ColorRgba> label_color;
   friend bool operator==(const Clip&, const Clip&) = default;
 };
 

@@ -525,6 +525,32 @@ QColor colorForTrack(const edit::TrackKind kind, const std::size_t index) {
   return QColor::fromHsv(static_cast<int>((205U + (index * 19U)) % 360U), 135, 185);
 }
 
+QColor colorForClip(const edit::Clip& clip, const edit::TrackKind kind, const std::size_t index) {
+  if (clip.label_color.has_value()) {
+    const auto& color = *clip.label_color;
+    return QColor::fromRgbF(static_cast<float>(color.red), static_cast<float>(color.green),
+                           static_cast<float>(color.blue), static_cast<float>(color.alpha));
+  }
+  return colorForTrack(kind, index);
+}
+
+QString speedBadgeForClip(const edit::Clip& clip) {
+  if (clip.reversed) {
+    return QStringLiteral("REV");
+  }
+  if (clip.playback_rate.numerator() != clip.playback_rate.denominator()) {
+    const double rate = static_cast<double>(clip.playback_rate.numerator()) /
+                        static_cast<double>(clip.playback_rate.denominator());
+    return QStringLiteral("%1x").arg(rate, 0, 'g', 3);
+  }
+  return {};
+}
+
+bool clipHasVisibleEffects(const edit::Clip& clip) {
+  return std::any_of(clip.effects.begin(), clip.effects.end(),
+                     [](const edit::Effect& effect) { return effect.enabled; });
+}
+
 desktop_ui::TrackKind uiTrackKind(const edit::TrackKind kind) {
   switch (kind) {
   case edit::TrackKind::Audio:
@@ -1091,6 +1117,30 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           });
   connect(window_.timeline(), &desktop_ui::TimelineWidget::clipEnabledToggledRequested, this,
           &EditorController::setClipEnabledFromTimeline);
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::clipFadeEdited, this,
+          &EditorController::updateClipFadeFromTimeline);
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::followPlayheadDisabled, this, [this] {
+    if (auto* action = window_.action(QStringLiteral("toggleFollowPlayhead"))) {
+      action->setChecked(false);
+    }
+    windowSettings(window_).setValue(QStringLiteral("timeline/followPlayhead"), false);
+  });
+  connect(&window_, &desktop_ui::EditorWindow::toggleSnapRequested, this, [this] {
+    if (auto* action = window_.action(QStringLiteral("toggleSnap"))) {
+      window_.timeline()->setSnapEnabled(action->isChecked());
+      windowSettings(window_).setValue(QStringLiteral("timeline/snapEnabled"), action->isChecked());
+    }
+  });
+  connect(&window_, &desktop_ui::EditorWindow::toggleFollowPlayheadRequested, this, [this] {
+    if (auto* action = window_.action(QStringLiteral("toggleFollowPlayhead"))) {
+      window_.timeline()->setFollowPlayheadEnabled(action->isChecked());
+      windowSettings(window_).setValue(QStringLiteral("timeline/followPlayhead"),
+                                       action->isChecked());
+    }
+  });
+  connect(&window_, &desktop_ui::EditorWindow::zoomToSelectionRequested, this, [this] {
+    window_.timeline()->zoomToSelection();
+  });
   connect(&window_, &desktop_ui::EditorWindow::toggleLinkedSelectionRequested, this,
           &EditorController::toggleLinkedSelection);
   connect(&window_, &desktop_ui::EditorWindow::unlinkClipsRequested, this,
@@ -1578,6 +1628,17 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
 #endif
   newProject();
   refreshRecentProjectsMenu();
+  QSettings& settings = windowSettings(window_);
+  if (auto* snap = window_.action(QStringLiteral("toggleSnap"))) {
+    const bool enabled = settings.value(QStringLiteral("timeline/snapEnabled"), true).toBool();
+    snap->setChecked(enabled);
+    window_.timeline()->setSnapEnabled(enabled);
+  }
+  if (auto* follow = window_.action(QStringLiteral("toggleFollowPlayhead"))) {
+    const bool enabled = settings.value(QStringLiteral("timeline/followPlayhead"), true).toBool();
+    follow->setChecked(enabled);
+    window_.timeline()->setFollowPlayheadEnabled(enabled);
+  }
 }
 
 EditorController::~EditorController() {
@@ -4322,6 +4383,27 @@ void EditorController::setClipEnabledFromTimeline(const QString& clipIdText, con
                                                         .clip_id = *clip_id,
                                                         .enabled = enabled}},
              enabled ? tr("Could not enable the clip") : tr("Could not disable the clip"));
+}
+
+void EditorController::updateClipFadeFromTimeline(const QString& clipIdText, const qint64 fadeIn,
+                                                  const qint64 fadeOut) {
+  const edit::Sequence* sequence = currentSequence();
+  const auto clip_id = parseId(clipIdText);
+  if (sequence == nullptr || !clip_id.has_value()) {
+    return;
+  }
+  const edit::Clip* clip = edit::findClip(*sequence, *clip_id);
+  if (clip == nullptr) {
+    return;
+  }
+  (void)apply({.operation = edit::SetClipAudioPropertiesCommand{
+                   .sequence_id = sequence->id,
+                   .clip_id = *clip_id,
+                   .gain_db = clip->audio_gain_db,
+                   .pan = clip->audio_pan,
+                   .fade_in = timelineTime(fadeIn),
+                   .fade_out = timelineTime(fadeOut)}},
+             tr("Could not update clip fades"));
 }
 
 void EditorController::gotoTimecode() {
@@ -8109,11 +8191,15 @@ void EditorController::refreshTimelineView() {
           .trackIndex = static_cast<int>(track_index),
           .start = timelineValue(clip.timeline_range.start),
           .duration = std::max<qint64>(1, timelineValue(clip.timeline_range.duration)),
-          .color = colorForTrack(track.kind, track_index),
+          .color = colorForClip(clip, track.kind, track_index),
           .selected = selected_clip_ids_.contains(clip.id),
           .offline = record == nullptr || record->availability == assets::AssetAvailability::Missing,
           .proxy = record != nullptr && record->proxy.has_value() && record->proxy->complete,
           .enabled = clip.enabled,
+          .hasEffects = clipHasVisibleEffects(clip),
+          .speedBadge = speedBadgeForClip(clip),
+          .fadeIn = timelineValue(clip.fade_in),
+          .fadeOut = timelineValue(clip.fade_out),
           .waveform = waveform == media_waveforms_.end()
                           ? QVector<desktop_ui::WaveformBucketView>{}
                           : waveform->second,

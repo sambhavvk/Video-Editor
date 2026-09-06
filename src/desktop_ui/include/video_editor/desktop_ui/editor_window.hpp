@@ -167,6 +167,9 @@ signals:
   void toggleLinkedSelectionRequested();
   void unlinkClipsRequested();
   void setClipEnabledRequested(bool enabled);
+  void toggleSnapRequested();
+  void toggleFollowPlayheadRequested();
+  void zoomToSelectionRequested();
   void gotoTimecodeRequested();
   void toggleLoopPlaybackRequested();
   void playAroundRequested();

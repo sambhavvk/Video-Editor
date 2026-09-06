@@ -182,6 +182,10 @@ struct TimelineClipView {
   bool offline{false};
   bool proxy{false};
   bool enabled{true};
+  bool hasEffects{false};
+  QString speedBadge;
+  qint64 fadeIn{0};
+  qint64 fadeOut{0};
   QVector<WaveformBucketView> waveform;
 };
 

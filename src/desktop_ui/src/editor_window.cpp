@@ -735,6 +735,17 @@ void EditorWindow::createActions() {
          tr("Decrease timeline magnification"), QKeySequence::ZoomOut);
   create(QStringLiteral("zoomFitTimeline"), tr("Fit Timeline"),
          tr("Fit the sequence in the timeline"), QKeySequence{tr("Shift+Z")});
+  create(QStringLiteral("zoomToSelection"), tr("Zoom to Selection"),
+         tr("Magnify the timeline to the selected clips"));
+  auto* toggleSnap = create(QStringLiteral("toggleSnap"), tr("Snap"),
+                            tr("Snap edits to edit points and markers"), QKeySequence{Qt::Key_S});
+  toggleSnap->setCheckable(true);
+  toggleSnap->setChecked(true);
+  auto* toggleFollowPlayhead =
+      create(QStringLiteral("toggleFollowPlayhead"), tr("Follow Playhead"),
+             tr("Keep the playhead visible while scrubbing"), QKeySequence{tr("Ctrl+Shift+F")});
+  toggleFollowPlayhead->setCheckable(true);
+  toggleFollowPlayhead->setChecked(true);
 
   auto* timelineToolGroup = new QActionGroup(this);
   timelineToolGroup->setExclusive(true);
@@ -875,6 +886,10 @@ void EditorWindow::createActions() {
           [this] { emit setClipEnabledRequested(false); });
   connect(action(QStringLiteral("enableClip")), &QAction::triggered, this,
           [this] { emit setClipEnabledRequested(true); });
+  connect(action(QStringLiteral("toggleSnap")), &QAction::triggered, this,
+          &EditorWindow::toggleSnapRequested);
+  connect(action(QStringLiteral("toggleFollowPlayhead")), &QAction::triggered, this,
+          &EditorWindow::toggleFollowPlayheadRequested);
   connect(action(QStringLiteral("gotoTimecode")), &QAction::triggered, this,
           &EditorWindow::gotoTimecodeRequested);
   connect(action(QStringLiteral("toggleLoopPlayback")), &QAction::triggered, this,
@@ -1040,6 +1055,9 @@ void EditorWindow::createMenus() {
   timelineMenu->addAction(action(QStringLiteral("zoomInTimeline")));
   timelineMenu->addAction(action(QStringLiteral("zoomOutTimeline")));
   timelineMenu->addAction(action(QStringLiteral("zoomFitTimeline")));
+  timelineMenu->addAction(action(QStringLiteral("zoomToSelection")));
+  timelineMenu->addAction(action(QStringLiteral("toggleSnap")));
+  timelineMenu->addAction(action(QStringLiteral("toggleFollowPlayhead")));
   timelineMenu->addSeparator();
   timelineMenu->addAction(action(QStringLiteral("nestSelectedClips")));
   timelineMenu->addSeparator();
@@ -1257,6 +1275,8 @@ void EditorWindow::connectControllerSurface() {
           &TimelineWidget::zoomOut);
   connect(action(QStringLiteral("zoomFitTimeline")), &QAction::triggered, timeline_,
           &TimelineWidget::zoomToFit);
+  connect(action(QStringLiteral("zoomToSelection")), &QAction::triggered, this,
+          &EditorWindow::zoomToSelectionRequested);
   const auto bindTool = [this](const char* actionId, TimelineWidget::ToolMode mode) {
     connect(action(QString::fromLatin1(actionId)), &QAction::triggered, this,
             [this, mode] { timeline_->setToolMode(mode); });

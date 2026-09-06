@@ -140,6 +140,15 @@ public slots:
   void zoomIn();
   void zoomOut();
   void zoomToFit();
+  void zoomToSelection();
+  void setSnapEnabled(bool enabled);
+  [[nodiscard]] bool snapEnabled() const noexcept {
+    return snap_enabled_;
+  }
+  void setFollowPlayheadEnabled(bool enabled);
+  [[nodiscard]] bool followPlayheadEnabled() const noexcept {
+    return follow_playhead_enabled_;
+  }
   void setSnapThresholdPixels(int threshold);
   void setFrameRate(quint32 numerator, quint32 denominator);
   void setToolMode(ToolMode mode);
@@ -158,6 +167,8 @@ signals:
   void clipReplaceMediaRequested(const QString& clipId);
   void clipUnlinkRequested(const QString& clipId);
   void clipEnabledToggledRequested(const QString& clipId, bool enabled);
+  void clipFadeEdited(const QString& clipId, qint64 fadeIn, qint64 fadeOut);
+  void followPlayheadDisabled();
   void playheadChanged(qint64 position);
   void zoomChanged(double pixelsPerSecond);
   // Deltas use the widget's exact integer time scale. Control requests a ripple
@@ -260,6 +271,11 @@ private:
   int visible_clip_count_{0};
   bool dragging_playhead_{false};
   int snap_threshold_pixels_{8};
+  bool snap_enabled_{true};
+  bool follow_playhead_enabled_{true};
+  bool marquee_active_{false};
+  QPoint marquee_origin_;
+  QRect marquee_rect_;
   int trim_handle_pixels_{7};
   int auto_scroll_margin_{28};
   quint32 frame_rate_numerator_{30};
@@ -292,6 +308,12 @@ private:
     bool rollCutAtStart{false};
     qint64 rollMinimumDelta{0};
     qint64 rollMaximumDelta{0};
+    bool editingFade{false};
+    bool fadeInEdge{true};
+    qint64 originalFadeIn{0};
+    qint64 originalFadeOut{0};
+    qint64 targetFadeIn{0};
+    qint64 targetFadeOut{0};
   };
   ClipGesture clip_gesture_;
 
