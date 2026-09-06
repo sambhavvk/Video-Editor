@@ -85,6 +85,7 @@ Accepted decisions live in [`architecture/`](architecture/):
 18. [Professional track audio, DSP, meters, and normalization](architecture/0017-professional-audio-workflow.md)
 19. [Local transcription, timed captions, and reviewable proposals](architecture/0018-local-transcription-and-caption-proposals.md)
 20. [OTIO JSON interchange (P1)](architecture/0021-otio-interchange.md)
+21. [Agent edit-command JSON protocol (P1)](architecture/0022-agent-edit-protocol.md)
 
 Source code and documentation in this repository use MPL-2.0. Third-party libraries and media
 fixtures retain their own licenses; see the repository's `THIRD_PARTY.md` and fixture manifests.

@@ -2772,6 +2772,121 @@ std::string commandName(const EditCommand& command) {
       command.operation);
 }
 
+std::string commandType(const EditCommand& command) {
+  return std::visit(
+      [](const auto& operation) -> std::string {
+        using T = std::decay_t<decltype(operation)>;
+        if constexpr (std::is_same_v<T, AddAssetCommand>)
+          return "add_asset";
+        if constexpr (std::is_same_v<T, RemoveAssetCommand>)
+          return "remove_asset";
+        if constexpr (std::is_same_v<T, RelinkAssetCommand>)
+          return "relink_asset";
+        if constexpr (std::is_same_v<T, AddSequenceCommand>)
+          return "add_sequence";
+        if constexpr (std::is_same_v<T, RemoveSequenceCommand>)
+          return "remove_sequence";
+        if constexpr (std::is_same_v<T, SetSequenceFormatCommand>)
+          return "set_sequence_format";
+        if constexpr (std::is_same_v<T, AddTrackCommand>)
+          return "add_track";
+        if constexpr (std::is_same_v<T, RemoveTrackCommand>)
+          return "remove_track";
+        if constexpr (std::is_same_v<T, RenameTrackCommand>)
+          return "rename_track";
+        if constexpr (std::is_same_v<T, ReorderTrackCommand>)
+          return "reorder_track";
+        if constexpr (std::is_same_v<T, SetTrackLockedCommand>)
+          return "set_track_locked";
+        if constexpr (std::is_same_v<T, SetTrackVisibilityCommand>)
+          return "set_track_visibility";
+        if constexpr (std::is_same_v<T, SetTrackTargetedCommand>)
+          return "set_track_targeted";
+        if constexpr (std::is_same_v<T, InsertClipCommand>)
+          return "insert_clip";
+        if constexpr (std::is_same_v<T, MoveClipCommand>)
+          return "move_clip";
+        if constexpr (std::is_same_v<T, TrimClipCommand>)
+          return "trim_clip";
+        if constexpr (std::is_same_v<T, SplitClipCommand>)
+          return "split_clip";
+        if constexpr (std::is_same_v<T, RemoveClipCommand>)
+          return "remove_clip";
+        if constexpr (std::is_same_v<T, RollEditCommand>)
+          return "roll_edit";
+        if constexpr (std::is_same_v<T, SlipClipCommand>)
+          return "slip_clip";
+        if constexpr (std::is_same_v<T, SlideClipCommand>)
+          return "slide_clip";
+        if constexpr (std::is_same_v<T, CloseGapCommand>)
+          return "close_gap";
+        if constexpr (std::is_same_v<T, AddMarkerCommand>)
+          return "add_marker";
+        if constexpr (std::is_same_v<T, UpdateMarkerCommand>)
+          return "update_marker";
+        if constexpr (std::is_same_v<T, RemoveMarkerCommand>)
+          return "remove_marker";
+        if constexpr (std::is_same_v<T, AddCaptionCommand>)
+          return "add_caption";
+        if constexpr (std::is_same_v<T, UpdateCaptionCommand>)
+          return "update_caption";
+        if constexpr (std::is_same_v<T, RemoveCaptionCommand>)
+          return "remove_caption";
+        if constexpr (std::is_same_v<T, ApplyCaptionChangeSetCommand>)
+          return "apply_caption_change_set";
+        if constexpr (std::is_same_v<T, ApplyTimelineCutChangeSetCommand>)
+          return "apply_timeline_cut_change_set";
+        if constexpr (std::is_same_v<T, AddClipEffectCommand>)
+          return "add_clip_effect";
+        if constexpr (std::is_same_v<T, RemoveClipEffectCommand>)
+          return "remove_clip_effect";
+        if constexpr (std::is_same_v<T, SetClipEffectParameterCommand>)
+          return "set_clip_effect_parameter";
+        if constexpr (std::is_same_v<T, SetClipTransformCommand>)
+          return "set_clip_transform";
+        if constexpr (std::is_same_v<T, SetClipBlendModeCommand>)
+          return "set_clip_blend_mode";
+        if constexpr (std::is_same_v<T, SetClipAudioPropertiesCommand>)
+          return "set_clip_audio_properties";
+        if constexpr (std::is_same_v<T, SetTrackAudioStateCommand>)
+          return "set_track_audio_state";
+        if constexpr (std::is_same_v<T, SetTrackAudioMixCommand>)
+          return "set_track_audio_mix";
+        if constexpr (std::is_same_v<T, AddTrackEffectCommand>)
+          return "add_track_effect";
+        if constexpr (std::is_same_v<T, RemoveTrackEffectCommand>)
+          return "remove_track_effect";
+        if constexpr (std::is_same_v<T, SetTrackEffectParameterCommand>)
+          return "set_track_effect_parameter";
+        if constexpr (std::is_same_v<T, SetClipTitleCommand>)
+          return "set_clip_title";
+        if constexpr (std::is_same_v<T, SetClipSpeedCommand>)
+          return "set_clip_speed";
+        if constexpr (std::is_same_v<T, AddTransitionCommand>)
+          return "add_transition";
+        if constexpr (std::is_same_v<T, UpdateTransitionCommand>)
+          return "update_transition";
+        if constexpr (std::is_same_v<T, RemoveTransitionCommand>)
+          return "remove_transition";
+        if constexpr (std::is_same_v<T, CreateBinCommand>)
+          return "create_bin";
+        if constexpr (std::is_same_v<T, RenameBinCommand>)
+          return "rename_bin";
+        if constexpr (std::is_same_v<T, MoveBinCommand>)
+          return "move_bin";
+        if constexpr (std::is_same_v<T, RemoveBinCommand>)
+          return "remove_bin";
+        if constexpr (std::is_same_v<T, SetAssetBinCommand>)
+          return "set_asset_bin";
+        if constexpr (std::is_same_v<T, SetAssetMetadataCommand>)
+          return "set_asset_metadata";
+        if constexpr (std::is_same_v<T, SetSmartQueryCommand>)
+          return "set_smart_query";
+        return "unknown";
+      },
+      command.operation);
+}
+
 TimelineSnapshot::TimelineSnapshot(Revision revision, std::shared_ptr<const Project> project,
                                    EntityId sequence_id)
     : revision_(revision), project_(std::move(project)), sequence_id_(sequence_id) {}

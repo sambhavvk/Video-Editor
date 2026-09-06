@@ -8,6 +8,10 @@ if(TARGET video_editor_interchange AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/inter
   add_subdirectory(interchange)
 endif()
 
+if(TARGET video_editor_agent_protocol AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/agent_protocol/CMakeLists.txt")
+  add_subdirectory(agent_protocol)
+endif()
+
 if(TARGET video_editor_caption_service AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/caption_service/CMakeLists.txt")
   add_subdirectory(caption_service)
 endif()
@@ -66,6 +70,10 @@ endif()
 
 if(TARGET video_editor_worker_dispatch AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/workers/CMakeLists.txt")
   add_subdirectory(workers)
+endif()
+
+if(TARGET video_editor_agent_host_lib AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/agent_host/CMakeLists.txt")
+  add_subdirectory(agent_host)
 endif()
 
 if(TARGET video_editor_desktop_ui AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/desktop_ui/CMakeLists.txt")

@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://video-editor.local/schema/edit-command.v1.json",
+  "title": "VideoEditor EditCommand v1",
+  "description": "Agent wire format for edit::EditCommand. Uses commandType() snake_case ids, not commandName() UI labels.",
+  "type": "object",
+  "required": ["type"],
+  "properties": {
+    "type": {
+      "type": "string",
+      "enum": [
+        "add_asset",
+        "remove_asset",
+        "relink_asset",
+        "add_sequence",
+        "remove_sequence",
+        "set_sequence_format",
+        "add_track",
+        "remove_track",
+        "rename_track",
+        "reorder_track",
+        "set_track_locked",
+        "set_track_visibility",
+        "set_track_targeted",
+        "insert_clip",
+        "move_clip",
+        "trim_clip",
+        "split_clip",
+        "remove_clip",
+        "close_gap",
+        "roll_edit",
+        "slip_clip",
+        "slide_clip",
+        "add_marker",
+        "update_marker",
+        "remove_marker",
+        "add_caption",
+        "update_caption",
+        "remove_caption",
+        "apply_caption_change_set",
+        "apply_timeline_cut_change_set",
+        "add_clip_effect",
+        "remove_clip_effect",
+        "set_clip_effect_parameter",
+        "set_clip_transform",
+        "set_clip_blend_mode",
+        "set_clip_audio_properties",
+        "set_clip_title",
+        "set_clip_speed",
+        "set_track_audio_state",
+        "set_track_audio_mix",
+        "add_track_effect",
+        "remove_track_effect",
+        "set_track_effect_parameter",
+        "add_transition",
+        "update_transition",
+        "remove_transition",
+        "create_bin",
+        "rename_bin",
+        "move_bin",
+        "remove_bin",
+        "set_asset_bin",
+        "set_asset_metadata",
+        "set_smart_query"
+      ]
+    },
+    "coalescing_key": {
+      "type": "string",
+      "description": "Adjacent commands with the same non-empty key collapse into one undo step."
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "time": {
+      "type": "object",
+      "required": ["value", "timescale"],
+      "properties": {
+        "value": { "type": "integer" },
+        "timescale": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "rate": {
+      "type": "object",
+      "required": ["numerator", "denominator"],
+      "properties": {
+        "numerator": { "type": "integer", "minimum": 1 },
+        "denominator": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "entity_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "RFC 4122 UUID string. Omitted or nil ids on new entities are generated on decode."
+    },
+    "effect_value": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "enum": ["int64", "double", "bool", "string", "time", "vec2", "color"]
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

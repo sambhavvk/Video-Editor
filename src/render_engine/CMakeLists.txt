@@ -97,6 +97,7 @@ endif()
 add_library(video_editor_render_engine
   src/bitmap_glyphs.cpp
   src/color_curves.cpp
+  src/cpu_frame_encode.cpp
   src/cpu_renderer.cpp
   src/text_shaper.cpp
   src/frame.cpp

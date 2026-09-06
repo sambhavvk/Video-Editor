@@ -45,6 +45,7 @@ endif()
 
 add_subdirectory(src/edit_model)
 add_subdirectory(src/interchange)
+add_subdirectory(src/agent_protocol)
 add_subdirectory(src/project_codec)
 add_subdirectory(src/project_store)
 
@@ -73,6 +74,10 @@ endif()
 
 if(VIDEO_EDITOR_BUILD_WORKERS)
   add_subdirectory(src/workers)
+endif()
+
+if(VIDEO_EDITOR_BUILD_MEDIA)
+  add_subdirectory(src/agent_host)
 endif()
 
 if(VIDEO_EDITOR_BUILD_TESTS)

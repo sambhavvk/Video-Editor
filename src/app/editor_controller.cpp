@@ -5,6 +5,7 @@
 #include "session_event_log.hpp"
 #include "worker_host_session.hpp"
 
+#include "video_editor/asset_service/edit_asset.h"
 #include "video_editor/audio_engine/async_realtime_playback.h"
 #include "video_editor/audio_engine/miniaudio_output_device.h"
 #include "video_editor/audio_engine/output_latency_calibration.h"
@@ -35,6 +36,7 @@
 #include "video_editor/project_codec/project_codec.h"
 #include "video_editor/project_store/project_store.hpp"
 #include "video_editor/proxy_service/proxy_service.h"
+#include "video_editor/render_engine/cpu_frame_encode.h"
 #include "video_editor/render_engine/cpu_renderer.h"
 #include "video_editor/render_engine/frame.h"
 #include "video_editor/render_engine/gpu_backend.h"
@@ -79,6 +81,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <limits>
 #include <numeric>
@@ -2850,49 +2853,8 @@ void EditorController::importPaths(const QStringList& paths) {
 }
 
 void EditorController::addImportedAsset(assets::AssetRecord asset) {
-  edit::Asset model_asset;
-  const auto parsed_id = edit::EntityId::parse(asset.id);
-  model_asset.id = parsed_id.value_or(edit::EntityId::generate());
+  edit::Asset model_asset = assets::asset_from_record(asset);
   asset.id = model_asset.id.toString();
-  model_asset.name = utf8StringFromPath(asset.uri.filename());
-  model_asset.source_uri = utf8StringFromPath(asset.uri);
-  model_asset.fingerprint = asset.fingerprint.quick_sha256;
-  if (asset.descriptor.duration_microseconds.has_value() &&
-      *asset.descriptor.duration_microseconds > 0) {
-    model_asset.duration = edit::Time(*asset.descriptor.duration_microseconds, 1'000'000);
-  } else {
-    model_asset.duration = edit::Time(5, 1);
-  }
-  model_asset.metadata["container"] = asset.descriptor.format_name;
-  if (asset.descriptor.format_name == "image2-sequence") {
-    model_asset.metadata["media_kind"] = "image_sequence";
-  } else if (model_asset.duration == edit::Time(5, 1) &&
-             (asset.descriptor.format_name.find("image") != std::string::npos ||
-              asset.descriptor.format_name.find("png") != std::string::npos ||
-              asset.descriptor.format_name.find("jpeg") != std::string::npos ||
-              asset.descriptor.format_name.find("pipe") != std::string::npos)) {
-    model_asset.metadata["media_kind"] = "still";
-  }
-  for (const auto& stream : asset.descriptor.streams) {
-    if (stream.video.has_value() && !model_asset.has_video) {
-      model_asset.has_video = true;
-      model_asset.width = static_cast<std::uint32_t>(std::max(stream.video->width, 0));
-      model_asset.height = static_cast<std::uint32_t>(std::max(stream.video->height, 0));
-      model_asset.metadata["video_codec"] = stream.codec_name;
-      if (stream.video->average_frame_rate.numerator > 0 &&
-          stream.video->average_frame_rate.denominator > 0) {
-        model_asset.nominal_frame_rate =
-            edit::Rate(static_cast<std::uint32_t>(stream.video->average_frame_rate.numerator),
-                       static_cast<std::uint32_t>(stream.video->average_frame_rate.denominator));
-      }
-    }
-    if (stream.audio.has_value() && !model_asset.has_audio) {
-      model_asset.has_audio = true;
-      model_asset.audio_sample_rate = static_cast<std::uint32_t>(stream.audio->sample_rate);
-      model_asset.audio_channels = static_cast<std::uint32_t>(stream.audio->channels);
-      model_asset.metadata["audio_codec"] = stream.codec_name;
-    }
-  }
   if (apply(edit::EditCommand{.operation = edit::AddAssetCommand{.asset = model_asset},
                               .coalescing_key = {}},
             tr("Could not add imported media"))) {
@@ -8364,27 +8326,28 @@ void EditorController::updateProgramOutputViewer(const PreviewOutcome& outcome) 
 }
 
 QImage EditorController::displayImage(const render::CpuFrame& frame) {
-  QImage image(frame.width(), frame.height(), QImage::Format_RGBA8888);
+  const render::Rgba8Image encoded = render::cpu_frame_to_rgba8(frame);
+  if (encoded.width <= 0 || encoded.height <= 0 || encoded.pixels.empty()) {
+    return {};
+  }
+  QImage image(encoded.width, encoded.height, QImage::Format_RGBA8888);
   if (image.isNull()) {
     return {};
   }
-  const auto encode = [](float linear) {
-    linear = std::max(0.0F, linear);
-    const float encoded =
-        linear <= 0.0031308F ? linear * 12.92F : (1.055F * std::pow(linear, 1.0F / 2.4F)) - 0.055F;
-    return static_cast<uchar>(std::lround(std::clamp(encoded, 0.0F, 1.0F) * 255.0F));
-  };
-  for (int y = 0; y < frame.height(); ++y) {
-    uchar* output = image.scanLine(y);
-    for (int x = 0; x < frame.width(); ++x) {
-      const auto pixel = frame.pixel(x, y);
-      const float alpha = std::clamp(pixel[3], 0.0F, 1.0F);
-      const float inverse_alpha = alpha > 0.0F ? 1.0F / alpha : 0.0F;
-      output[(x * 4) + 0] = encode(pixel[0] * inverse_alpha);
-      output[(x * 4) + 1] = encode(pixel[1] * inverse_alpha);
-      output[(x * 4) + 2] = encode(pixel[2] * inverse_alpha);
-      output[(x * 4) + 3] = static_cast<uchar>(std::lround(alpha * 255.0F));
-    }
+  const auto expected_size =
+      static_cast<std::size_t>(encoded.width) * static_cast<std::size_t>(encoded.height) * 4U;
+  if (encoded.pixels.size() != expected_size) {
+    return {};
+  }
+  if (static_cast<std::size_t>(image.bytesPerLine()) == expected_size) {
+    std::memcpy(image.bits(), encoded.pixels.data(), expected_size);
+    return image;
+  }
+  for (int y = 0; y < encoded.height; ++y) {
+    std::memcpy(image.scanLine(y),
+                encoded.pixels.data() + (static_cast<std::size_t>(y) *
+                                       static_cast<std::size_t>(encoded.width) * 4U),
+                static_cast<std::size_t>(encoded.width) * 4U);
   }
   return image;
 }

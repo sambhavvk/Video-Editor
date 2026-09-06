@@ -334,5 +334,8 @@ struct EditCommand final {
 };
 
 [[nodiscard]] std::string commandName(const EditCommand& command);
+// Stable snake_case wire id for agent JSON / interchange. Distinct from
+// commandName(), which remains the English undo-history label.
+[[nodiscard]] std::string commandType(const EditCommand& command);
 
 } // namespace video_editor::edit
