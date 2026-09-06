@@ -2,6 +2,7 @@
 #include "editor_controller.hpp"
 #include "media_reconstruction.hpp"
 #include "path_utils.hpp"
+#include "project_recent_paths.hpp"
 #include "timecode_util.hpp"
 #include "session_event_log.hpp"
 #include "worker_host_session.hpp"
@@ -95,6 +96,16 @@
 #include <utility>
 
 namespace video_editor::app {
+
+namespace {
+
+QSettings& windowSettings(desktop_ui::EditorWindow& window) {
+  QSettings* settings = window.settings();
+  Q_ASSERT(settings != nullptr);
+  return *settings;
+}
+
+} // namespace
 
 AudioDevicePollDecision
 evaluateAudioDevicePoll(const std::span<const audio::AudioDeviceInfo> previous,
@@ -984,6 +995,14 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::newProject);
   connect(&window_, &desktop_ui::EditorWindow::openProjectRequested, this,
           &EditorController::openProject);
+  connect(&window_, &desktop_ui::EditorWindow::openRecentProjectRequested, this,
+          [this](const QString& path) {
+            if (!path.isEmpty()) {
+              (void)openProjectFile(pathFromQString(path));
+            }
+          });
+  connect(&window_, &desktop_ui::EditorWindow::reopenLastOnStartupToggled, this,
+          [this](const bool enabled) { setReopenLastOnStartup(windowSettings(window_), enabled); });
   connect(&window_, &desktop_ui::EditorWindow::saveProjectRequested, this,
           &EditorController::saveProject);
   connect(&window_, &desktop_ui::EditorWindow::saveProjectAsRequested, this,
@@ -1536,6 +1555,7 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
   startGpuInitialization();
 #endif
   newProject();
+  refreshRecentProjectsMenu();
 }
 
 EditorController::~EditorController() {
@@ -1806,6 +1826,43 @@ bool EditorController::offerRecoveryOnStartup() {
   }
 }
 
+bool EditorController::hasPendingRecoveryCandidate() const {
+  try {
+    const store::RecoveryCatalog catalog = store::scan_recovery_directory(recoveryDirectory());
+    return std::any_of(catalog.candidates.begin(), catalog.candidates.end(),
+                       [this](const auto& item) {
+                         return item.valid_project_database && item.recovery_recommended &&
+                                item.working_database != working_path_;
+                       });
+  } catch (...) {
+    return false;
+  }
+}
+
+bool EditorController::offerReopenLastOnStartup() {
+  QSettings& settings = windowSettings(window_);
+  pruneMissingRecentProjectPaths(settings);
+  if (!reopenLastOnStartup(settings)) {
+    return false;
+  }
+  const QString last_path = lastRecentProjectPath(settings);
+  if (last_path.isEmpty() || !QFileInfo::exists(last_path)) {
+    return false;
+  }
+  return openProjectFile(pathFromQString(last_path));
+}
+
+void EditorController::recordRecentProject(const std::filesystem::path& checkpoint) {
+  addRecentProjectPath(windowSettings(window_), qStringFromPath(checkpoint));
+  refreshRecentProjectsMenu();
+}
+
+void EditorController::refreshRecentProjectsMenu() {
+  QSettings& settings = windowSettings(window_);
+  pruneMissingRecentProjectPaths(settings);
+  window_.refreshRecentProjectsMenu(readRecentProjectPaths(settings), reopenLastOnStartup(settings));
+}
+
 bool EditorController::loadWorkingRecovery(const std::filesystem::path& workingDatabase) {
   try {
     auto recovered_store = std::make_unique<store::ProjectStore>(
@@ -1858,6 +1915,7 @@ bool EditorController::loadCheckpoint(const std::filesystem::path& checkpoint) {
     }
     installProject(std::move(decoded).value(), working, std::move(opened_store), checkpoint);
     setDirty(media_paths_updated_on_install_);
+    recordRecentProject(checkpoint);
     window_.showTransientMessage(tr("Project opened"));
     return true;
   } catch (const std::exception& exception) {
@@ -1955,6 +2013,7 @@ bool EditorController::saveTo(const std::filesystem::path& destination, const bo
     const auto revision = store_->metadata().head_revision;
     store_->checkpoint_to(*checkpoint_path_, revision);
     setDirty(false);
+    recordRecentProject(*checkpoint_path_);
     window_.showTransientMessage(autosave ? tr("Autosaved") : tr("Project saved"));
     persistExportQueueSidecar();
     autosave_in_progress_ = false;

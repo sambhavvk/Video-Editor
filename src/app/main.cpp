@@ -45,6 +45,7 @@ int main(int argc, char* argv[]) {
   video_editor::desktop_ui::EditorWindow window;
   video_editor::app::EditorController controller(window);
   window.show();
+  const QStringList positional = parser.positionalArguments();
   if (!parser.isSet(screenshot_option)) {
     if (previous_crash_log.has_value()) {
       QMessageBox::warning(
@@ -54,9 +55,11 @@ int main(int argc, char* argv[]) {
                       "Please check or attach this log if you report the issue.")
               .arg(video_editor::app::qStringFromPath(*previous_crash_log)));
     }
-    (void)controller.offerRecoveryOnStartup();
+    const bool recovered = controller.offerRecoveryOnStartup();
+    if (!recovered && !controller.hasPendingRecoveryCandidate() && positional.isEmpty()) {
+      (void)controller.offerReopenLastOnStartup();
+    }
   }
-  const QStringList positional = parser.positionalArguments();
   if (!positional.isEmpty()) {
     QStringList absolute_paths;
     absolute_paths.reserve(positional.size());

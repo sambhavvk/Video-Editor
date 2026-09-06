@@ -21,6 +21,7 @@
 #include <QDialog>
 #include <QDockWidget>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFrame>
 #include <QGroupBox>
 #include <QGuiApplication>
@@ -814,6 +815,10 @@ void EditorWindow::createActions() {
   connect(action(QStringLiteral("saveProjectAs")), &QAction::triggered, this,
           &EditorWindow::saveProjectAsRequested);
   connect(import, &QAction::triggered, this, &EditorWindow::importMediaRequested);
+  connect(action(QStringLiteral("importOtio")), &QAction::triggered, this,
+          &EditorWindow::importOtioRequested);
+  connect(action(QStringLiteral("exportOtio")), &QAction::triggered, this,
+          &EditorWindow::exportOtioRequested);
   connect(exportAction, &QAction::triggered, this, [this] { showExportDialog(); });
   connect(action(QStringLiteral("quit")), &QAction::triggered, this, &QWidget::close);
   connect(action(QStringLiteral("undo")), &QAction::triggered, this, &EditorWindow::undoRequested);
@@ -929,6 +934,31 @@ void EditorWindow::showKeyboardShortcutsPreferences() {
   dialog.exec();
 }
 
+void EditorWindow::refreshRecentProjectsMenu(const QStringList& paths,
+                                             const bool reopenLastOnStartup) {
+  if (recent_projects_menu_ == nullptr) {
+    return;
+  }
+  recent_projects_menu_->clear();
+  if (paths.isEmpty()) {
+    auto* empty = recent_projects_menu_->addAction(tr("(No recent projects)"));
+    empty->setEnabled(false);
+  } else {
+    for (const QString& path : paths) {
+      const QString label = QFileInfo(path).fileName();
+      auto* recent = recent_projects_menu_->addAction(label);
+      recent->setToolTip(path);
+      recent->setStatusTip(path);
+      connect(recent, &QAction::triggered, this, [this, path] {
+        emit openRecentProjectRequested(path);
+      });
+    }
+  }
+  if (reopen_last_on_startup_action_ != nullptr) {
+    reopen_last_on_startup_action_->setChecked(reopenLastOnStartup);
+  }
+}
+
 void EditorWindow::createMenus() {
   menuBar()->setAccessibleName(tr("Application menu"));
   auto* file = menuBar()->addMenu(tr("&File"));
@@ -936,6 +966,9 @@ void EditorWindow::createMenus() {
   file->setAccessibleName(tr("File"));
   file->addAction(action(QStringLiteral("newProject")));
   file->addAction(action(QStringLiteral("openProject")));
+  recent_projects_menu_ = file->addMenu(tr("Open Recent"));
+  recent_projects_menu_->setObjectName(QStringLiteral("recentProjectsMenu"));
+  recent_projects_menu_->setAccessibleName(tr("Open Recent"));
   file->addSeparator();
   file->addAction(action(QStringLiteral("saveProject")));
   file->addAction(action(QStringLiteral("saveProjectAs")));
@@ -1023,6 +1056,13 @@ void EditorWindow::createMenus() {
   keyboardPreferences->setObjectName(QStringLiteral("action.keyboardShortcutsPreferences"));
   connect(keyboardPreferences, &QAction::triggered, this,
           &EditorWindow::showKeyboardShortcutsPreferences);
+  reopen_last_on_startup_action_ =
+      preferences->addAction(tr("Reopen Last Project on Startup"));
+  reopen_last_on_startup_action_->setObjectName(QStringLiteral("action.reopenLastOnStartup"));
+  reopen_last_on_startup_action_->setCheckable(true);
+  reopen_last_on_startup_action_->setChecked(true);
+  connect(reopen_last_on_startup_action_, &QAction::toggled, this,
+          &EditorWindow::reopenLastOnStartupToggled);
 
   auto* help = menuBar()->addMenu(tr("&Help"));
   help->setObjectName(QStringLiteral("helpMenu"));

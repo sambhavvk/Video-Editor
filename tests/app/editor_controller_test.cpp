@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 #include "editor_controller.hpp"
+#include "project_recent_paths.hpp"
 #include "media_reconstruction.hpp"
 #include "path_utils.hpp"
 
@@ -9,6 +10,7 @@
 #include "video_editor/desktop_ui/program_viewer.hpp"
 #include "video_editor/desktop_ui/timeline_widget.hpp"
 
+#include <QAction>
 #include <QApplication>
 #include <QDataStream>
 #include <QDir>
@@ -183,6 +185,8 @@ private slots:
   void nestSelectedClipsOpensChildSequence();
   void queuedExportDoesNotStartSecondWorker();
   void persistsQueuedExportSidecar();
+  void tracksRecentProjectsAndReopenLastSetting();
+  void otioMenuActionsEmitImportExportSignals();
 
 private:
   std::unique_ptr<QTemporaryDir> application_data_;
@@ -1582,6 +1586,51 @@ void EditorControllerTest::nestSelectedClipsOpensChildSequence() {
   QVERIFY(tabs != nullptr);
   QCOMPARE(tabs->count(), 2);
   QCOMPARE(tabs->tabText(tabs->currentIndex()), QStringLiteral("Nested sequence"));
+}
+
+void EditorControllerTest::tracksRecentProjectsAndReopenLastSetting() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+
+  const QString settings_path = directory.filePath(QStringLiteral("recent.ini"));
+  QSettings settings(settings_path, QSettings::IniFormat);
+  video_editor::app::setReopenLastOnStartup(settings, true);
+
+  const auto checkpoint =
+      video_editor::app::pathFromQString(directory.filePath(QStringLiteral("recent.veproj")));
+  {
+    QSettings window_settings(settings_path, QSettings::IniFormat);
+    video_editor::desktop_ui::EditorWindow window(&window_settings);
+    video_editor::app::EditorController controller(window);
+    QVERIFY(controller.saveProjectFile(checkpoint));
+  }
+
+  const QStringList recent = video_editor::app::readRecentProjectPaths(settings);
+  QCOMPARE(recent.size(), 1);
+  QCOMPARE(recent.front(), video_editor::app::qStringFromPath(checkpoint));
+
+  video_editor::app::pruneMissingRecentProjectPaths(settings);
+  QCOMPARE(video_editor::app::readRecentProjectPaths(settings).size(), 1);
+
+  QFile::remove(video_editor::app::qStringFromPath(checkpoint));
+  video_editor::app::pruneMissingRecentProjectPaths(settings);
+  QVERIFY(video_editor::app::readRecentProjectPaths(settings).isEmpty());
+}
+
+void EditorControllerTest::otioMenuActionsEmitImportExportSignals() {
+  QSettings settings;
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  QSignalSpy import_spy(&window, &video_editor::desktop_ui::EditorWindow::importOtioRequested);
+  QSignalSpy export_spy(&window, &video_editor::desktop_ui::EditorWindow::exportOtioRequested);
+
+  QAction* import_action = window.action(QStringLiteral("importOtio"));
+  QAction* export_action = window.action(QStringLiteral("exportOtio"));
+  QVERIFY(import_action != nullptr);
+  QVERIFY(export_action != nullptr);
+  import_action->trigger();
+  export_action->trigger();
+  QCOMPARE(import_spy.count(), 1);
+  QCOMPARE(export_spy.count(), 1);
 }
 
 QTEST_MAIN(EditorControllerTest)

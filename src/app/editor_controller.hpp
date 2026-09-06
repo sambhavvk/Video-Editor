@@ -190,6 +190,8 @@ public:
 
   void importPaths(const QStringList& paths);
   [[nodiscard]] bool offerRecoveryOnStartup();
+  [[nodiscard]] bool hasPendingRecoveryCandidate() const;
+  [[nodiscard]] bool offerReopenLastOnStartup();
   [[nodiscard]] bool openProjectFile(const std::filesystem::path& checkpoint);
   [[nodiscard]] bool saveProjectFile(const std::filesystem::path& destination);
   [[nodiscard]] bool importCaptionFile(const std::filesystem::path& source);
@@ -476,6 +478,8 @@ private:
   void cacheLutFile(const std::filesystem::path& path);
   void waitForInFlightCacheJob(bool cancel);
   void refreshViews();
+  void refreshRecentProjectsMenu();
+  void recordRecentProject(const std::filesystem::path& checkpoint);
   void refreshMediaView();
   void refreshTimelineView();
   void refreshSequenceTabs();

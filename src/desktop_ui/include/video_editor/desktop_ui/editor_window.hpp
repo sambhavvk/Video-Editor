@@ -96,6 +96,9 @@ public:
   [[nodiscard]] CacheBrowserDialog* cacheBrowser() const noexcept {
     return cache_browser_;
   }
+  [[nodiscard]] QSettings* settings() const noexcept {
+    return settings_;
+  }
 
   void setProjectDisplayName(const QString& displayName);
   void setProjectDirty(bool dirty);
@@ -111,6 +114,7 @@ public:
   void setAudioSyncStatus(const QString& text);
   void showExportDialog(const QString& presetId = {});
   void focusInspector();
+  void refreshRecentProjectsMenu(const QStringList& paths, bool reopenLastOnStartup);
 
 public slots:
   void setWorkspace(Workspace workspace);
@@ -131,6 +135,8 @@ signals:
   void workspaceChanged(Workspace workspace);
   void newProjectRequested();
   void openProjectRequested();
+  void openRecentProjectRequested(const QString& path);
+  void reopenLastOnStartupToggled(bool enabled);
   void saveProjectRequested();
   void saveProjectAsRequested();
   void importMediaRequested();
@@ -264,6 +270,8 @@ private:
   bool program_fullscreen_active_{false};
   std::unique_ptr<ProgramOutputWindow> program_output_window_;
   QMenu* program_output_menu_{nullptr};
+  QMenu* recent_projects_menu_{nullptr};
+  QAction* reopen_last_on_startup_action_{nullptr};
   TimelineWidget* timeline_{nullptr};
   QWidget* source_container_{nullptr};
   QFrame* precision_trim_{nullptr};
