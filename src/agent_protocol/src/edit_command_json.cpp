@@ -1894,6 +1894,14 @@ void encodeOperationFields(QJsonObject& object, const EditOperation& operation) 
           object.insert(QStringLiteral("sequence_id"), encodeEntityId(command.sequence_id));
           object.insert(QStringLiteral("clip_id"), encodeEntityId(command.clip_id));
           object.insert(QStringLiteral("name"), stdToQstr(command.name));
+        } else if constexpr (std::is_same_v<T, edit::SetClipLinkedGroupCommand>) {
+          object.insert(QStringLiteral("sequence_id"), encodeEntityId(command.sequence_id));
+          object.insert(QStringLiteral("clip_id"), encodeEntityId(command.clip_id));
+          insertOptionalEntityId(object, QStringLiteral("linked_group"), command.linked_group);
+        } else if constexpr (std::is_same_v<T, edit::SetClipEnabledCommand>) {
+          object.insert(QStringLiteral("sequence_id"), encodeEntityId(command.sequence_id));
+          object.insert(QStringLiteral("clip_id"), encodeEntityId(command.clip_id));
+          object.insert(QStringLiteral("enabled"), command.enabled);
         }
       },
       operation);
@@ -2619,6 +2627,31 @@ void encodeOperationFields(QJsonObject& object, const EditOperation& operation) 
     return DecodeResult<EditOperation>::success(
         edit::SetClipNameCommand{sequence_id.value(), clip_id.value(),
                                  qstrToStd(object.value(QStringLiteral("name")).toString())});
+  }
+  if (type == QStringLiteral("set_clip_linked_group")) {
+    const auto sequence_id = decodeEntityIdRequired(object.value(QStringLiteral("sequence_id")),
+                                                    "set_clip_linked_group.sequence_id");
+    if (!sequence_id) return fail<EditOperation>(sequence_id.error().message);
+    const auto clip_id =
+        decodeEntityIdRequired(object.value(QStringLiteral("clip_id")), "set_clip_linked_group.clip_id");
+    if (!clip_id) return fail<EditOperation>(clip_id.error().message);
+    const auto linked_group = decodeOptionalEntityId(
+        object.value(QStringLiteral("linked_group")),
+        (std::string("set_clip_linked_group.linked_group")).c_str());
+    if (!linked_group) return fail<EditOperation>(linked_group.error().message);
+    return DecodeResult<EditOperation>::success(
+        edit::SetClipLinkedGroupCommand{sequence_id.value(), clip_id.value(), linked_group.value()});
+  }
+  if (type == QStringLiteral("set_clip_enabled")) {
+    const auto sequence_id =
+        decodeEntityIdRequired(object.value(QStringLiteral("sequence_id")), "set_clip_enabled.sequence_id");
+    if (!sequence_id) return fail<EditOperation>(sequence_id.error().message);
+    const auto clip_id =
+        decodeEntityIdRequired(object.value(QStringLiteral("clip_id")), "set_clip_enabled.clip_id");
+    if (!clip_id) return fail<EditOperation>(clip_id.error().message);
+    return DecodeResult<EditOperation>::success(
+        edit::SetClipEnabledCommand{sequence_id.value(), clip_id.value(),
+                                    object.value(QStringLiteral("enabled")).toBool(true)});
   }
   return fail<EditOperation>("unknown command type: " + qstrToStd(type));
 }

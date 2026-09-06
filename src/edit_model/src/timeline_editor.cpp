@@ -2693,6 +2693,38 @@ struct PlannedClip final {
             }
             location->clip->name = command.name;
             return std::nullopt;
+          },
+          [&](const SetClipLinkedGroupCommand& command) -> std::optional<EditError> {
+            auto* sequence = mutableSequence(project, command.sequence_id);
+            if (sequence == nullptr) {
+              return error(EditErrorCode::EntityNotFound, "sequence was not found");
+            }
+            auto location = mutableClip(*sequence, command.clip_id);
+            if (!location) {
+              return error(EditErrorCode::EntityNotFound, "clip was not found");
+            }
+            if (location->track->locked) {
+              return error(EditErrorCode::TrackLocked,
+                           "cannot change linked group on a locked track");
+            }
+            location->clip->linked_group = command.linked_group;
+            return std::nullopt;
+          },
+          [&](const SetClipEnabledCommand& command) -> std::optional<EditError> {
+            auto* sequence = mutableSequence(project, command.sequence_id);
+            if (sequence == nullptr) {
+              return error(EditErrorCode::EntityNotFound, "sequence was not found");
+            }
+            auto location = mutableClip(*sequence, command.clip_id);
+            if (!location) {
+              return error(EditErrorCode::EntityNotFound, "clip was not found");
+            }
+            if (location->track->locked) {
+              return error(EditErrorCode::TrackLocked,
+                           "cannot enable or disable a clip on a locked track");
+            }
+            location->clip->enabled = command.enabled;
+            return std::nullopt;
           }},
       op);
 }
@@ -2814,6 +2846,10 @@ std::string commandName(const EditCommand& command) {
           return "Replace clip media";
         if constexpr (std::is_same_v<T, SetClipNameCommand>)
           return "Set clip name";
+        if constexpr (std::is_same_v<T, SetClipLinkedGroupCommand>)
+          return "Unlink clip";
+        if constexpr (std::is_same_v<T, SetClipEnabledCommand>)
+          return "Set clip enabled";
         return "Edit";
       },
       command.operation);
@@ -2933,6 +2969,10 @@ std::string commandType(const EditCommand& command) {
           return "replace_clip_media";
         if constexpr (std::is_same_v<T, SetClipNameCommand>)
           return "set_clip_name";
+        if constexpr (std::is_same_v<T, SetClipLinkedGroupCommand>)
+          return "set_clip_linked_group";
+        if constexpr (std::is_same_v<T, SetClipEnabledCommand>)
+          return "set_clip_enabled";
         return "unknown";
       },
       command.operation);

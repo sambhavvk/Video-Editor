@@ -615,7 +615,7 @@ AudioRenderResult TimelineAudioRenderer::Impl::mix_sequence_audio(
         {.sample_rate = kTimelineAudioSampleRate, .channels = kTimelineAudioChannels},
         request.start_sample, request.sample_count);
     for (const edit::Clip& clip : track.clips) {
-      if (clip.kind != edit::ClipKind::Audio) {
+      if (!clip.enabled || clip.kind != edit::ClipKind::Audio) {
         continue;
       }
       const auto [begin, end] = clip_output_bounds(clip, request);
@@ -770,7 +770,7 @@ AudioRenderResult TimelineAudioRenderer::Impl::mix_sequence_audio(
       continue;
     }
     for (const edit::Clip& clip : track.clips) {
-      if (clip.kind != edit::ClipKind::NestedSequence) {
+      if (!clip.enabled || clip.kind != edit::ClipKind::NestedSequence) {
         continue;
       }
       if (!clip.nested_sequence_id.has_value()) {

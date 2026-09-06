@@ -280,6 +280,9 @@ constexpr const char* kAgentWorkingSuffix = ".agent.working.sqlite";
   if (entry.command_type == "project.snapshot.v4") {
     return 4U;
   }
+  if (entry.command_type == "project.snapshot.v5") {
+    return 5U;
+  }
   return std::nullopt;
 }
 
@@ -534,7 +537,7 @@ void AgentHost::persistSnapshot(const std::string_view reason) {
   const auto project = editor_->projectAt(editor_->revision());
   const project_codec::ProjectBytes bytes = project_codec::serialize_project(*project);
   const auto metadata = store_->metadata();
-  store_->append_command("project.snapshot.v4", std::span<const std::byte>(bytes),
+  store_->append_command("project.snapshot.v5", std::span<const std::byte>(bytes),
                          metadata.head_revision, project_codec::kCurrentSchemaVersion);
   store_->update_heartbeat();
   (void)reason;
@@ -694,7 +697,7 @@ QJsonObject AgentHost::methodSaveProject(const QJsonObject& request) {
       store_ = std::make_unique<store::ProjectStore>(
           working_path_, store::OpenOptions{.project_uuid = project->id.toString()});
       const project_codec::ProjectBytes bytes = project_codec::serialize_project(*project);
-      store_->append_command("project.snapshot.v4", std::span<const std::byte>(bytes), 0,
+      store_->append_command("project.snapshot.v5", std::span<const std::byte>(bytes), 0,
                              project_codec::kCurrentSchemaVersion);
       store_->update_heartbeat();
     } else {

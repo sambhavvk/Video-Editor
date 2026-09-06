@@ -257,6 +257,9 @@ private slots:
   void duplicateSelectedClips();
   void pasteClipAttributes();
   void replaceClipMediaFromSource(const QString& clipId);
+  void toggleLinkedSelection();
+  void unlinkSelectedClips();
+  void setClipEnabledFromTimeline(const QString& clipId, bool enabled);
   void deleteSelectedClip(bool ripple);
   void undo();
   void redo();
@@ -732,6 +735,7 @@ private:
   std::uint64_t caption_analysis_generation_{0};
   bool media_paths_updated_on_install_{false};
   bool dirty_{false};
+  bool linked_selection_enabled_{true};
   bool closing_after_confirmation_{false};
   double playback_rate_{0.0};
   double audio_transport_rate_{1.0};

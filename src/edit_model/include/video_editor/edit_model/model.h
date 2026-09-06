@@ -160,6 +160,7 @@ struct Clip final {
   std::vector<Effect> effects;
   std::optional<Title> title;
   std::optional<EntityId> nested_sequence_id;
+  bool enabled{true};
   friend bool operator==(const Clip&, const Clip&) = default;
 };
 

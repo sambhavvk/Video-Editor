@@ -181,6 +181,7 @@ struct TimelineClipView {
   bool selected{false};
   bool offline{false};
   bool proxy{false};
+  bool enabled{true};
   QVector<WaveformBucketView> waveform;
 };
 

@@ -805,6 +805,9 @@ std::optional<std::uint32_t> projectSnapshotSchema(const store::JournalEntry& en
   if (entry.command_type == "project.snapshot.v4") {
     return 4U;
   }
+  if (entry.command_type == "project.snapshot.v5") {
+    return 5U;
+  }
   return std::nullopt;
 }
 
@@ -1081,6 +1084,25 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::clearProgramMarks);
   connect(window_.timeline(), &desktop_ui::TimelineWidget::clipReplaceMediaRequested, this,
           &EditorController::replaceClipMediaFromSource);
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::clipUnlinkRequested, this,
+          [this](const QString& clip_id) {
+            setClipSelection({clip_id}, clip_id);
+            unlinkSelectedClips();
+          });
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::clipEnabledToggledRequested, this,
+          &EditorController::setClipEnabledFromTimeline);
+  connect(&window_, &desktop_ui::EditorWindow::toggleLinkedSelectionRequested, this,
+          &EditorController::toggleLinkedSelection);
+  connect(&window_, &desktop_ui::EditorWindow::unlinkClipsRequested, this,
+          &EditorController::unlinkSelectedClips);
+  connect(&window_, &desktop_ui::EditorWindow::setClipEnabledRequested, this,
+          [this](const bool enabled) {
+            if (!active_clip_id_.has_value()) {
+              return;
+            }
+            setClipEnabledFromTimeline(QString::fromStdString(active_clip_id_->toString()),
+                                     enabled);
+          });
   connect(&window_, &desktop_ui::EditorWindow::deleteSelectionRequested, this,
           &EditorController::deleteSelectedClip);
   connect(&window_, &desktop_ui::EditorWindow::undoRequested, this, &EditorController::undo);
@@ -4267,6 +4289,41 @@ void EditorController::replaceClipMediaFromSource(const QString& clipIdText) {
              tr("Could not replace the clip media"));
 }
 
+void EditorController::toggleLinkedSelection() {
+  if (auto* action = window_.action(QStringLiteral("toggleLinkedSelection"))) {
+    linked_selection_enabled_ = action->isChecked();
+  }
+  window_.showTransientMessage(linked_selection_enabled_ ? tr("Linked selection on")
+                                                         : tr("Linked selection off"));
+}
+
+void EditorController::unlinkSelectedClips() {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || selected_clip_ids_.empty()) {
+    return;
+  }
+  std::vector<edit::EditCommand> commands;
+  for (const auto& clip_id : selected_clip_ids_) {
+    commands.push_back(
+        {.operation = edit::SetClipLinkedGroupCommand{.sequence_id = sequence->id,
+                                                      .clip_id = clip_id,
+                                                      .linked_group = std::nullopt}});
+  }
+  (void)applyBatch(commands, tr("Could not unlink clips"));
+}
+
+void EditorController::setClipEnabledFromTimeline(const QString& clipIdText, const bool enabled) {
+  const edit::Sequence* sequence = currentSequence();
+  const auto clip_id = parseId(clipIdText);
+  if (sequence == nullptr || !clip_id.has_value()) {
+    return;
+  }
+  (void)apply({.operation = edit::SetClipEnabledCommand{.sequence_id = sequence->id,
+                                                        .clip_id = *clip_id,
+                                                        .enabled = enabled}},
+             enabled ? tr("Could not enable the clip") : tr("Could not disable the clip"));
+}
+
 void EditorController::gotoTimecode() {
   const edit::Sequence* sequence = currentSequence();
   if (sequence == nullptr) {
@@ -7418,7 +7475,7 @@ void EditorController::persistSnapshot(const std::string_view reason) {
   const auto project = editor_->projectAt(editor_->revision());
   const project_codec::ProjectBytes bytes = project_codec::serialize_project(*project);
   const auto metadata = store_->metadata();
-  store_->append_command("project.snapshot.v4", std::span<const std::byte>(bytes),
+  store_->append_command("project.snapshot.v5", std::span<const std::byte>(bytes),
                          metadata.head_revision, project_codec::kCurrentSchemaVersion);
   store_->update_heartbeat();
   (void)reason;
@@ -7532,6 +7589,11 @@ std::vector<edit::EntityId> EditorController::selectedClipIds() const {
 std::vector<edit::EntityId>
 EditorController::expandLinkedSelection(const edit::Sequence& sequence,
                                         const std::vector<edit::EntityId>& clipIds) const {
+  if (!linked_selection_enabled_) {
+    std::vector<edit::EntityId> ordered(clipIds.begin(), clipIds.end());
+    std::sort(ordered.begin(), ordered.end());
+    return ordered;
+  }
   std::unordered_set<edit::EntityId> result(clipIds.begin(), clipIds.end());
   for (const auto& id : clipIds) {
     const edit::Clip* clip = edit::findClip(sequence, id);
@@ -8051,6 +8113,7 @@ void EditorController::refreshTimelineView() {
           .selected = selected_clip_ids_.contains(clip.id),
           .offline = record == nullptr || record->availability == assets::AssetAvailability::Missing,
           .proxy = record != nullptr && record->proxy.has_value() && record->proxy->complete,
+          .enabled = clip.enabled,
           .waveform = waveform == media_waveforms_.end()
                           ? QVector<desktop_ui::WaveformBucketView>{}
                           : waveform->second,

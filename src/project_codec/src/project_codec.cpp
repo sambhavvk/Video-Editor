@@ -515,6 +515,9 @@ void encodeClip(const edit::Clip& value, wire::Clip* output, std::string_view pa
   }
   encodeClipTitle(value, output, path);
   encodeClipNestedSequence(value, output, path);
+  if (!value.enabled) {
+    output->set_enabled(false);
+  }
 }
 
 void encodeTrack(const edit::Track& value, wire::Track* output, std::string_view path,
@@ -1408,6 +1411,7 @@ decodeMetadata(const google::protobuf::RepeatedPtrField<wire::StringEntry>& entr
   }
   assignDecodedTitle(value, declared_schema_version, path, result);
   assignDecodedNestedSequence(value, path, result);
+  result.enabled = !value.has_enabled() || value.enabled();
   return result;
 }
 

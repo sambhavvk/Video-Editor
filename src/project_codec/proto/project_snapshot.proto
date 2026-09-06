@@ -193,6 +193,7 @@ message Clip {
   repeated Effect effects = 16;
   optional Title title = 17;
   optional EntityId nested_sequence_id = 18;
+  optional bool enabled = 19;
 }
 
 message Track {

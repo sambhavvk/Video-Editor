@@ -677,6 +677,18 @@ void EditorWindow::createActions() {
          QKeySequence{tr("Ctrl+Alt+A")});
   create(QStringLiteral("replaceClipMedia"), tr("Replace Clip Media"),
          tr("Replace the selected clip media from the loaded source"));
+  auto* toggleLinkedSelection = create(QStringLiteral("toggleLinkedSelection"),
+                                       tr("Linked Selection"),
+                                       tr("Expand selections to linked audio/video clips"),
+                                       QKeySequence{tr("Ctrl+L")});
+  toggleLinkedSelection->setCheckable(true);
+  toggleLinkedSelection->setChecked(true);
+  create(QStringLiteral("unlinkClips"), tr("Unlink Clips"),
+         tr("Clear linked audio/video groups on the selection"), QKeySequence{tr("Ctrl+Shift+U")});
+  create(QStringLiteral("disableClip"), tr("Disable Clip"),
+         tr("Disable the selected clip for playback and export"));
+  create(QStringLiteral("enableClip"), tr("Enable Clip"),
+         tr("Re-enable the selected clip for playback and export"));
   create(QStringLiteral("gotoTimecode"), tr("Go to Timecode"), tr("Seek to a typed timecode"),
          QKeySequence{tr("Ctrl+G")});
   create(QStringLiteral("toggleLoopPlayback"), tr("Toggle Loop Playback"),
@@ -855,6 +867,14 @@ void EditorWindow::createActions() {
           &EditorWindow::pasteClipAttributesRequested);
   connect(action(QStringLiteral("replaceClipMedia")), &QAction::triggered, this,
           [this] { emit replaceClipMediaRequested(QString{}); });
+  connect(action(QStringLiteral("toggleLinkedSelection")), &QAction::triggered, this,
+          &EditorWindow::toggleLinkedSelectionRequested);
+  connect(action(QStringLiteral("unlinkClips")), &QAction::triggered, this,
+          &EditorWindow::unlinkClipsRequested);
+  connect(action(QStringLiteral("disableClip")), &QAction::triggered, this,
+          [this] { emit setClipEnabledRequested(false); });
+  connect(action(QStringLiteral("enableClip")), &QAction::triggered, this,
+          [this] { emit setClipEnabledRequested(true); });
   connect(action(QStringLiteral("gotoTimecode")), &QAction::triggered, this,
           &EditorWindow::gotoTimecodeRequested);
   connect(action(QStringLiteral("toggleLoopPlayback")), &QAction::triggered, this,
@@ -992,6 +1012,13 @@ void EditorWindow::createMenus() {
   edit->addAction(action(QStringLiteral("deleteSelection")));
   edit->addAction(action(QStringLiteral("rippleDelete")));
   edit->addAction(action(QStringLiteral("nestSelectedClips")));
+  edit->addSeparator();
+  edit->addAction(action(QStringLiteral("pasteClipAttributes")));
+  edit->addAction(action(QStringLiteral("replaceClipMedia")));
+  edit->addAction(action(QStringLiteral("toggleLinkedSelection")));
+  edit->addAction(action(QStringLiteral("unlinkClips")));
+  edit->addAction(action(QStringLiteral("disableClip")));
+  edit->addAction(action(QStringLiteral("enableClip")));
   edit->addSeparator();
   edit->addAction(action(QStringLiteral("commandPalette")));
 

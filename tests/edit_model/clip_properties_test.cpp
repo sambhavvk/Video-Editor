@@ -98,7 +98,11 @@ TEST(ClipPropertiesTest, AppendsOperationsWithoutChangingExistingVariantOrdinals
   EXPECT_EQ(EditOperation{SetAssetBinCommand{}}.index(), 50U);
   EXPECT_EQ(EditOperation{SetAssetMetadataCommand{}}.index(), 51U);
   EXPECT_EQ(EditOperation{SetSmartQueryCommand{}}.index(), 52U);
-  EXPECT_EQ(std::variant_size_v<EditOperation>, 53U);
+  EXPECT_EQ(EditOperation{ReplaceClipMediaCommand{}}.index(), 53U);
+  EXPECT_EQ(EditOperation{SetClipNameCommand{}}.index(), 54U);
+  EXPECT_EQ(EditOperation{SetClipLinkedGroupCommand{}}.index(), 55U);
+  EXPECT_EQ(EditOperation{SetClipEnabledCommand{}}.index(), 56U);
+  EXPECT_EQ(std::variant_size_v<EditOperation>, 57U);
 }
 
 TEST(ClipPropertiesTest, AppliesAndRoundTripsTypedPropertiesAsExactRevisions) {
@@ -357,6 +361,29 @@ TEST(ClipPropertiesTest, ValidRandomPropertiesCoalesceAndRoundTrip) {
   EXPECT_DOUBLE_EQ(audio.audio_pan, final_pan);
   ASSERT_EQ(editor.history().size(), 2U);
   EXPECT_EQ(editor.history().back().command_count, 100U);
+}
+
+TEST(ClipPropertiesTest, UnlinksAndDisablesClips) {
+  auto fixture = makePropertyFixture();
+  TimelineEditor editor(fixture.project);
+  const EntityId linked_group = EntityId::generate();
+  ASSERT_TRUE(editor.apply(
+      EditCommand{SetClipLinkedGroupCommand{fixture.sequence_id, fixture.video_clip_id, linked_group}},
+      editor.revision()));
+  ASSERT_TRUE(editor.apply(
+      EditCommand{SetClipLinkedGroupCommand{fixture.sequence_id, fixture.audio_clip_id, linked_group}},
+      editor.revision()));
+  EXPECT_EQ(currentClip(editor, fixture.sequence_id, fixture.video_clip_id).linked_group,
+            linked_group);
+  ASSERT_TRUE(editor.apply(
+      EditCommand{SetClipLinkedGroupCommand{fixture.sequence_id, fixture.video_clip_id,
+                                            std::nullopt}},
+      editor.revision()));
+  EXPECT_FALSE(currentClip(editor, fixture.sequence_id, fixture.video_clip_id).linked_group.has_value());
+  ASSERT_TRUE(editor.apply(
+      EditCommand{SetClipEnabledCommand{fixture.sequence_id, fixture.audio_clip_id, false}},
+      editor.revision()));
+  EXPECT_FALSE(currentClip(editor, fixture.sequence_id, fixture.audio_clip_id).enabled);
 }
 
 } // namespace

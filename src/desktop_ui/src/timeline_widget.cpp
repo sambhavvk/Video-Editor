@@ -525,6 +525,10 @@ void TimelineWidget::paintEvent(QPaintEvent* event) {
     QPainterPath shape;
     shape.addRoundedRect(QRectF{rect}, 4.0, 4.0);
     auto fill = clip.offline ? QColor{104, 69, 72} : clip.color;
+    if (!clip.enabled) {
+      fill = fill.darker(180);
+      fill.setAlpha(120);
+    }
     if (tracks_.at(clip.trackIndex).muted) {
       fill = fill.darker(145);
     }
@@ -1213,6 +1217,9 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
     QMenu menu(this);
     auto* properties = menu.addAction(tr("Properties"));
     auto* replaceMedia = menu.addAction(tr("Replace from Source"));
+    auto* unlink = menu.addAction(tr("Unlink"));
+    auto* toggleEnabled =
+        menu.addAction(clip.enabled ? tr("Disable Clip") : tr("Enable Clip"));
     auto* cutHere = menu.addAction(tr("Cut here"));
     cutHere->setEnabled(cutInside);
     cutHere->setToolTip(tr("Split the clip at the clicked position"));
@@ -1226,6 +1233,10 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
       emit clipInspectorRequested(clip.id);
     } else if (chosen == replaceMedia) {
       emit clipReplaceMediaRequested(clip.id);
+    } else if (chosen == unlink) {
+      emit clipUnlinkRequested(clip.id);
+    } else if (chosen == toggleEnabled) {
+      emit clipEnabledToggledRequested(clip.id, !clip.enabled);
     } else if (chosen == cutHere && cutInside) {
       emit clipCutAtRequested(clip.id, clickTime);
     } else if (chosen == remove) {

@@ -164,6 +164,9 @@ signals:
   void duplicateClipsRequested();
   void pasteClipAttributesRequested();
   void replaceClipMediaRequested(const QString& clipId = QString());
+  void toggleLinkedSelectionRequested();
+  void unlinkClipsRequested();
+  void setClipEnabledRequested(bool enabled);
   void gotoTimecodeRequested();
   void toggleLoopPlaybackRequested();
   void playAroundRequested();

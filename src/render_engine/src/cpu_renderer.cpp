@@ -634,7 +634,7 @@ render_sequence_frame(const edit::Project& project, const edit::Sequence& sequen
       continue;
     }
     for (const edit::Clip& clip : track.clips) {
-      if (!clip.timeline_range.contains(time)) {
+      if (!clip.enabled || !clip.timeline_range.contains(time)) {
         continue;
       }
       auto source = render_clip_source(project, clip, sequence, time, depth, profile,

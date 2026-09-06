@@ -336,7 +336,7 @@ render_transition_track(GpuRenderer& renderer, FrameProvider& provider,
 
     std::vector<GpuLayer> track_layers;
     for (const edit::Clip& clip : track.clips) {
-      if (!clip.timeline_range.contains(time)) {
+      if (!clip.enabled || !clip.timeline_range.contains(time)) {
         continue;
       }
       if (clip_has_unsupported_gpu_effects(clip.effects)) {
@@ -456,7 +456,7 @@ RenderResult<GpuImage> GpuTimelineRenderer::request_frame(const edit::TimelineSn
 
     std::vector<GpuLayer> track_layers;
     for (const edit::Clip& clip : track.clips) {
-      if (!clip.timeline_range.contains(time)) {
+      if (!clip.enabled || !clip.timeline_range.contains(time)) {
         continue;
       }
       if (clip_has_unsupported_gpu_effects(clip.effects)) {

@@ -320,6 +320,16 @@ struct SetClipNameCommand final {
   EntityId clip_id;
   std::string name;
 };
+struct SetClipLinkedGroupCommand final {
+  EntityId sequence_id;
+  EntityId clip_id;
+  std::optional<EntityId> linked_group;
+};
+struct SetClipEnabledCommand final {
+  EntityId sequence_id;
+  EntityId clip_id;
+  bool enabled{true};
+};
 
 using EditOperation = std::variant<
     AddAssetCommand, RemoveAssetCommand, AddSequenceCommand, RemoveSequenceCommand, AddTrackCommand,
@@ -335,7 +345,8 @@ using EditOperation = std::variant<
     AddTrackEffectCommand, RemoveTrackEffectCommand, SetTrackEffectParameterCommand,
     ApplyCaptionChangeSetCommand, ApplyTimelineCutChangeSetCommand, RelinkAssetCommand,
     CreateBinCommand, RenameBinCommand, MoveBinCommand, RemoveBinCommand, SetAssetBinCommand,
-    SetAssetMetadataCommand, SetSmartQueryCommand, ReplaceClipMediaCommand, SetClipNameCommand>;
+    SetAssetMetadataCommand, SetSmartQueryCommand, ReplaceClipMediaCommand, SetClipNameCommand,
+    SetClipLinkedGroupCommand, SetClipEnabledCommand>;
 
 struct EditCommand final {
   EditOperation operation;
