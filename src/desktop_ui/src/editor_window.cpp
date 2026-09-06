@@ -676,6 +676,18 @@ void EditorWindow::createActions() {
          QKeySequence{tr("Ctrl+Alt+A")});
   create(QStringLiteral("replaceClipMedia"), tr("Replace Clip Media"),
          tr("Replace the selected clip media from the loaded source"));
+  create(QStringLiteral("gotoTimecode"), tr("Go to Timecode"), tr("Seek to a typed timecode"),
+         QKeySequence{tr("Ctrl+G")});
+  create(QStringLiteral("toggleLoopPlayback"), tr("Toggle Loop Playback"),
+         tr("Loop playback between program In and Out"), QKeySequence{tr("Ctrl+Shift+L")});
+  create(QStringLiteral("playAround"), tr("Play Around"),
+         tr("Play a short range around the playhead"), QKeySequence{tr("Shift+K")});
+  create(QStringLiteral("clearProgramIn"), tr("Clear Program In"),
+         tr("Clear the program monitor in point"), QKeySequence{tr("Alt+I")});
+  create(QStringLiteral("clearProgramOut"), tr("Clear Program Out"),
+         tr("Clear the program monitor out point"), QKeySequence{tr("Alt+O")});
+  create(QStringLiteral("clearProgramMarks"), tr("Clear Program In and Out"),
+         tr("Clear both program monitor marks"), QKeySequence{tr("Alt+X")});
   create(QStringLiteral("deleteSelection"), tr("Delete"), tr("Delete the selection"),
          QKeySequence{Qt::Key_Delete});
   create(QStringLiteral("rippleDelete"), tr("Ripple Delete"),
@@ -745,9 +757,9 @@ void EditorWindow::createActions() {
              tr("Show a second monitor for source media"), QKeySequence{tr("Shift+2")});
   sourceMonitor->setCheckable(true);
   create(QStringLiteral("sourceMarkIn"), tr("Mark In"),
-         tr("Set the source in point at the source playhead"));
+         tr("Set the in point at the focused monitor playhead"), QKeySequence{Qt::Key_I});
   create(QStringLiteral("sourceMarkOut"), tr("Mark Out"),
-         tr("Set the source out point at the source playhead"));
+         tr("Set the out point at the focused monitor playhead"), QKeySequence{Qt::Key_O});
   create(QStringLiteral("sourceRippleInsert"), tr("Insert from Source"),
          tr("Ripple-insert the marked source range at the program playhead"));
   create(QStringLiteral("sourceOverwriteInsert"), tr("Overwrite from Source"),
@@ -838,6 +850,18 @@ void EditorWindow::createActions() {
           &EditorWindow::pasteClipAttributesRequested);
   connect(action(QStringLiteral("replaceClipMedia")), &QAction::triggered, this,
           [this] { emit replaceClipMediaRequested(QString{}); });
+  connect(action(QStringLiteral("gotoTimecode")), &QAction::triggered, this,
+          &EditorWindow::gotoTimecodeRequested);
+  connect(action(QStringLiteral("toggleLoopPlayback")), &QAction::triggered, this,
+          &EditorWindow::toggleLoopPlaybackRequested);
+  connect(action(QStringLiteral("playAround")), &QAction::triggered, this,
+          &EditorWindow::playAroundRequested);
+  connect(action(QStringLiteral("clearProgramIn")), &QAction::triggered, this,
+          &EditorWindow::clearProgramInRequested);
+  connect(action(QStringLiteral("clearProgramOut")), &QAction::triggered, this,
+          &EditorWindow::clearProgramOutRequested);
+  connect(action(QStringLiteral("clearProgramMarks")), &QAction::triggered, this,
+          &EditorWindow::clearProgramMarksRequested);
   connect(trackSelectForward, &QAction::triggered, this, [this] {
     if (timeline_->toolMode() == TimelineWidget::ToolMode::Select) {
       emit selectForwardOnTargetedTrackRequested();

@@ -949,7 +949,17 @@ ExportOutcome export_video_impl(const ExportRequest& request, const bool use_har
                          " encoder does not support the required pixel format");
     }
 
-    const edit::Time duration = request.snapshot.duration();
+    const edit::Time full_duration = request.snapshot.duration();
+    edit::Time range_start{};
+    edit::Time range_end = full_duration;
+    if (request.export_range.has_value()) {
+      range_start = request.export_range->start;
+      range_end = request.export_range->end();
+      if (range_end <= range_start) {
+        return failure(ExportErrorCode::InvalidRequest, "export range end must follow start");
+      }
+    }
+    const edit::Time duration = range_end - range_start;
     if (duration.isZero() || duration.isNegative()) {
       return failure(ExportErrorCode::InvalidRequest, "cannot export an empty sequence");
     }
@@ -981,10 +991,14 @@ ExportOutcome export_video_impl(const ExportRequest& request, const bool use_har
     }
     const auto frame_count = static_cast<std::uint64_t>(signed_frame_count);
     std::int64_t signed_audio_sample_count = 0;
+    const std::int64_t range_start_sample =
+        range_start
+            .rescaledTo(audio_render::kTimelineAudioSampleRate, edit::RoundingMode::Floor)
+            .value();
+    const std::int64_t range_end_sample =
+        range_end.rescaledTo(audio_render::kTimelineAudioSampleRate, edit::RoundingMode::Ceil).value();
     if (request.include_audio) {
-      signed_audio_sample_count =
-          duration.rescaledTo(audio_render::kTimelineAudioSampleRate, edit::RoundingMode::Ceil)
-              .value();
+      signed_audio_sample_count = range_end_sample - range_start_sample;
       if (signed_audio_sample_count <= 0) {
         return failure(ExportErrorCode::InvalidRequest,
                        "sequence audio sample count is not exportable");
@@ -1358,7 +1372,7 @@ ExportOutcome export_video_impl(const ExportRequest& request, const bool use_har
                                                   .bypass_expensive_effects = false,
                                                   .use_proxies = false};
 
-    std::int64_t next_audio_sample = 0;
+    std::int64_t next_audio_sample = range_start_sample;
     const auto encode_audio_through =
         [&](const std::int64_t exclusive_end,
             const bool flush_partial_block) -> std::optional<ExportError> {
@@ -1417,7 +1431,8 @@ ExportOutcome export_video_impl(const ExportRequest& request, const bool use_har
         if (request.cancellation.stop_requested()) {
           return failure(ExportErrorCode::Cancelled, "export was cancelled");
         }
-        const edit::Time timeline_time = output_rate.frameTime(static_cast<std::int64_t>(index));
+        const edit::Time timeline_time =
+            range_start + output_rate.frameTime(static_cast<std::int64_t>(index));
         auto rendered =
             request.renderer->request_frame(request.snapshot, timeline_time, full_quality, epoch);
         if (!rendered) {
@@ -1498,12 +1513,12 @@ ExportOutcome export_video_impl(const ExportRequest& request, const bool use_har
         }
         if (request.include_audio) {
           const edit::Time completed_frame_time =
-              output_rate.frameTime(static_cast<std::int64_t>(index + 1U));
+              range_start + output_rate.frameTime(static_cast<std::int64_t>(index + 1U));
           const std::int64_t frame_audio_end =
               completed_frame_time
                   .rescaledTo(audio_render::kTimelineAudioSampleRate, edit::RoundingMode::Ceil)
                   .value();
-          const std::int64_t audio_end = std::min(frame_audio_end, signed_audio_sample_count);
+          const std::int64_t audio_end = std::min(frame_audio_end, range_end_sample);
           if (auto audio_error = encode_audio_through(audio_end, false)) {
             return ExportOutcome::failure(std::move(*audio_error));
           }
@@ -1537,7 +1552,7 @@ ExportOutcome export_video_impl(const ExportRequest& request, const bool use_har
       }
     }
     if (request.include_audio) {
-      if (auto audio_error = encode_audio_through(signed_audio_sample_count, true)) {
+      if (auto audio_error = encode_audio_through(range_end_sample, true)) {
         return ExportOutcome::failure(std::move(*audio_error));
       }
       status = avcodec_send_frame(audio_codec.get(), nullptr);

@@ -236,6 +236,12 @@ void TimelineWidget::setMarkers(QVector<TimelineMarkerView> markers) {
   viewport()->update();
 }
 
+void TimelineWidget::setProgramMarks(std::optional<qint64> markIn, std::optional<qint64> markOut) {
+  program_mark_in_ = markIn;
+  program_mark_out_ = markOut;
+  viewport()->update();
+}
+
 void TimelineWidget::setGaps(QVector<TimelineGapView> gaps) {
   gaps_ = std::move(gaps);
   const auto selected = std::find_if(gaps_.cbegin(), gaps_.cend(), [this](const auto& gap) {
@@ -643,6 +649,29 @@ void TimelineWidget::paintEvent(QPaintEvent* event) {
       painter.fillRect(
           QRect{x, 1, std::max(1, xForTime(markerView.start + markerView.duration) - x), 3}, color);
     }
+  }
+
+  const auto drawProgramMark = [&](std::optional<qint64> mark, const QColor& color, const QString& label) {
+    if (!mark.has_value()) {
+      return;
+    }
+    const auto x = xForTime(*mark);
+    if (x < header_width_ - 8 || x > viewport()->width() + 8) {
+      return;
+    }
+    painter.setPen(QPen{color, 2});
+    painter.drawLine(x, 0, x, ruler_height_ - 1);
+    painter.setPen(color);
+    painter.drawText(x + 2, ruler_height_ - 4, label);
+  };
+  drawProgramMark(program_mark_in_, QColor{94, 214, 194}, QStringLiteral("I"));
+  drawProgramMark(program_mark_out_, QColor{244, 89, 93}, QStringLiteral("O"));
+  if (program_mark_in_.has_value() && program_mark_out_.has_value() &&
+      *program_mark_out_ > *program_mark_in_) {
+    const auto left = xForTime(*program_mark_in_);
+    const auto right = xForTime(*program_mark_out_);
+    painter.fillRect(QRect{left, ruler_height_ - 5, std::max(1, right - left), 4},
+                     QColor{94, 214, 194, 70});
   }
 
   if (clip_gesture_.dragging && clip_gesture_.clipIndex >= 0 &&

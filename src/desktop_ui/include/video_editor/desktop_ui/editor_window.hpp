@@ -158,6 +158,12 @@ signals:
   void duplicateClipsRequested();
   void pasteClipAttributesRequested();
   void replaceClipMediaRequested(const QString& clipId = QString());
+  void gotoTimecodeRequested();
+  void toggleLoopPlaybackRequested();
+  void playAroundRequested();
+  void clearProgramInRequested();
+  void clearProgramOutRequested();
+  void clearProgramMarksRequested();
   void deleteSelectionRequested(bool ripple);
   void playbackRateRequested(double rate);
   void seekRequested(qint64 position);

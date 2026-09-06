@@ -77,6 +77,8 @@ struct ExportRequest final {
   // Captions to burn in / export as sidecar. Drawn from the snapshot's
   // sequence.captions by the caller, or left empty for None mode.
   std::vector<edit::Caption> captions;
+  // When set, export only this timeline window (inclusive start, exclusive end).
+  std::optional<edit::TimeRange> export_range{};
 };
 
 enum class ExportErrorCode : std::uint8_t {

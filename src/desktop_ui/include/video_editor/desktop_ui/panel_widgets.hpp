@@ -362,6 +362,7 @@ public:
   [[nodiscard]] std::uint64_t overrideVideoBitrate() const;
   [[nodiscard]] std::optional<int> overrideVideoQuality() const;
   [[nodiscard]] bool preferHardwareEncoder() const;
+  [[nodiscard]] bool useExportRange() const;
 
 signals:
   void presetChanged(const QString& presetId);
@@ -388,6 +389,7 @@ private:
   QComboBox* audio_bitrate_{nullptr};
   QComboBox* caption_mode_{nullptr};
   QComboBox* sidecar_format_{nullptr};
+  QCheckBox* use_export_range_{nullptr};
   QLabel* encoder_summary_{nullptr};
   QLabel* preset_notes_{nullptr};
   bool export_enabled_{false};

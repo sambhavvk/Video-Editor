@@ -10,6 +10,8 @@ add_library(video_editor_app_controller
   path_utils.hpp
   session_event_log.cpp
   session_event_log.hpp
+  timecode_util.cpp
+  timecode_util.hpp
   worker_host_session.cpp
   worker_host_session.hpp)
 

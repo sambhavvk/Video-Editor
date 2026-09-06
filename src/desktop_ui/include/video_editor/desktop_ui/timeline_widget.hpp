@@ -80,6 +80,7 @@ public:
   void setClips(QVector<TimelineClipView> clips);
   void setDuration(qint64 duration, qint64 timeScale);
   void setMarkers(QVector<TimelineMarkerView> markers);
+  void setProgramMarks(std::optional<qint64> markIn, std::optional<qint64> markOut);
   void setGaps(QVector<TimelineGapView> gaps);
   void setSnapResolver(std::function<TimelineSnapResult(const TimelineSnapRequest&)> resolver);
   void setTransitions(const QVector<TransitionView>& transitions);
@@ -243,6 +244,8 @@ private:
   QVector<TimelineTrackView> tracks_;
   QVector<TimelineClipView> clips_;
   QVector<TimelineMarkerView> markers_;
+  std::optional<qint64> program_mark_in_;
+  std::optional<qint64> program_mark_out_;
   QVector<TimelineGapView> gaps_;
   std::function<TimelineSnapResult(const TimelineSnapRequest&)> snap_resolver_;
   qint64 duration_{10 * 60 * 48'000};

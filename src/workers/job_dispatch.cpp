@@ -964,6 +964,12 @@ struct ExportErrorDescription {
                            ? std::optional<int>{parsed.options.video_quality()}
                            : std::nullopt,
       .captions = captions};
+  if (parsed.options.use_export_range()) {
+    request.export_range = edit::TimeRange{
+        edit::Time(parsed.options.export_range_start(), 48'000U),
+        edit::Time(parsed.options.export_range_end() - parsed.options.export_range_start(),
+                   48'000U)};
+  }
 
   const auto exported = export_service::export_video(request);
   if (!sink_available) {

@@ -121,6 +121,9 @@ message ExportOptions {
   string sequence_id = 15;
   // Creator delivery video codec selector: "" or "vp9" (default), or "av1".
   string video_codec = 16;
+  bool use_export_range = 17;
+  int64 export_range_start = 18;
+  int64 export_range_end = 19;
 }
 
 message StartJob { JobSpec spec = 1; }

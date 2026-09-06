@@ -2,6 +2,7 @@
 #include "editor_controller.hpp"
 #include "media_reconstruction.hpp"
 #include "path_utils.hpp"
+#include "timecode_util.hpp"
 #include "session_event_log.hpp"
 #include "worker_host_session.hpp"
 
@@ -1002,9 +1003,9 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
   connect(&window_, &desktop_ui::EditorWindow::sourceOverwriteInsertRequested, this,
           [this] { insertLoadedSource(edit::InsertMode::Overwrite); });
   connect(&window_, &desktop_ui::EditorWindow::sourceMarkInRequested, this,
-          &EditorController::markSourceIn);
+          &EditorController::markProgramIn);
   connect(&window_, &desktop_ui::EditorWindow::sourceMarkOutRequested, this,
-          &EditorController::markSourceOut);
+          &EditorController::markProgramOut);
   connect(&window_, &desktop_ui::EditorWindow::sourceSeekRequested, this,
           &EditorController::seekSource);
   connect(&window_, &desktop_ui::EditorWindow::sourcePlaybackRateRequested, this,
@@ -1047,6 +1048,18 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::pasteClipAttributes);
   connect(&window_, &desktop_ui::EditorWindow::replaceClipMediaRequested, this,
           &EditorController::replaceSelectedClipMedia);
+  connect(&window_, &desktop_ui::EditorWindow::gotoTimecodeRequested, this,
+          &EditorController::gotoTimecode);
+  connect(&window_, &desktop_ui::EditorWindow::toggleLoopPlaybackRequested, this,
+          &EditorController::toggleLoopPlayback);
+  connect(&window_, &desktop_ui::EditorWindow::playAroundRequested, this,
+          &EditorController::playAround);
+  connect(&window_, &desktop_ui::EditorWindow::clearProgramInRequested, this,
+          &EditorController::clearProgramIn);
+  connect(&window_, &desktop_ui::EditorWindow::clearProgramOutRequested, this,
+          &EditorController::clearProgramOut);
+  connect(&window_, &desktop_ui::EditorWindow::clearProgramMarksRequested, this,
+          &EditorController::clearProgramMarks);
   connect(window_.timeline(), &desktop_ui::TimelineWidget::clipReplaceMediaRequested, this,
           &EditorController::replaceClipMediaFromSource);
   connect(&window_, &desktop_ui::EditorWindow::deleteSelectionRequested, this,
@@ -2571,6 +2584,12 @@ EditorController::ExportRequestBuild EditorController::buildExportRequest(
   options.set_include_audio(true);
   options.set_overwrite_existing(overwriteExisting);
   options.set_sequence_id(sequence->id.toString());
+  if (panel->useExportRange() && program_mark_in_.has_value() && program_mark_out_.has_value() &&
+      *program_mark_out_ > *program_mark_in_) {
+    options.set_use_export_range(true);
+    options.set_export_range_start(*program_mark_in_);
+    options.set_export_range_end(*program_mark_out_);
+  }
 
   result.ok = true;
   result.options = std::move(options);
@@ -4189,6 +4208,87 @@ void EditorController::replaceClipMediaFromSource(const QString& clipIdText) {
              tr("Could not replace the clip media"));
 }
 
+void EditorController::gotoTimecode() {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    return;
+  }
+  bool accepted = false;
+  const QString text =
+      QInputDialog::getText(&window_, tr("Go to Timecode"), tr("Timecode:"), QLineEdit::Normal,
+                            formatTimecode(playheadTime(), sequence->frame_rate), &accepted);
+  if (!accepted) {
+    return;
+  }
+  const auto parsed = parseTimecodeInput(text, sequence->frame_rate, timeline_time_scale_);
+  if (!parsed.has_value()) {
+    window_.showTransientMessage(tr("Could not parse the timecode"));
+    return;
+  }
+  seek(timelineValue(*parsed));
+}
+
+void EditorController::markProgramIn() {
+  if (window_.sourceViewer() != nullptr && window_.sourceViewer()->hasFocus()) {
+    markSourceIn();
+    return;
+  }
+  program_mark_in_ = playhead_;
+  if (program_mark_out_.has_value() && *program_mark_out_ <= *program_mark_in_) {
+    program_mark_out_.reset();
+  }
+  refreshTimelineView();
+}
+
+void EditorController::markProgramOut() {
+  if (window_.sourceViewer() != nullptr && window_.sourceViewer()->hasFocus()) {
+    markSourceOut();
+    return;
+  }
+  program_mark_out_ = playhead_;
+  if (program_mark_in_.has_value() && *program_mark_out_ <= *program_mark_in_) {
+    program_mark_in_.reset();
+  }
+  refreshTimelineView();
+}
+
+void EditorController::clearProgramIn() {
+  program_mark_in_.reset();
+  refreshTimelineView();
+}
+
+void EditorController::clearProgramOut() {
+  program_mark_out_.reset();
+  refreshTimelineView();
+}
+
+void EditorController::clearProgramMarks() {
+  program_mark_in_.reset();
+  program_mark_out_.reset();
+  refreshTimelineView();
+}
+
+void EditorController::toggleLoopPlayback() {
+  loop_playback_ = !loop_playback_;
+  window_.showTransientMessage(loop_playback_ ? tr("Loop playback enabled")
+                                            : tr("Loop playback disabled"));
+}
+
+void EditorController::playAround() {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    return;
+  }
+  QSettings settings;
+  const qint64 preroll =
+      settings.value(QStringLiteral("playback/playAroundPrerollMs"), 2'000).toLongLong();
+  const qint64 postroll = preroll;
+  const qint64 start = std::max<qint64>(0, playhead_ - preroll);
+  play_around_end_ = std::min(playhead_ + postroll, toUiTime(edit::sequenceDuration(*sequence)));
+  seek(start);
+  setPlaybackRate(1.0);
+}
+
 void EditorController::deleteSelectedClip(const bool ripple) {
   const edit::Sequence* sequence = currentSequence();
   const auto selected = selectedClipIds();
@@ -4779,6 +4879,19 @@ void EditorController::advancePlayback() {
     stopAudioPlayback();
     playback_timer_.stop();
     playback_rate_ = 0.0;
+    play_around_end_.reset();
+  } else if (play_around_end_.has_value() && playback_rate_ > 0.0 &&
+             playhead_ >= *play_around_end_) {
+    stopAudioPlayback();
+    playback_timer_.stop();
+    playback_rate_ = 0.0;
+    play_around_end_.reset();
+  } else if (loop_playback_ && playback_rate_ > 0.0) {
+    const qint64 loop_end = program_mark_out_.value_or(end);
+    const qint64 loop_start = program_mark_in_.value_or(0);
+    if (playhead_ >= loop_end && loop_end > loop_start) {
+      seek(loop_start);
+    }
   }
 }
 
@@ -7970,6 +8083,7 @@ void EditorController::refreshTimelineView() {
   window_.timeline()->setFrameRate(sequence->frame_rate.numerator(),
                                    sequence->frame_rate.denominator());
   window_.timeline()->setPlayhead(timelineValue(playheadTime()));
+  window_.timeline()->setProgramMarks(program_mark_in_, program_mark_out_);
   window_.programViewer()->setTimecode(timecodeText(playhead_, sequence->frame_rate));
 }
 

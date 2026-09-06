@@ -239,6 +239,14 @@ private slots:
   void trimHeadToPlayhead(bool overwrite);
   void trimTailToPlayhead(bool overwrite);
   void selectForwardAtPlayhead(bool includeTracksBelow);
+  void gotoTimecode();
+  void markProgramIn();
+  void markProgramOut();
+  void clearProgramIn();
+  void clearProgramOut();
+  void clearProgramMarks();
+  void toggleLoopPlayback();
+  void playAround();
   void replaceSelectedClipMedia();
   void copySelectedClips();
   void cutSelectedClips();
@@ -733,6 +741,12 @@ private:
   qint64 source_playhead_{0};
   std::optional<qint64> source_mark_in_;
   std::optional<qint64> source_mark_out_;
+  std::optional<qint64> program_mark_in_;
+  std::optional<qint64> program_mark_out_;
+  bool loop_playback_{false};
+  bool show_source_timecode_{false};
+  QString pending_timecode_input_;
+  std::optional<qint64> play_around_end_;
   double source_playback_rate_{0.0};
   std::uint64_t source_preview_epoch_{0};
   std::uint64_t source_preview_serial_{0};

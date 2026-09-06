@@ -2604,6 +2604,11 @@ DeliverPanelWidget::DeliverPanelWidget(QWidget* parent) : QWidget(parent) {
   destinationForm->addRow(tr("Destination"), destinationWidget);
   layout->addLayout(destinationForm);
 
+  use_export_range_ = new QCheckBox(tr("Use program In/Out range"), this);
+  use_export_range_->setObjectName(QStringLiteral("useExportRange"));
+  use_export_range_->setAccessibleName(tr("Export only the program monitor in/out range"));
+  layout->addWidget(use_export_range_);
+
   auto* summary = new QGroupBox(tr("Summary"), this);
   auto* summaryLayout = new QFormLayout(summary);
   auto* summaryVideo = new QLabel(summary);
@@ -3004,6 +3009,10 @@ std::optional<int> DeliverPanelWidget::overrideVideoQuality() const {
 
 bool DeliverPanelWidget::preferHardwareEncoder() const {
   return hardware_encoder_ != nullptr && hardware_encoder_->isChecked();
+}
+
+bool DeliverPanelWidget::useExportRange() const {
+  return use_export_range_ != nullptr && use_export_range_->isChecked();
 }
 
 } // namespace video_editor::desktop_ui
