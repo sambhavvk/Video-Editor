@@ -207,6 +207,31 @@ TEST(GpuBackend, ResizePresentationWithoutSurfaceReturnsUnavailable) {
   EXPECT_EQ(resized.error->code, RenderErrorCode::GpuPresentationUnavailable);
 }
 
+TEST(GpuBackend, LinuxPresentationHandlesDoNotImportWindowSurface) {
+  // Garbage Vulkan handles must not be forwarded to libplacebo. Doing so
+  // SIGSEGVs in vkGetPhysicalDeviceSurfaceSupportKHR on NVIDIA/Wayland.
+  auto gpu = GpuRenderer::create({
+      .preferred_backend = GpuBackendKind::Auto,
+      .allow_software = true,
+      .presentation =
+          NativePresentationSurface{
+              .backend = GpuBackendKind::Vulkan,
+              .instance = 1,
+              .surface = 1,
+              .get_proc_addr = 1,
+              .width = 64,
+              .height = 64,
+          },
+  });
+  ASSERT_NE(gpu, nullptr);
+  const GpuCapabilities capabilities = gpu->capabilities();
+  EXPECT_FALSE(capabilities.presentation);
+  if (!capabilities.available()) {
+    return;
+  }
+  EXPECT_NE(capabilities.diagnostic.find("cannot be imported safely"), std::string::npos);
+}
+
 TEST(GpuBackend, DeviceLossLatchesCpuFallbackState) {
   auto gpu = GpuRenderer::create({.allow_software = true});
   ASSERT_NE(gpu, nullptr);

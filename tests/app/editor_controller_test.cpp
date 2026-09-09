@@ -5,6 +5,7 @@
 #include "media_reconstruction.hpp"
 #include "path_utils.hpp"
 
+#include "video_editor/desktop_ui/command_palette.hpp"
 #include "video_editor/desktop_ui/editor_window.hpp"
 #include "video_editor/desktop_ui/panel_widgets.hpp"
 #include "video_editor/desktop_ui/program_viewer.hpp"
@@ -28,6 +29,7 @@
 #include <QSettings>
 #include <QSignalSpy>
 #include <QStandardPaths>
+#include <QStatusBar>
 #include <QTableWidget>
 #include <QTemporaryDir>
 #include <QTabBar>
@@ -187,6 +189,8 @@ private slots:
   void persistsQueuedExportSidecar();
   void tracksRecentProjectsAndReopenLastSetting();
   void otioMenuActionsEmitImportExportSignals();
+  void showingWindowDoesNotCrashDuringGpuPresentationInit();
+  void emptyTimelineActionsReportWhyTheyDidNothing();
 
 private:
   std::unique_ptr<QTemporaryDir> application_data_;
@@ -1615,6 +1619,94 @@ void EditorControllerTest::tracksRecentProjectsAndReopenLastSetting() {
   QFile::remove(video_editor::app::qStringFromPath(checkpoint));
   video_editor::app::pruneMissingRecentProjectPaths(settings);
   QVERIFY(video_editor::app::readRecentProjectPaths(settings).isEmpty());
+}
+
+void EditorControllerTest::showingWindowDoesNotCrashDuringGpuPresentationInit() {
+  QSettings settings;
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+  window.show();
+  // nativePresentationReady used to start GpuRenderer::create on a worker
+  // thread, which SIGSEGV'd in vkGetPhysicalDeviceSurfaceSupportKHR. Drain
+  // the queued GUI-thread init so this aborts if that path still crashes.
+  QCoreApplication::processEvents();
+  QTest::qWait(250);
+  QVERIFY(window.isVisible());
+}
+
+void EditorControllerTest::emptyTimelineActionsReportWhyTheyDidNothing() {
+  QSettings settings;
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+  Q_UNUSED(controller)
+
+  window.splitClipRequested();
+  QCOMPARE(window.statusBar()->currentMessage(), QStringLiteral("Select a clip before splitting"));
+  window.deleteSelectionRequested(false);
+  QCOMPARE(window.statusBar()->currentMessage(), QStringLiteral("Select clips before deleting"));
+  window.unlinkClipsRequested();
+  QCOMPARE(window.statusBar()->currentMessage(),
+           QStringLiteral("Select clips before unlinking them"));
+  window.copyClipsRequested();
+  QCOMPARE(window.statusBar()->currentMessage(), QStringLiteral("Select clips to copy"));
+  window.nestSelectedClipsRequested();
+  QCOMPARE(window.statusBar()->currentMessage(),
+           QStringLiteral("Select one or more clips to nest"));
+  window.sourceRippleInsertRequested();
+  QCOMPARE(window.statusBar()->currentMessage(),
+           QStringLiteral("Load a source clip before inserting"));
+  window.setClipEnabledRequested(false);
+  QCOMPARE(window.statusBar()->currentMessage(),
+           QStringLiteral("Select a clip before disabling it"));
+  window.defaultTransitionRequested();
+  QCOMPARE(window.statusBar()->currentMessage(),
+           QStringLiteral("No edit point at the playhead for a default transition"));
+  window.audioMixer()->normalizationApplyRequested();
+  QCOMPARE(window.statusBar()->currentMessage(),
+           QStringLiteral("Analyze loudness before applying normalization"));
+  if (auto* remove = window.findChild<QPushButton*>(QStringLiteral("removeCaptionButton"))) {
+    remove->click();
+    QCOMPARE(window.statusBar()->currentMessage(), QStringLiteral("Select a caption to delete"));
+  }
+  if (auto* export_button = window.findChild<QToolButton*>(QStringLiteral("exportButton"))) {
+    QVERIFY(export_button->isEnabled());
+    export_button->click();
+    QCOMPARE(window.statusBar()->currentMessage(),
+             QStringLiteral("Add at least one clip to the timeline before exporting."));
+  }
+  window.zoomToSelectionRequested();
+  QCOMPARE(window.statusBar()->currentMessage(),
+           QStringLiteral("Select clips to zoom the timeline to them"));
+  window.timeline()->nudgeActiveClipByFrames(
+      1, video_editor::desktop_ui::TimelineWidget::EditIntent::Normal);
+  QCOMPARE(window.statusBar()->currentMessage(), QStringLiteral("Select clips before nudging them"));
+  window.sourceStepShuttleRequested(1);
+  QCOMPARE(window.statusBar()->currentMessage(),
+           QStringLiteral("Load a source clip before playing it"));
+  window.sourceStepFrameRequested(1);
+  QCOMPARE(window.statusBar()->currentMessage(),
+           QStringLiteral("Load a source clip before stepping frames"));
+  window.action(QStringLiteral("commandPalette"))->trigger();
+  auto* palette = window.findChild<video_editor::desktop_ui::CommandPalette*>();
+  QVERIFY(palette != nullptr);
+  auto* results = palette->findChild<QListWidget*>(QStringLiteral("commandPaletteResults"));
+  QVERIFY(results != nullptr);
+  bool found_paste = false;
+  bool found_trim = false;
+  for (int row = 0; row < results->count(); ++row) {
+    const auto* item = results->item(row);
+    if (item->text().contains(QStringLiteral("Paste Insert"))) {
+      found_paste = true;
+      QCOMPARE(item->toolTip(), QStringLiteral("Copy clips before pasting"));
+    }
+    if (item->text().contains(QStringLiteral("Overwrite Trim Tail to Playhead"))) {
+      found_trim = true;
+      QCOMPARE(item->toolTip(), QStringLiteral("No clips under the playhead to trim"));
+    }
+  }
+  QVERIFY(found_paste);
+  QVERIFY(found_trim);
+  palette->close();
 }
 
 void EditorControllerTest::otioMenuActionsEmitImportExportSignals() {

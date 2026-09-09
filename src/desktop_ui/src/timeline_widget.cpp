@@ -440,10 +440,13 @@ TimelineWidget::clipHitRegionAt(const QPoint& viewportPosition) const {
 
 void TimelineWidget::nudgeActiveClipByFrames(int frameCount, EditIntent intent) {
   const auto ids = selectedClipIds();
-  if (ids.isEmpty() || frameCount == 0) {
+  if (frameCount == 0) {
     return;
   }
   emit frameNudgeRequested(ids, frameCount, intent);
+  if (ids.isEmpty()) {
+    return;
+  }
 
   // Compatibility preview for old controller integrations. New integrations use
   // frameNudgeRequested so conversion stays exact in the edit model.

@@ -298,6 +298,9 @@ public:
   void setTranscriptionOptions(const TranscriptionOptionsView& options);
   void setCaptionStyle(const CaptionStyleView& style);
   void setReviewProposals(const QVector<CaptionProposalView>& proposals);
+  [[nodiscard]] TranscriptionState transcriptionState() const noexcept {
+    return transcription_state_;
+  }
 
 signals:
   void importCaptionsRequested();
@@ -373,6 +376,8 @@ public:
 
   [[nodiscard]] QString selectedPresetId() const;
   void setExportEnabled(bool enabled);
+  [[nodiscard]] bool exportReady() const noexcept;
+  [[nodiscard]] QString exportUnavailableReason() const;
   void setExportRunning(bool running, int percent = 0);
   void setExportJobs(const QVector<ExportJobView>& jobs);
   void loadPlatformPresets();
@@ -401,6 +406,7 @@ signals:
 
 private:
   void refreshExportJobSelection();
+  void refreshExportButtonAffordance();
   QComboBox* preset_{nullptr};
   QToolButton* export_button_{nullptr};
   QProgressBar* export_progress_{nullptr};

@@ -492,6 +492,7 @@ private:
   void cacheLutFile(const std::filesystem::path& path);
   void waitForInFlightCacheJob(bool cancel);
   void refreshViews();
+  void refreshCommandContext();
   void refreshRecentProjectsMenu();
   void recordRecentProject(const std::filesystem::path& checkpoint);
   void refreshMediaView();
@@ -666,6 +667,7 @@ private:
   bool gpu_status_announced_{false};
   bool gpu_frame_fallback_announced_{false};
   bool gpu_presentation_attempted_{false};
+  bool gpu_presentation_notice_shown_{false};
   bool gpu_offscreen_attempted_{false};
   QFutureWatcher<std::shared_ptr<render::GpuRenderer>> gpu_init_watcher_;
   std::uint64_t gpu_init_generation_{0};

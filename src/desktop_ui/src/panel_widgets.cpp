@@ -38,6 +38,9 @@
 #include <QTableWidget>
 #include <QToolButton>
 #include <QTreeWidget>
+
+#include <chrono>
+#include <fstream>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -1572,7 +1575,7 @@ AudioMixerWidget::AudioMixerWidget(QWidget* parent) : QWidget(parent) {
   normalization_apply_ = new QPushButton(tr("Apply"), normalize);
   normalization_apply_->setObjectName(QStringLiteral("normalizationApply"));
   normalization_apply_->setAccessibleName(tr("Apply loudness normalization"));
-  normalization_apply_->setEnabled(false);
+  normalization_apply_->setToolTip(tr("Analyze loudness before applying normalization"));
   normalization_target_ = new QDoubleSpinBox(normalize);
   normalization_target_->setObjectName(QStringLiteral("normalizationTargetLufs"));
   normalization_target_->setAccessibleName(tr("Normalization target LUFS"));
@@ -2145,19 +2148,21 @@ void AudioMixerWidget::setNormalizationReview(const double measuredLufs, const d
                                      .arg(targetLufs, 0, 'f', 1)
                                      .arg(gainDb, 0, 'f', 1));
   normalization_apply_->setEnabled(true);
+  normalization_apply_->setToolTip(tr("Apply the reviewed loudness change"));
 }
 
 void AudioMixerWidget::setNormalizationBusy(const bool busy) {
   normalization_analyze_->setEnabled(!busy);
+  normalization_apply_->setEnabled(!busy);
   if (busy) {
-    normalization_apply_->setEnabled(false);
     normalization_status_->setText(tr("Analyzing sequence loudness…"));
+    normalization_apply_->setToolTip(tr("Wait for loudness analysis to finish"));
   }
 }
 
 void AudioMixerWidget::setNormalizationStatus(const QString& status) {
   normalization_status_->setText(status);
-  normalization_apply_->setEnabled(false);
+  normalization_apply_->setToolTip(tr("Analyze loudness before applying normalization"));
 }
 
 double AudioMixerWidget::normalizationTargetLufs() const {
@@ -2462,9 +2467,7 @@ CaptionsPanelWidget::CaptionsPanelWidget(QWidget* parent) : QWidget(parent) {
   connect(extractEmbeddedTable, &QPushButton::clicked, this,
           &CaptionsPanelWidget::extractEmbeddedCaptionsRequested);
   connect(removeCaption, &QPushButton::clicked, this, [this] {
-    if (table_->currentRow() >= 0) {
-      emit removeCaptionRequested(table_->currentRow());
-    }
+    emit removeCaptionRequested(table_->currentRow());
   });
   connect(search_, &QLineEdit::textChanged, this, &CaptionsPanelWidget::findInTranscriptRequested);
   connect(table_, &QTableWidget::cellDoubleClicked, this, [this](int row, int) {
@@ -2742,7 +2745,11 @@ void CaptionsPanelWidget::updateStateControls() {
                       transcription_state_ == TranscriptionState::Cancelling;
   const bool ready = transcription_state_ == TranscriptionState::Ready;
   model_download_->setEnabled(!active && !ready);
-  transcribe_->setEnabled(ready);
+  transcribe_->setEnabled(!active);
+  transcribe_->setToolTip(
+      active ? tr("Transcription is already running")
+      : ready ? tr("Transcribe the selected audio clip locally")
+              : tr("Download the transcription model before transcribing"));
   transcribe_cancel_->setVisible(active);
   transcribe_cancel_->setEnabled(transcription_state_ != TranscriptionState::Cancelling);
 }
@@ -3006,10 +3013,27 @@ DeliverPanelWidget::DeliverPanelWidget(QWidget* parent) : QWidget(parent) {
     if (audio_only) {
       caption_mode_->setCurrentIndex(0);
     }
-    export_button_->setEnabled(export_enabled_ && selected_preset_available_);
+    refreshExportButtonAffordance();
     emit presetChanged(selectedPresetId());
   });
   connect(export_button_, &QToolButton::clicked, this, [this] {
+    // #region agent log
+    {
+      std::ofstream out("/home/sambhav/Projects/VideoEditor/.cursor/debug-4d158f.log",
+                        std::ios::app);
+      if (out) {
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count();
+        out << "{\"sessionId\":\"4d158f\",\"runId\":\"post-fix\",\"hypothesisId\":\"D\","
+               "\"location\":\"panel_widgets.cpp:exportButton\",\"message\":\"export clicked\","
+               "\"data\":{\"enabled\":"
+            << export_enabled_ << ",\"presetAvailable\":" << selected_preset_available_
+            << ",\"ready\":" << exportReady() << ",\"cancelling\":" << export_progress_->isVisible()
+            << "},\"timestamp\":" << ms << "}\n";
+      }
+    }
+    // #endregion
     if (export_progress_->isVisible()) {
       emit cancelRequested();
     } else {
@@ -3019,6 +3043,7 @@ DeliverPanelWidget::DeliverPanelWidget(QWidget* parent) : QWidget(parent) {
 
   loadPlatformPresets();
   sidecar_format_->setEnabled(false);
+  refreshExportButtonAffordance();
 }
 
 void DeliverPanelWidget::loadPlatformPresets() {
@@ -3075,18 +3100,59 @@ QString DeliverPanelWidget::selectedPresetId() const {
   return preset_->currentData().toString();
 }
 
+bool DeliverPanelWidget::exportReady() const noexcept {
+  return export_enabled_ && selected_preset_available_;
+}
+
+QString DeliverPanelWidget::exportUnavailableReason() const {
+  if (!export_enabled_) {
+    return tr("Add at least one clip to the timeline before exporting.");
+  }
+  if (!selected_preset_available_) {
+    return tr("The selected preset's encoder is not available on this system.");
+  }
+  return {};
+}
+
+void DeliverPanelWidget::refreshExportButtonAffordance() {
+  const bool running = export_progress_ != nullptr && export_progress_->isVisible();
+  export_button_->setEnabled(true);
+  if (running) {
+    export_button_->setToolTip(tr("Cancel the current export"));
+  } else if (!exportReady()) {
+    export_button_->setToolTip(exportUnavailableReason());
+  } else {
+    export_button_->setToolTip(tr("Export the current sequence"));
+  }
+  // #region agent log
+  {
+    std::ofstream out("/home/sambhav/Projects/VideoEditor/.cursor/debug-4d158f.log", std::ios::app);
+    if (out) {
+      const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::system_clock::now().time_since_epoch())
+                          .count();
+      out << "{\"sessionId\":\"4d158f\",\"runId\":\"post-fix\",\"hypothesisId\":\"D\","
+             "\"location\":\"panel_widgets.cpp:refreshExportButtonAffordance\",\"message\":"
+             "\"export affordance\",\"data\":{\"enabled\":"
+          << export_enabled_ << ",\"ready\":" << exportReady() << ",\"running\":" << running
+          << "},\"timestamp\":" << ms << "}\n";
+    }
+  }
+  // #endregion
+}
+
 void DeliverPanelWidget::setExportEnabled(bool enabled) {
   export_enabled_ = enabled;
-  export_button_->setEnabled(enabled && selected_preset_available_);
+  refreshExportButtonAffordance();
 }
 
 void DeliverPanelWidget::setExportRunning(const bool running, const int percent) {
   export_progress_->setVisible(running);
   export_progress_->setValue(std::clamp(percent, 0, 100));
   export_button_->setText(running ? tr("Cancel export") : tr("Export master"));
-  export_button_->setEnabled(running || (export_enabled_ && selected_preset_available_));
   export_button_->setAccessibleName(running ? tr("Cancel current export")
                                             : tr("Export video master"));
+  refreshExportButtonAffordance();
 }
 
 void DeliverPanelWidget::setExportJobs(const QVector<ExportJobView>& jobs) {

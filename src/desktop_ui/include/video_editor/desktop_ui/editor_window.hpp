@@ -114,6 +114,17 @@ public:
                        QVector<TimelineClipView> clips, QVector<TimelineMarkerView> markers,
                        QVector<TimelineGapView> gaps);
   void setSequenceTabs(const QVector<SequenceTabView>& tabs);
+  struct CommandContext {
+    bool hasSequence{false};
+    bool hasClipSelection{false};
+    bool hasSource{false};
+    bool hasClipboard{false};
+    bool hasAttributeClipboard{false};
+    bool hasClipsAtPlayhead{false};
+  };
+
+  void setCommandContext(CommandContext context);
+  [[nodiscard]] QString commandUnavailableReason(const QAction* action) const;
   void showTransientMessage(const QString& message, int timeoutMs = 4000);
   void setAudioSyncStatus(const QString& text);
   void setSequenceFormatStatus(const QString& text);
@@ -317,6 +328,7 @@ private:
   QDockWidget* scopes_dock_{nullptr};
 
   CommandPalette* command_palette_{nullptr};
+  CommandContext command_context_{};
   QLabel* workspace_label_{nullptr};
   QLabel* av_sync_label_{nullptr};
   QLabel* transport_label_{nullptr};

@@ -4,8 +4,10 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <locale>
 #include <mutex>
 #include <numbers>
@@ -749,20 +751,11 @@ std::unique_ptr<GpuRenderer> GpuRenderer::create(const GpuOptions& options) {
   device_params.async_transfer = true;
   device_params.async_compute = true;
   device_params.queue_count = 1;
-  if (options.presentation.surface != 0) {
-    if (options.presentation.instance == 0) {
-      state->capabilities.diagnostic =
-          "Vulkan presentation requires the VkInstance that owns the surface";
-      return std::unique_ptr<GpuRenderer>(
-          new GpuRenderer(std::make_unique<Impl>(Impl{.state = std::move(state)})));
-    }
-    device_params.instance = reinterpret_cast<VkInstance>(options.presentation.instance);
-    device_params.surface = reinterpret_cast<VkSurfaceKHR>(options.presentation.surface);
-    if (options.presentation.get_proc_addr != 0) {
-      device_params.get_proc_addr =
-          reinterpret_cast<PFN_vkGetInstanceProcAddr>(options.presentation.get_proc_addr);
-    }
-  }
+  // Do not import a Qt VkInstance/VkSurfaceKHR. libplacebo then calls
+  // vkGetPhysicalDeviceSurfaceSupportKHR during device selection, which
+  // SIGSEGVs in NVIDIA's driver and can fatal the Wayland connection
+  // (zwp_linux_dmabuf_v1.get_surface_feedback). Offscreen GPU still works
+  // with a libplacebo-owned instance.
   state->vulkan = pl_vulkan_create(state->log, &device_params);
   if (state->vulkan != nullptr) {
     state->gpu = state->vulkan->gpu;
@@ -799,15 +792,22 @@ std::unique_ptr<GpuRenderer> GpuRenderer::create(const GpuOptions& options) {
     swapchain_params.height = std::max(1, options.presentation.height);
     state->swapchain = pl_d3d11_create_swapchain(state->d3d11, &swapchain_params);
 #elif defined(__linux__) && defined(PL_HAVE_VULKAN)
-    pl_vulkan_swapchain_params swapchain_params{};
-    swapchain_params.surface = reinterpret_cast<VkSurfaceKHR>(options.presentation.surface);
-    swapchain_params.present_mode = VK_PRESENT_MODE_FIFO_KHR;
-    state->swapchain = pl_vulkan_create_swapchain(state->vulkan, &swapchain_params);
-    if (state->swapchain != nullptr) {
-      int width = std::max(1, options.presentation.width);
-      int height = std::max(1, options.presentation.height);
-      pl_swapchain_resize(state->swapchain, &width, &height);
+    // See device creation: Qt Vulkan surfaces cannot be imported safely.
+    // #region agent log
+    {
+      std::ofstream out("/home/sambhav/Projects/VideoEditor/.cursor/debug-4d158f.log",
+                        std::ios::app);
+      if (out) {
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch())
+                            .count();
+        out << "{\"sessionId\":\"4d158f\",\"runId\":\"pre-fix\",\"hypothesisId\":\"B\","
+               "\"location\":\"gpu_backend.cpp:create\",\"message\":\"skipped Qt Vulkan surface "
+               "import\",\"data\":{\"surface\":"
+            << (options.presentation.surface != 0) << "},\"timestamp\":" << ms << "}\n";
+      }
     }
+    // #endregion
 #endif
   }
 
@@ -816,7 +816,12 @@ std::unique_ptr<GpuRenderer> GpuRenderer::create(const GpuOptions& options) {
   state->capabilities.presentation = state->swapchain != nullptr;
   state->capabilities.diagnostic =
       options.presentation.surface != 0 && state->swapchain == nullptr
+#if defined(__linux__)
+          ? "offscreen GPU rendering is ready, but native presentation was skipped because "
+            "the window Vulkan surface cannot be imported safely"
+#else
           ? "offscreen GPU rendering is ready, but presentation swapchain creation failed"
+#endif
           : "GPU rendering is ready";
   return std::unique_ptr<GpuRenderer>(
       new GpuRenderer(std::make_unique<Impl>(Impl{.state = std::move(state)})));
@@ -1554,16 +1559,9 @@ RenderResult<bool> GpuRenderer::resize_presentation(const int width, const int h
   swapchain_params.height = std::max(1, surface.height);
   return pl_d3d11_create_swapchain(state.d3d11, &swapchain_params);
 #elif defined(__linux__) && defined(PL_HAVE_VULKAN)
-  pl_vulkan_swapchain_params swapchain_params{};
-  swapchain_params.surface = reinterpret_cast<VkSurfaceKHR>(surface.surface);
-  swapchain_params.present_mode = VK_PRESENT_MODE_FIFO_KHR;
-  pl_swapchain created = pl_vulkan_create_swapchain(state.vulkan, &swapchain_params);
-  if (created != nullptr) {
-    int width = std::max(1, surface.width);
-    int height = std::max(1, surface.height);
-    pl_swapchain_resize(created, &width, &height);
-  }
-  return created;
+  (void)state;
+  (void)surface;
+  return nullptr;
 #else
   (void)state;
   (void)surface;

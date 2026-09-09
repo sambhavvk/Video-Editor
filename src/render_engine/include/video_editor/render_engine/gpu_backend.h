@@ -108,6 +108,8 @@ struct GpuLayer final {
 
 class GpuRenderer final {
 public:
+  // On Linux, presentation.instance/surface are ignored: importing a Qt
+  // VkSurfaceKHR into libplacebo SIGSEGVs in some Vulkan drivers.
   [[nodiscard]] static std::unique_ptr<GpuRenderer> create(const GpuOptions& options = {});
 
   ~GpuRenderer();

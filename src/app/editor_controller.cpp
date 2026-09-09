@@ -104,6 +104,40 @@ namespace video_editor::app {
 
 namespace {
 
+// #region agent log
+void debugAgentLog(const char* hypothesisId, const char* location, const char* message,
+                   const std::string& extra = {}) {
+  std::ofstream out("/home/sambhav/Projects/VideoEditor/.cursor/debug-4d158f.log", std::ios::app);
+  if (!out) {
+    return;
+  }
+  std::string escaped;
+  escaped.reserve(extra.size());
+  for (const char ch : extra) {
+    if (ch == '\\' || ch == '"') {
+      escaped.push_back('\\');
+    }
+    if (ch == '\n') {
+      escaped += "\\n";
+      continue;
+    }
+    escaped.push_back(ch);
+  }
+  const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::system_clock::now().time_since_epoch())
+                      .count();
+  out << "{\"sessionId\":\"4d158f\",\"runId\":\"post-fix\",\"hypothesisId\":\"" << hypothesisId
+      << "\",\"location\":\"" << location << "\",\"message\":\"" << message
+      << "\",\"data\":{\"extra\":\"" << escaped << "\"},\"timestamp\":" << ms << "}\n";
+}
+
+void explainUnavailable(desktop_ui::EditorWindow& window, const char* location,
+                        const QString& message) {
+  debugAgentLog("A", location, "user feedback", message.toStdString());
+  window.showTransientMessage(message);
+}
+// #endregion
+
 QSettings& windowSettings(desktop_ui::EditorWindow& window) {
   QSettings* settings = window.settings();
   Q_ASSERT(settings != nullptr);
@@ -642,17 +676,13 @@ QString gpuBackendName(const render::GpuBackendKind backend) {
 
 QString gpuReadyTitle(const render::GpuCapabilities& capabilities) {
   QString title = QObject::tr("Program · %1 GPU ready").arg(gpuBackendName(capabilities.backend));
-  if (capabilities.presentation) {
-    title += QObject::tr(" · present");
-  }
+  title += capabilities.presentation ? QObject::tr(" · present") : QObject::tr(" · offscreen");
   return title;
 }
 
 QString gpuActiveTitle(const render::GpuCapabilities& capabilities) {
   QString title = QObject::tr("Program · %1 GPU").arg(gpuBackendName(capabilities.backend));
-  if (capabilities.presentation) {
-    title += QObject::tr(" · present");
-  }
+  title += capabilities.presentation ? QObject::tr(" · present") : QObject::tr(" · offscreen");
   return title;
 }
 
@@ -1229,6 +1259,11 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
   connect(window_.mediaBin(), &desktop_ui::MediaBinWidget::hoverScrubRequested, this,
           &EditorController::scrubMediaPreview);
   connect(&window_, &desktop_ui::EditorWindow::zoomToSelectionRequested, this, [this] {
+    if (window_.timeline()->selectedClipIds().isEmpty()) {
+      explainUnavailable(window_, "editor_controller.cpp:zoomToSelectionRequested",
+                         tr("Select clips to zoom the timeline to them"));
+      return;
+    }
     window_.timeline()->zoomToSelection();
   });
   connect(&window_, &desktop_ui::EditorWindow::toggleLinkedSelectionRequested, this,
@@ -1238,6 +1273,9 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
   connect(&window_, &desktop_ui::EditorWindow::setClipEnabledRequested, this,
           [this](const bool enabled) {
             if (!active_clip_id_.has_value()) {
+              explainUnavailable(window_, "editor_controller.cpp:setClipEnabledRequested",
+                                 enabled ? tr("Select a clip before enabling it")
+                                         : tr("Select a clip before disabling it"));
               return;
             }
             setClipEnabledFromTimeline(QString::fromStdString(active_clip_id_->toString()),
@@ -3543,6 +3581,8 @@ void EditorController::insertLoadedSource(const edit::InsertMode mode) {
   const edit::Asset* asset = edit::findAsset(*project, *source_asset_id_);
   const edit::Sequence* sequence = currentSequence();
   if (asset == nullptr || sequence == nullptr) {
+    explainUnavailable(window_, "editor_controller.cpp:insertLoadedSource",
+                       tr("The source clip is no longer available"));
     return;
   }
   const edit::Asset asset_copy = *asset;
@@ -3671,6 +3711,8 @@ void EditorController::insertLoadedSource(const edit::InsertMode mode) {
 
 void EditorController::markSourceIn() {
   if (!source_asset_id_.has_value()) {
+    explainUnavailable(window_, "editor_controller.cpp:markSourceIn",
+                       tr("Load a source clip before marking In"));
     return;
   }
   source_mark_in_ = std::clamp<qint64>(source_playhead_, 0, sourceDurationUi());
@@ -3682,6 +3724,8 @@ void EditorController::markSourceIn() {
 
 void EditorController::markSourceOut() {
   if (!source_asset_id_.has_value()) {
+    explainUnavailable(window_, "editor_controller.cpp:markSourceOut",
+                       tr("Load a source clip before marking Out"));
     return;
   }
   source_mark_out_ = std::clamp<qint64>(source_playhead_, 0, sourceDurationUi());
@@ -3702,6 +3746,10 @@ void EditorController::seekSource(const qint64 position) {
 
 void EditorController::setSourcePlaybackRate(const double rate) {
   if (!source_asset_id_.has_value()) {
+    if (std::abs(rate) > std::numeric_limits<double>::epsilon()) {
+      explainUnavailable(window_, "editor_controller.cpp:setSourcePlaybackRate",
+                         tr("Load a source clip before playing it"));
+    }
     return;
   }
   source_playback_rate_ = rate;
@@ -3715,6 +3763,8 @@ void EditorController::setSourcePlaybackRate(const double rate) {
 
 void EditorController::stepSourceShuttle(const int direction) {
   if (!source_asset_id_.has_value()) {
+    explainUnavailable(window_, "editor_controller.cpp:stepSourceShuttle",
+                       tr("Load a source clip before playing it"));
     return;
   }
   const bool same_direction = source_playback_rate_ * static_cast<double>(direction) > 0.0;
@@ -3724,6 +3774,8 @@ void EditorController::stepSourceShuttle(const int direction) {
 
 void EditorController::stepSourceFrame(const int direction) {
   if (!source_asset_id_.has_value()) {
+    explainUnavailable(window_, "editor_controller.cpp:stepSourceFrame",
+                       tr("Load a source clip before stepping frames"));
     return;
   }
   const edit::Sequence* sequence = currentSequence();
@@ -3916,6 +3968,8 @@ void EditorController::splitClipAt(const QString& clipIdText, const qint64 uiTim
 void EditorController::selectClipsAtPlayhead() {
   const edit::Sequence* sequence = currentSequence();
   if (sequence == nullptr) {
+    explainUnavailable(window_, "editor_controller.cpp:selectClipsAtPlayhead",
+                       tr("Open a sequence before selecting at the playhead"));
     return;
   }
   const auto covering = edit::clipsCoveringPlayhead(
@@ -3942,6 +3996,8 @@ void EditorController::selectClipsAtPlayhead() {
 void EditorController::seekPreviousEdit() {
   const edit::Sequence* sequence = currentSequence();
   if (sequence == nullptr) {
+    explainUnavailable(window_, "editor_controller.cpp:seekPreviousEdit",
+                       tr("Open a sequence before seeking to an edit"));
     return;
   }
   const auto target = edit::previousEditPoint(*sequence, playheadTime());
@@ -3955,6 +4011,8 @@ void EditorController::seekPreviousEdit() {
 void EditorController::seekNextEdit() {
   const edit::Sequence* sequence = currentSequence();
   if (sequence == nullptr) {
+    explainUnavailable(window_, "editor_controller.cpp:seekNextEdit",
+                       tr("Open a sequence before seeking to an edit"));
     return;
   }
   const auto target = edit::nextEditPoint(*sequence, playheadTime());
@@ -3968,6 +4026,8 @@ void EditorController::seekNextEdit() {
 void EditorController::matchFrame() {
   const edit::Sequence* sequence = currentSequence();
   if (sequence == nullptr) {
+    explainUnavailable(window_, "editor_controller.cpp:matchFrame",
+                       tr("Open a sequence before matching a frame"));
     return;
   }
   const auto covering = edit::clipsCoveringPlayhead(
@@ -4024,6 +4084,8 @@ edit::TimeRange sourceRangeForTimelineRange(const edit::Clip& clip,
 void EditorController::trimHeadToPlayhead(const bool overwrite) {
   const edit::Sequence* sequence = currentSequence();
   if (sequence == nullptr) {
+    explainUnavailable(window_, "editor_controller.cpp:trimHeadToPlayhead",
+                       tr("Open a sequence before trimming to the playhead"));
     return;
   }
   const edit::Time playhead = playheadTime();
@@ -4069,6 +4131,8 @@ void EditorController::trimHeadToPlayhead(const bool overwrite) {
 void EditorController::trimTailToPlayhead(const bool overwrite) {
   const edit::Sequence* sequence = currentSequence();
   if (sequence == nullptr) {
+    explainUnavailable(window_, "editor_controller.cpp:trimTailToPlayhead",
+                       tr("Open a sequence before trimming to the playhead"));
     return;
   }
   const edit::Time playhead = playheadTime();
@@ -4323,6 +4387,7 @@ void EditorController::copySelectedClips() {
   if (clipboard_clips_.size() == 1U) {
     attribute_clipboard_ = clipboard_clips_.front().clip;
   }
+  refreshCommandContext();
 }
 
 void EditorController::cutSelectedClips() {
@@ -4466,6 +4531,8 @@ void EditorController::toggleLinkedSelection() {
 void EditorController::unlinkSelectedClips() {
   const edit::Sequence* sequence = currentSequence();
   if (sequence == nullptr || selected_clip_ids_.empty()) {
+    explainUnavailable(window_, "editor_controller.cpp:unlinkSelectedClips",
+                       tr("Select clips before unlinking them"));
     return;
   }
   std::vector<edit::EditCommand> commands;
@@ -4514,6 +4581,8 @@ void EditorController::updateClipFadeFromTimeline(const QString& clipIdText, con
 void EditorController::gotoTimecode() {
   const edit::Sequence* sequence = currentSequence();
   if (sequence == nullptr) {
+    explainUnavailable(window_, "editor_controller.cpp:gotoTimecode",
+                       tr("Open a sequence before going to a timecode"));
     return;
   }
   bool accepted = false;
@@ -4580,6 +4649,8 @@ void EditorController::toggleLoopPlayback() {
 void EditorController::playAround() {
   const edit::Sequence* sequence = currentSequence();
   if (sequence == nullptr) {
+    explainUnavailable(window_, "editor_controller.cpp:playAround",
+                       tr("Open a sequence before playing around the playhead"));
     return;
   }
   QSettings settings;
@@ -4596,6 +4667,9 @@ void EditorController::deleteSelectedClip(const bool ripple) {
   const edit::Sequence* sequence = currentSequence();
   const auto selected = selectedClipIds();
   if (sequence == nullptr || selected.empty()) {
+    explainUnavailable(window_, "editor_controller.cpp:deleteSelectedClip",
+                       ripple ? tr("Select clips before ripple-deleting")
+                              : tr("Select clips before deleting"));
     return;
   }
   std::vector<edit::EditCommand> commands;
@@ -5217,6 +5291,8 @@ void EditorController::seekCaption(const int visibleRow) {
 void EditorController::addCaptionAtPlayhead() {
   const edit::Sequence* sequence = currentSequence();
   if (sequence == nullptr) {
+    explainUnavailable(window_, "editor_controller.cpp:addCaptionAtPlayhead",
+                       tr("Open a sequence before adding a caption"));
     return;
   }
   edit::Caption caption;
@@ -5232,8 +5308,15 @@ void EditorController::addCaptionAtPlayhead() {
 
 void EditorController::removeCaption(const int visibleRow) {
   const edit::Sequence* sequence = currentSequence();
-  if (sequence == nullptr || visibleRow < 0 ||
+  if (sequence == nullptr) {
+    explainUnavailable(window_, "editor_controller.cpp:removeCaption",
+                       tr("Open a sequence before deleting a caption"));
+    return;
+  }
+  if (visibleRow < 0 ||
       static_cast<std::size_t>(visibleRow) >= visible_caption_indices_.size()) {
+    explainUnavailable(window_, "editor_controller.cpp:removeCaption",
+                       tr("Select a caption to delete"));
     return;
   }
   const std::size_t caption_index =
@@ -5570,8 +5653,22 @@ void EditorController::modelVerificationFinished() {
 
 void EditorController::startTranscription(const desktop_ui::TranscriptionOptionsView& options) {
   if (transcription_session_ != nullptr || model_download_reply_ != nullptr ||
-      model_verification_watcher_.isRunning())
+      model_verification_watcher_.isRunning()) {
+    explainUnavailable(window_, "editor_controller.cpp:startTranscription",
+                       tr("A transcription operation is already running"));
     return;
+  }
+  const auto transcription_state = window_.captionsPanel()->transcriptionState();
+  if (transcription_state == desktop_ui::TranscriptionState::ModelMissing) {
+    explainUnavailable(window_, "editor_controller.cpp:startTranscription",
+                       tr("Download the transcription model before transcribing"));
+    return;
+  }
+  if (transcription_state == desktop_ui::TranscriptionState::Failed) {
+    explainUnavailable(window_, "editor_controller.cpp:startTranscription",
+                       tr("The transcription model is not ready. Download it again from Captions."));
+    return;
+  }
   std::filesystem::path input;
   edit::TimeRange range;
   edit::EntityId clipId;
@@ -6892,6 +6989,8 @@ void EditorController::updateSelectedEffectControlPoints(const QString& effectId
 void EditorController::addTitleClip() {
   const edit::Sequence* sequence = currentSequence();
   if (sequence == nullptr) {
+    explainUnavailable(window_, "editor_controller.cpp:addTitleClip",
+                       tr("Open a sequence before adding a title"));
     return;
   }
   // Insert a 5-second title clip on the first video track at the playhead.
@@ -6961,6 +7060,8 @@ void EditorController::refreshSequenceTabs() {
 void EditorController::nestSelectedClips() {
   const edit::Sequence* parent = currentSequence();
   if (parent == nullptr) {
+    explainUnavailable(window_, "editor_controller.cpp:nestSelectedClips",
+                       tr("Open a sequence before nesting clips"));
     return;
   }
   const auto selected = selectedClipIds();
@@ -7220,6 +7321,8 @@ void EditorController::changeTransitionPreset(const QString& transitionId, const
 void EditorController::applyDefaultTransition() {
   const edit::Sequence* sequence = currentSequence();
   if (sequence == nullptr) {
+    explainUnavailable(window_, "editor_controller.cpp:applyDefaultTransition",
+                       tr("Open a sequence before applying a transition"));
     return;
   }
   const int frames =
@@ -7295,6 +7398,8 @@ void EditorController::grabProgramFrame() {
 void EditorController::showSequenceSettings() {
   const edit::Sequence* sequence = currentSequence();
   if (sequence == nullptr) {
+    explainUnavailable(window_, "editor_controller.cpp:showSequenceSettings",
+                       tr("Open a sequence before editing sequence settings"));
     return;
   }
   QDialog dialog(&window_);
@@ -7369,6 +7474,8 @@ void EditorController::showSequenceSettings() {
 void EditorController::duplicateActiveSequence() {
   const edit::Sequence* sequence = currentSequence();
   if (sequence == nullptr) {
+    explainUnavailable(window_, "editor_controller.cpp:duplicateActiveSequence",
+                       tr("Open a sequence before duplicating it"));
     return;
   }
   edit::Sequence copy =
@@ -7822,6 +7929,8 @@ void EditorController::analyzeLoudnessNormalization() {
 
 void EditorController::applyLoudnessNormalization() {
   if (!normalization_review_.valid) {
+    explainUnavailable(window_, "editor_controller.cpp:applyLoudnessNormalization",
+                       tr("Analyze loudness before applying normalization"));
     return;
   }
   const edit::Sequence* sequence = currentSequence();
@@ -8185,6 +8294,7 @@ void EditorController::setClipSelection(const QStringList& clipIds, const QStrin
   selected_gap_key_.clear();
   refreshTimelineView();
   refreshInspectorView();
+  refreshCommandContext();
 }
 
 void EditorController::selectMarker(const QString& markerId) {
@@ -8194,6 +8304,7 @@ void EditorController::selectMarker(const QString& markerId) {
   selected_gap_key_.clear();
   refreshTimelineView();
   refreshInspectorView();
+  refreshCommandContext();
 }
 
 void EditorController::selectGap(const QString& gapKey) {
@@ -8203,12 +8314,18 @@ void EditorController::selectGap(const QString& gapKey) {
   selected_marker_id_.reset();
   refreshTimelineView();
   refreshInspectorView();
+  refreshCommandContext();
 }
 
 void EditorController::nudgeTimelineSelection(const QStringList& clipIds, const int frameCount,
                                               const int editIntent) {
   const edit::Sequence* sequence = currentSequence();
-  if (sequence == nullptr || frameCount == 0) {
+  if (frameCount == 0) {
+    return;
+  }
+  if (sequence == nullptr) {
+    explainUnavailable(window_, "editor_controller.cpp:nudgeTimelineSelection",
+                       tr("Create a sequence before nudging clips"));
     return;
   }
   const QString prior_active =
@@ -8219,6 +8336,8 @@ void EditorController::nudgeTimelineSelection(const QStringList& clipIds, const 
   setClipSelection(clipIds, active);
   const auto selection = selectedClipIds();
   if (selection.empty()) {
+    explainUnavailable(window_, "editor_controller.cpp:nudgeTimelineSelection",
+                       tr("Select clips before nudging them"));
     return;
   }
   const auto intent = static_cast<desktop_ui::TimelineWidget::EditIntent>(editIntent);
@@ -8278,6 +8397,8 @@ bool EditorController::applyTrackCommand(edit::EditCommand command, const QStrin
 void EditorController::addTrack(const int trackKind) {
   const edit::Sequence* sequence = currentSequence();
   if (sequence == nullptr) {
+    explainUnavailable(window_, "editor_controller.cpp:addTrack",
+                       tr("Create a sequence before adding a track"));
     return;
   }
   const auto kind = static_cast<desktop_ui::TrackKind>(trackKind);
@@ -8499,6 +8620,22 @@ void EditorController::closeGap(const QString& gapKeyText) {
   refreshTimelineView();
 }
 
+void EditorController::refreshCommandContext() {
+  const edit::Sequence* sequence = currentSequence();
+  const bool has_playhead_clips =
+      sequence != nullptr &&
+      !edit::clipsCoveringPlayhead(*sequence, edit::CoveringClipQuery{.playhead = playheadTime()})
+           .empty();
+  window_.setCommandContext({
+      .hasSequence = sequence != nullptr,
+      .hasClipSelection = !selectedClipIds().empty(),
+      .hasSource = source_asset_id_.has_value(),
+      .hasClipboard = !clipboard_clips_.empty(),
+      .hasAttributeClipboard = attribute_clipboard_.has_value(),
+      .hasClipsAtPlayhead = has_playhead_clips,
+  });
+}
+
 void EditorController::refreshViews() {
   if (!editor_) {
     return;
@@ -8515,6 +8652,7 @@ void EditorController::refreshViews() {
   refreshViewerOverlay();
   refreshMixerView();
   refreshCaptionView();
+  refreshCommandContext();
   requestPreview();
   refreshJobActivitySummary();
   refreshProgramViewerChrome();
@@ -9158,6 +9296,15 @@ bool EditorController::startAudioMasterPlayback() {
 
   auto snapshot_result = editor_->snapshot(sequence->id, editor_->revision());
   if (!snapshot_result) {
+    if (!audio_fallback_announced_) {
+      audio_fallback_announced_ = true;
+      window_.showTransientMessage(
+          tr("Could not snapshot the timeline for realtime audio; playback will be silent"), 8'000);
+    }
+    // #region agent log
+    debugAgentLog("F", "editor_controller.cpp:startAudioMasterPlayback", "failure snapshot",
+                  snapshot_result.error().message);
+    // #endregion
     SessionEventLog::instance().log_backend("startAudioMasterPlayback", "failure snapshot");
     return false;
   }
@@ -9335,6 +9482,19 @@ void EditorController::attachGpuRenderer(std::shared_ptr<render::GpuRenderer> gp
       preview_cache_->clear();
     }
     const render::GpuCapabilities capabilities = gpu_renderer_->capabilities();
+    // #region agent log
+    debugAgentLog("B", "editor_controller.cpp:attachGpuRenderer", "gpu usable",
+                  std::string("present=") + (capabilities.presentation ? "1" : "0") +
+                      " diagnostic=" + capabilities.diagnostic);
+    // #endregion
+    if (!capabilities.presentation && gpu_presentation_attempted_ &&
+        !gpu_presentation_notice_shown_) {
+      gpu_presentation_notice_shown_ = true;
+      window_.showTransientMessage(
+          tr("GPU preview is ready. Native window presentation was skipped: %1")
+              .arg(QString::fromStdString(capabilities.diagnostic)),
+          8'000);
+    }
     window_.programViewer()->setTitle(gpuReadyTitle(capabilities));
     SessionEventLog::instance().log_backend(
         "gpuInit",

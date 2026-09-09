@@ -15,6 +15,7 @@
 #include <QSettings>
 #include <QSignalSpy>
 #include <QSlider>
+#include <QStatusBar>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QToolButton>
@@ -122,7 +123,12 @@ void BeginnerWalkthroughTest::firstRunFifteenMinutePathLabelsPrimaryControls() {
   QCOMPARE(exportButton->accessibleName(), QStringLiteral("Export video master"));
   QVERIFY(!window.deliverPanel()->selectedPresetId().isEmpty());
   window.setMediaItems({});
-  QVERIFY(!exportButton->isEnabled());
+  QVERIFY(exportButton->isEnabled());
+  QCOMPARE(exportButton->toolTip(),
+           QStringLiteral("Add at least one clip to the timeline before exporting."));
+  exportButton->click();
+  QCOMPARE(window.statusBar()->currentMessage(),
+           QStringLiteral("Add at least one clip to the timeline before exporting."));
   window.setMediaItems({item});
   if (exportButton->isEnabled()) {
     QVERIFY(!window.deliverPanel()->selectedPresetId().isEmpty());

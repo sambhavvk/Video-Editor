@@ -268,6 +268,59 @@ void EditorWindow::showTransientMessage(const QString& message, int timeoutMs) {
   statusBar()->showMessage(message, timeoutMs);
 }
 
+void EditorWindow::setCommandContext(CommandContext context) {
+  command_context_ = context;
+  if (command_palette_ != nullptr && command_palette_->isVisible()) {
+    command_palette_->setActions(actions_.values());
+  }
+}
+
+QString EditorWindow::commandUnavailableReason(const QAction* action) const {
+  if (action == nullptr) {
+    return {};
+  }
+  const QString id = action->property("commandId").toString();
+  const auto needsSelection = [this](const QString& message) {
+    return command_context_.hasClipSelection ? QString{} : message;
+  };
+  if (id == QStringLiteral("splitClip") || id == QStringLiteral("copyClips") ||
+      id == QStringLiteral("cutClips") || id == QStringLiteral("duplicateClips") ||
+      id == QStringLiteral("unlinkClips") || id == QStringLiteral("disableClip") ||
+      id == QStringLiteral("enableClip") || id == QStringLiteral("deleteSelection") ||
+      id == QStringLiteral("rippleDelete") || id == QStringLiteral("nestSelectedClips") ||
+      id == QStringLiteral("zoomToSelection") || id == QStringLiteral("replaceClipMedia")) {
+    return needsSelection(tr("Select clips before using this command"));
+  }
+  if (id == QStringLiteral("pasteClipsInsert") || id == QStringLiteral("pasteClipsOverwrite")) {
+    return command_context_.hasClipboard ? QString{} : tr("Copy clips before pasting");
+  }
+  if (id == QStringLiteral("pasteClipAttributes")) {
+    if (!command_context_.hasAttributeClipboard) {
+      return tr("Copy a clip before pasting attributes");
+    }
+    return needsSelection(tr("Select clips before pasting attributes"));
+  }
+  if (id == QStringLiteral("sourceMarkIn") || id == QStringLiteral("sourceMarkOut") ||
+      id == QStringLiteral("sourceRippleInsert") ||
+      id == QStringLiteral("sourceOverwriteInsert")) {
+    return command_context_.hasSource ? QString{} : tr("Load a source clip first");
+  }
+  if (id == QStringLiteral("trimHeadToPlayhead") || id == QStringLiteral("trimTailToPlayhead") ||
+      id == QStringLiteral("overwriteTrimHeadToPlayhead") ||
+      id == QStringLiteral("overwriteTrimTailToPlayhead")) {
+    return command_context_.hasClipsAtPlayhead ? QString{}
+                                               : tr("No clips under the playhead to trim");
+  }
+  if (id == QStringLiteral("sequenceSettings") || id == QStringLiteral("duplicateSequence") ||
+      id == QStringLiteral("gotoTimecode") || id == QStringLiteral("playAround") ||
+      id == QStringLiteral("defaultTransition") || id == QStringLiteral("selectAtPlayhead") ||
+      id == QStringLiteral("seekPreviousEdit") || id == QStringLiteral("seekNextEdit") ||
+      id == QStringLiteral("matchFrame")) {
+    return command_context_.hasSequence ? QString{} : tr("Open a sequence first");
+  }
+  return {};
+}
+
 void EditorWindow::setAudioSyncStatus(const QString& text) {
   if (av_sync_label_ != nullptr) {
     av_sync_label_->setText(text);
@@ -287,6 +340,10 @@ void EditorWindow::setJobActivitySummary(const QString& summary) {
 }
 
 void EditorWindow::showExportDialog(const QString& presetId) {
+  if (deliver_panel_ != nullptr && !deliver_panel_->exportReady()) {
+    showTransientMessage(deliver_panel_->exportUnavailableReason());
+    return;
+  }
   QString effective_preset = presetId;
   if (effective_preset.isEmpty()) {
     effective_preset = deliver_panel_->selectedPresetId();

@@ -3,6 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "video_editor/desktop_ui/command_palette.hpp"
+#include "video_editor/desktop_ui/editor_window.hpp"
 
 #include <QAction>
 #include <QKeySequence>
@@ -10,9 +11,12 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QListWidgetItem>
+#include <QPalette>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <chrono>
+#include <fstream>
 
 namespace video_editor::desktop_ui {
 
@@ -100,7 +104,39 @@ void CommandPalette::triggerItem(QListWidgetItem* item) {
     return;
   }
   auto* action = item->data(Qt::UserRole).value<QAction*>();
-  if (action == nullptr || !action->isEnabled()) {
+  if (action == nullptr) {
+    return;
+  }
+  QString reason;
+  if (auto* window = qobject_cast<EditorWindow*>(parentWidget())) {
+    reason = window->commandUnavailableReason(action);
+  }
+  // #region agent log
+  {
+    std::ofstream out("/home/sambhav/Projects/VideoEditor/.cursor/debug-4d158f.log", std::ios::app);
+    if (out) {
+      const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::system_clock::now().time_since_epoch())
+                          .count();
+      const auto id = action->property("commandId").toString().toStdString();
+      out << "{\"sessionId\":\"4d158f\",\"runId\":\"post-fix\",\"hypothesisId\":\"G\","
+             "\"location\":\"command_palette.cpp:triggerItem\",\"message\":\"palette trigger\","
+             "\"data\":{\"id\":\""
+          << id << "\",\"enabled\":" << action->isEnabled() << ",\"unavailable\":"
+          << (!reason.isEmpty()) << "},\"timestamp\":" << ms << "}\n";
+    }
+  }
+  // #endregion
+  if (!reason.isEmpty()) {
+    if (auto* window = qobject_cast<EditorWindow*>(parentWidget())) {
+      window->showTransientMessage(reason);
+    }
+    return;
+  }
+  if (!action->isEnabled()) {
+    if (auto* window = qobject_cast<EditorWindow*>(parentWidget())) {
+      window->showTransientMessage(tr("%1 is not available right now").arg(action->text()));
+    }
     return;
   }
   accept();
@@ -132,6 +168,7 @@ void CommandPalette::rebuild(const QString& query) {
     return QString::localeAwareCompare(lhs->text(), rhs->text()) < 0;
   });
 
+  int unavailable = 0;
   for (auto* action : matches) {
     auto* item = new QListWidgetItem(commands_);
     item->setText(action->text());
@@ -141,10 +178,32 @@ void CommandPalette::rebuild(const QString& query) {
       item->setText(QStringLiteral("%1\t%2").arg(
           action->text(), action->shortcut().toString(QKeySequence::NativeText)));
     }
-    if (!action->isEnabled()) {
-      item->setFlags(item->flags() & ~Qt::ItemIsEnabled);
+    QString reason;
+    if (auto* window = qobject_cast<EditorWindow*>(parentWidget())) {
+      reason = window->commandUnavailableReason(action);
+    }
+    if (!reason.isEmpty()) {
+      item->setForeground(commands_->palette().color(QPalette::Disabled, QPalette::Text));
+      item->setToolTip(reason);
+      ++unavailable;
     }
   }
+
+  // #region agent log
+  {
+    std::ofstream out("/home/sambhav/Projects/VideoEditor/.cursor/debug-4d158f.log", std::ios::app);
+    if (out) {
+      const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::system_clock::now().time_since_epoch())
+                          .count();
+      out << "{\"sessionId\":\"4d158f\",\"runId\":\"post-fix\",\"hypothesisId\":\"G\","
+             "\"location\":\"command_palette.cpp:rebuild\",\"message\":\"palette rebuild\","
+             "\"data\":{\"visible\":"
+          << commands_->count() << ",\"unavailable\":" << unavailable << "},\"timestamp\":" << ms
+          << "}\n";
+    }
+  }
+  // #endregion
 
   if (commands_->count() > 0) {
     commands_->setCurrentRow(0);
