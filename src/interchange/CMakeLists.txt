@@ -28,6 +28,7 @@ endif()
 
 add_library(video_editor_interchange STATIC
   src/otio.cpp
+  src/otio_handoff.cpp
 )
 add_library(VideoEditor::Interchange ALIAS video_editor_interchange)
 add_library(video_editor::interchange ALIAS video_editor_interchange)
