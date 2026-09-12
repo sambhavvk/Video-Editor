@@ -234,6 +234,7 @@ private slots:
   void advanceSourcePlayback();
   void splitSelectedClip();
   void splitClipAt(const QString& clipId, qint64 uiTime);
+  void addEditsAt(qint64 uiTime);
   void selectClipsAtPlayhead();
   void seekPreviousEdit();
   void seekNextEdit();
@@ -261,6 +262,16 @@ private slots:
   void unlinkSelectedClips();
   void setClipEnabledFromTimeline(const QString& clipId, bool enabled);
   void updateClipFadeFromTimeline(const QString& clipId, qint64 fadeIn, qint64 fadeOut);
+  void updateClipAudioGainFromTimeline(const QString& clipId, double gainDb);
+  void updateClipOpacityFromTimeline(const QString& clipId, double opacity);
+  void upsertClipVolumeKeyframe(const QString& clipId, const QString& keyframeId, qint64 localTime,
+                                double gainDb);
+  void removeClipVolumeKeyframe(const QString& clipId, const QString& keyframeId);
+  void upsertClipOpacityKeyframe(const QString& clipId, const QString& keyframeId, qint64 localTime,
+                                 double opacity);
+  void removeClipOpacityKeyframe(const QString& clipId, const QString& keyframeId);
+  void freezeFrame();
+  void freezeFrameFromTimeline(const QString& clipId, qint64 uiTime);
   void deleteSelectedClip(bool ripple);
   void undo();
   void redo();

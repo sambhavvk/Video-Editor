@@ -171,6 +171,21 @@ struct WaveformBucketView {
   float maximum{1.0F};
 };
 
+enum class KeyframeInterpolationView {
+  Hold,
+  Linear,
+  Bezier,
+};
+
+struct KeyframeView {
+  QString id;
+  qint64 time{0};
+  double value{0.0};
+  KeyframeInterpolationView interpolation{KeyframeInterpolationView::Linear};
+  QPointF incomingControl{};
+  QPointF outgoingControl{};
+};
+
 struct TimelineClipView {
   QString id;
   QString displayName;
@@ -187,6 +202,12 @@ struct TimelineClipView {
   qint64 fadeIn{0};
   qint64 fadeOut{0};
   QVector<WaveformBucketView> waveform;
+  enum class EnvelopeKind { None, Volume, Opacity };
+  EnvelopeKind envelopeKind{EnvelopeKind::None};
+  double envelopeStatic{0.0};
+  double envelopeEffectBase{0.0};
+  QString envelopeEffectId;
+  QVector<KeyframeView> envelopeKeyframes;
 };
 
 struct AssetMetadataView {
@@ -216,21 +237,6 @@ struct EffectView {
   QString displayName;
   QString category;
   bool accelerated{false};
-};
-
-enum class KeyframeInterpolationView {
-  Hold,
-  Linear,
-  Bezier,
-};
-
-struct KeyframeView {
-  QString id;
-  qint64 time{0};
-  double value{0.0};
-  KeyframeInterpolationView interpolation{KeyframeInterpolationView::Linear};
-  QPointF incomingControl{};
-  QPointF outgoingControl{};
 };
 
 struct EffectParameterView {

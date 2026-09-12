@@ -6,6 +6,7 @@
 
 #include "video_editor/desktop_ui/panel_widgets.hpp"
 #include "video_editor/desktop_ui/program_viewer.hpp"
+#include "video_editor/desktop_ui/timeline_cursors.hpp"
 #include "video_editor/desktop_ui/timeline_widget.hpp"
 
 #include <QAction>
@@ -73,6 +74,11 @@ private slots:
   void timelineExposesMarkerGapAndTrackCommands();
   void timelineRequiresClipEdgesForTrimTools();
   void timelineKeepsSlipAndSlideOnClipBodies();
+  void timelineUsesProfessionalToolCursors();
+  void timelineRazorHandAndZoomTools();
+  void timelineVolumeEnvelopeAndPenTool();
+  void timelineOpacityEnvelopeAndPenTool();
+  void inspectorColorWheelsRoundTrip();
   void timelineRollUsesTheControllerBoundaryConvention();
   void timelineMarkerSnappingExcludesTheDraggedMarker();
   void timelineRefreshCancelsMarkerGesturesAndUsesAuthoritativeSelection();
@@ -170,6 +176,13 @@ void EditorWindowTest::constructsCompleteShell() {
   QCOMPARE(window.action(QStringLiteral("trimHeadToPlayhead"))->shortcut(), QKeySequence{Qt::Key_Q});
   QCOMPARE(window.action(QStringLiteral("trimTailToPlayhead"))->shortcut(), QKeySequence{Qt::Key_E});
   QCOMPARE(window.action(QStringLiteral("tool.trackSelectForward"))->shortcut(), QKeySequence{Qt::Key_A});
+  QCOMPARE(window.action(QStringLiteral("tool.razor"))->shortcut(), QKeySequence{Qt::Key_C});
+  QCOMPARE(window.action(QStringLiteral("tool.pen"))->shortcut(), QKeySequence{Qt::Key_P});
+  QCOMPARE(window.action(QStringLiteral("tool.hand"))->shortcut(), QKeySequence{Qt::Key_H});
+  QCOMPARE(window.action(QStringLiteral("tool.zoom"))->shortcut(), QKeySequence{Qt::Key_Z});
+  QCOMPARE(window.action(QStringLiteral("liftSelection"))->shortcut(), QKeySequence{Qt::Key_Semicolon});
+  QCOMPARE(window.action(QStringLiteral("extractSelection"))->shortcut(),
+           QKeySequence{Qt::Key_Apostrophe});
   QCOMPARE(window.action(QStringLiteral("workspace.0"))->shortcut(),
            QKeySequence{QStringLiteral("Ctrl+1")});
   QCOMPARE(window.action(QStringLiteral("workspace.3"))->shortcut(),
@@ -991,6 +1004,179 @@ void EditorWindowTest::timelineKeepsSlipAndSlideOnClipBodies() {
   payload = committed.takeFirst();
   QCOMPARE(payload.at(1).toInt(), 0);
   QCOMPARE(payload.at(4).value<TimelineWidget::EditMode>(), TimelineWidget::EditMode::Slide);
+}
+
+void EditorWindowTest::timelineUsesProfessionalToolCursors() {
+  TimelineWidget timeline;
+  configureInteractiveTimeline(timeline);
+  using video_editor::desktop_ui::TimelineCursorKind;
+  QCOMPARE(timeline.hoverCursorKind({350, 60}), TimelineCursorKind::SelectMove);
+  QCOMPARE(timeline.hoverCursorKind({278, 60}), TimelineCursorKind::Trim);
+
+  timeline.setToolMode(TimelineWidget::ToolMode::RippleTrim);
+  QCOMPARE(timeline.hoverCursorKind({278, 60}), TimelineCursorKind::RippleTrim);
+  QCOMPARE(timeline.hoverCursorKind({350, 60}), TimelineCursorKind::Arrow);
+
+  timeline.setToolMode(TimelineWidget::ToolMode::OverwriteTrim);
+  QCOMPARE(timeline.hoverCursorKind({473, 60}), TimelineCursorKind::OverwriteTrim);
+
+  timeline.setToolMode(TimelineWidget::ToolMode::Roll);
+  QCOMPARE(timeline.hoverCursorKind({278, 60}), TimelineCursorKind::Roll);
+
+  timeline.setToolMode(TimelineWidget::ToolMode::Slip);
+  QCOMPARE(timeline.hoverCursorKind({350, 60}), TimelineCursorKind::Slip);
+
+  timeline.setToolMode(TimelineWidget::ToolMode::Slide);
+  QCOMPARE(timeline.hoverCursorKind({350, 60}), TimelineCursorKind::Slide);
+
+  timeline.setToolMode(TimelineWidget::ToolMode::Razor);
+  QCOMPARE(timeline.hoverCursorKind({350, 60}), TimelineCursorKind::Razor);
+  QCOMPARE(timeline.hoverCursorKind({530, 60}), TimelineCursorKind::Razor);
+
+  timeline.setToolMode(TimelineWidget::ToolMode::Hand);
+  QCOMPARE(timeline.hoverCursorKind({400, 80}), TimelineCursorKind::HandOpen);
+
+  timeline.setToolMode(TimelineWidget::ToolMode::Zoom);
+  QCOMPARE(timeline.hoverCursorKind({400, 80}), TimelineCursorKind::ZoomIn);
+  QCOMPARE(timeline.hoverCursorKind({400, 80}, Qt::AltModifier), TimelineCursorKind::ZoomOut);
+
+  QVERIFY(!timelineToolIcon(TimelineCursorKind::Razor).isNull());
+  QVERIFY(!timelineCursorName(TimelineCursorKind::Razor).isEmpty());
+}
+
+void EditorWindowTest::timelineRazorHandAndZoomTools() {
+  TimelineWidget timeline;
+  configureInteractiveTimeline(timeline);
+  QSignalSpy cut(&timeline, &TimelineWidget::clipCutAtRequested);
+  QSignalSpy addEdits(&timeline, &TimelineWidget::addEditsAtRequested);
+  QSignalSpy zoom(&timeline, &TimelineWidget::zoomChanged);
+  QSignalSpy follow(&timeline, &TimelineWidget::followPlayheadDisabled);
+
+  timeline.setToolMode(TimelineWidget::ToolMode::Razor);
+  sendPointer(timeline, QEvent::MouseButtonPress, {350, 60}, Qt::LeftButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseButtonRelease, {350, 60}, Qt::LeftButton, Qt::NoButton);
+  QCOMPARE(cut.count(), 1);
+  QCOMPARE(cut.takeFirst().at(0).toString(), QStringLiteral("clip-a"));
+
+  sendPointer(timeline, QEvent::MouseButtonPress, {350, 60}, Qt::LeftButton, Qt::LeftButton,
+              Qt::ShiftModifier);
+  sendPointer(timeline, QEvent::MouseButtonRelease, {350, 60}, Qt::LeftButton, Qt::NoButton,
+              Qt::ShiftModifier);
+  QCOMPARE(addEdits.count(), 1);
+
+  timeline.setToolMode(TimelineWidget::ToolMode::Hand);
+  const auto startScroll = timeline.horizontalScrollBar()->value();
+  sendPointer(timeline, QEvent::MouseButtonPress, {400, 80}, Qt::LeftButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseMove, {340, 80}, Qt::NoButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseButtonRelease, {340, 80}, Qt::LeftButton, Qt::NoButton);
+  QVERIFY(timeline.horizontalScrollBar()->value() != startScroll);
+  QVERIFY(follow.count() >= 1);
+
+  const auto beforeZoom = timeline.pixelsPerSecond();
+  timeline.setToolMode(TimelineWidget::ToolMode::Zoom);
+  sendPointer(timeline, QEvent::MouseButtonPress, {400, 80}, Qt::LeftButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseButtonRelease, {400, 80}, Qt::LeftButton, Qt::NoButton);
+  QVERIFY(timeline.pixelsPerSecond() > beforeZoom);
+  QVERIFY(zoom.count() >= 1);
+}
+
+void EditorWindowTest::timelineVolumeEnvelopeAndPenTool() {
+  TimelineWidget timeline;
+  TimelineClipView clip;
+  clip.id = QStringLiteral("audio-a");
+  clip.displayName = QStringLiteral("Dialogue");
+  clip.trackIndex = 0;
+  clip.start = 1'000;
+  clip.duration = 2'000;
+  clip.envelopeKind = TimelineClipView::EnvelopeKind::Volume;
+  clip.envelopeStatic = 0.0;
+  timeline.resize(900, 260);
+  timeline.setTimeline(10'000, 1'000,
+                       {{QStringLiteral("audio-1"), QStringLiteral("Audio 1"), TrackKind::Audio}},
+                       {clip});
+  timeline.setPixelsPerSecond(100.0);
+  timeline.horizontalScrollBar()->setValue(0);
+  timeline.show();
+  QCoreApplication::processEvents();
+
+  using video_editor::desktop_ui::TimelineCursorKind;
+  QCOMPARE(timeline.hoverCursorKind({350, 55}), TimelineCursorKind::Envelope);
+  timeline.setToolMode(TimelineWidget::ToolMode::Pen);
+  QCOMPARE(timeline.hoverCursorKind({350, 55}), TimelineCursorKind::Pen);
+  QVERIFY(!timelineToolIcon(TimelineCursorKind::Pen).isNull());
+
+  QSignalSpy gain(&timeline, &TimelineWidget::clipAudioGainEdited);
+  QSignalSpy upsert(&timeline, &TimelineWidget::clipVolumeKeyframeUpserted);
+  timeline.setToolMode(TimelineWidget::ToolMode::Select);
+  sendPointer(timeline, QEvent::MouseButtonPress, {350, 55}, Qt::LeftButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseMove, {350, 72}, Qt::NoButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseButtonRelease, {350, 72}, Qt::LeftButton, Qt::NoButton);
+  QCOMPARE(gain.count(), 1);
+  QVERIFY(gain.takeFirst().at(1).toDouble() < 0.0);
+
+  timeline.setToolMode(TimelineWidget::ToolMode::Pen);
+  sendPointer(timeline, QEvent::MouseButtonPress, {400, 55}, Qt::LeftButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseButtonRelease, {400, 55}, Qt::LeftButton, Qt::NoButton);
+  QCOMPARE(upsert.count(), 1);
+  QCOMPARE(upsert.takeFirst().at(0).toString(), QStringLiteral("audio-a"));
+
+  QCOMPARE(timeline.trackHeight(), 58);
+  timeline.setTrackHeight(80);
+  QCOMPARE(timeline.trackHeight(), 80);
+}
+
+void EditorWindowTest::timelineOpacityEnvelopeAndPenTool() {
+  TimelineWidget timeline;
+  TimelineClipView clip;
+  clip.id = QStringLiteral("video-a");
+  clip.displayName = QStringLiteral("A-roll");
+  clip.trackIndex = 0;
+  clip.start = 1'000;
+  clip.duration = 2'000;
+  clip.envelopeKind = TimelineClipView::EnvelopeKind::Opacity;
+  clip.envelopeStatic = 1.0;
+  clip.envelopeEffectBase = 1.0;
+  timeline.resize(900, 260);
+  timeline.setTimeline(10'000, 1'000,
+                       {{QStringLiteral("video-1"), QStringLiteral("V1"), TrackKind::Video}},
+                       {clip});
+  timeline.setPixelsPerSecond(100.0);
+  timeline.horizontalScrollBar()->setValue(0);
+  timeline.show();
+  QCoreApplication::processEvents();
+
+  QSignalSpy opacity(&timeline, &TimelineWidget::clipOpacityEdited);
+  QSignalSpy upsert(&timeline, &TimelineWidget::clipOpacityKeyframeUpserted);
+  sendPointer(timeline, QEvent::MouseButtonPress, {350, 55}, Qt::LeftButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseMove, {350, 90}, Qt::NoButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseButtonRelease, {350, 90}, Qt::LeftButton, Qt::NoButton);
+  QCOMPARE(opacity.count(), 1);
+  QVERIFY(opacity.takeFirst().at(1).toDouble() < 1.0);
+
+  timeline.setToolMode(TimelineWidget::ToolMode::Pen);
+  sendPointer(timeline, QEvent::MouseButtonPress, {400, 55}, Qt::LeftButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseButtonRelease, {400, 55}, Qt::LeftButton, Qt::NoButton);
+  QCOMPARE(upsert.count(), 1);
+  QCOMPARE(upsert.takeFirst().at(0).toString(), QStringLiteral("video-a"));
+}
+
+void EditorWindowTest::inspectorColorWheelsRoundTrip() {
+  video_editor::desktop_ui::ColorWheelWidget lift(
+      video_editor::desktop_ui::ColorWheelWidget::Role::Lift);
+  lift.setRgb(0.1, -0.2, 0.0);
+  QCOMPARE(lift.red(), 0.1);
+  QCOMPARE(lift.green(), -0.2);
+  QCOMPARE(lift.blue(), 0.0);
+  video_editor::desktop_ui::ColorWheelWidget gain(
+      video_editor::desktop_ui::ColorWheelWidget::Role::Gain);
+  gain.setRgb(1.2, 0.8, 1.0);
+  QVERIFY(gain.red() > 1.0);
+  video_editor::desktop_ui::InspectorWidget inspector;
+  inspector.show();
+  QCoreApplication::processEvents();
+  auto* wheels = inspector.findChild<QWidget*>(QStringLiteral("colorWheels"));
+  QVERIFY(wheels != nullptr);
+  QVERIFY(!wheels->isVisible());
 }
 
 void EditorWindowTest::timelineRollUsesTheControllerBoundaryConvention() {

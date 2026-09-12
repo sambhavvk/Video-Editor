@@ -163,5 +163,49 @@ TEST(EffectEvaluator, RejectsDuplicateKeyframeIdsAcrossEffectState) {
   expect_rejected_effect(std::move(effect));
 }
 
+TEST(EffectEvaluator, AdditionalVolumeGainDbUsesAudioVolumeCurve) {
+  Clip clip;
+  Effect effect;
+  effect.type = "audio.volume";
+  EffectParameter parameter{.id = "gain_db", .value = 0.0};
+  parameter.keyframes = {keyframe(0, 0.0, KeyframeInterpolation::Linear),
+                         keyframe(2, 6.0, KeyframeInterpolation::Linear)};
+  effect.parameters.emplace(parameter.id, parameter);
+  clip.effects.push_back(std::move(effect));
+  EXPECT_DOUBLE_EQ(additionalVolumeGainDb(clip, Time(0, 1)), 0.0);
+  EXPECT_DOUBLE_EQ(additionalVolumeGainDb(clip, Time(1, 1)), 3.0);
+  EXPECT_DOUBLE_EQ(additionalVolumeGainDb(clip, Time(4, 1)), 6.0);
+}
+
+TEST(EffectEvaluator, AdditionalClipOpacityUsesVideoOpacityCurve) {
+  Clip clip;
+  Effect effect;
+  effect.type = "video.opacity";
+  EffectParameter parameter{.id = "opacity", .value = 1.0};
+  parameter.keyframes = {keyframe(0, 1.0, KeyframeInterpolation::Linear),
+                         keyframe(2, 0.0, KeyframeInterpolation::Linear)};
+  effect.parameters.emplace(parameter.id, parameter);
+  clip.effects.push_back(std::move(effect));
+  EXPECT_DOUBLE_EQ(additionalClipOpacity(clip, Time(0, 1)), 1.0);
+  EXPECT_DOUBLE_EQ(additionalClipOpacity(clip, Time(1, 1)), 0.5);
+  EXPECT_DOUBLE_EQ(additionalClipOpacity(clip, Time(4, 1)), 0.0);
+}
+
+TEST(EffectEvaluator, RejectsAudioVolumeOutsideCanonicalRange) {
+  Effect effect;
+  effect.type = "audio.volume";
+  EffectParameter parameter{.id = "gain_db", .value = 48.0};
+  effect.parameters.emplace(parameter.id, std::move(parameter));
+  expect_rejected_effect(std::move(effect));
+}
+
+TEST(EffectEvaluator, RejectsVideoOpacityOutsideCanonicalRange) {
+  Effect effect;
+  effect.type = "video.opacity";
+  EffectParameter parameter{.id = "opacity", .value = 1.5};
+  effect.parameters.emplace(parameter.id, std::move(parameter));
+  expect_rejected_effect(std::move(effect));
+}
+
 } // namespace
 } // namespace video_editor::edit

@@ -12,6 +12,7 @@
 #include "video_editor/desktop_ui/program_viewer.hpp"
 #include "video_editor/desktop_ui/scope_widget.hpp"
 #include "video_editor/desktop_ui/shortcut_bindings.hpp"
+#include "video_editor/desktop_ui/timeline_cursors.hpp"
 #include "video_editor/desktop_ui/timeline_widget.hpp"
 
 #include <QAction>
@@ -287,9 +288,15 @@ QString EditorWindow::commandUnavailableReason(const QAction* action) const {
       id == QStringLiteral("cutClips") || id == QStringLiteral("duplicateClips") ||
       id == QStringLiteral("unlinkClips") || id == QStringLiteral("disableClip") ||
       id == QStringLiteral("enableClip") || id == QStringLiteral("deleteSelection") ||
-      id == QStringLiteral("rippleDelete") || id == QStringLiteral("nestSelectedClips") ||
+      id == QStringLiteral("rippleDelete") || id == QStringLiteral("liftSelection") ||
+      id == QStringLiteral("extractSelection") || id == QStringLiteral("nestSelectedClips") ||
       id == QStringLiteral("zoomToSelection") || id == QStringLiteral("replaceClipMedia")) {
     return needsSelection(tr("Select clips before using this command"));
+  }
+  if (id == QStringLiteral("freezeFrame")) {
+    return command_context_.hasClipsAtPlayhead
+               ? QString{}
+               : tr("Place the playhead on a video clip to freeze a frame");
   }
   if (id == QStringLiteral("pasteClipsInsert") || id == QStringLiteral("pasteClipsOverwrite")) {
     return command_context_.hasClipboard ? QString{} : tr("Copy clips before pasting");
@@ -567,10 +574,11 @@ void EditorWindow::createCentralArea() {
   trimLayout->addWidget(trimLabel);
   trimLayout->addSpacing(12);
   for (const auto* id : {"tool.select", "tool.rippleTrim", "tool.overwriteTrim", "tool.roll",
-                         "tool.slip", "tool.slide"}) {
+                         "tool.slip", "tool.slide", "tool.razor", "tool.pen", "tool.hand",
+                         "tool.zoom"}) {
     auto* mode = makeActionButton(action(QString::fromLatin1(id)), precision_trim_);
     mode->setObjectName(QStringLiteral("precision.%1").arg(QString::fromLatin1(id)));
-    mode->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    mode->setToolButtonStyle(Qt::ToolButtonIconOnly);
     trimLayout->addWidget(mode);
   }
   trimLayout->addSpacing(8);
@@ -595,7 +603,7 @@ void EditorWindow::createCentralArea() {
   trimLayout->addWidget(split);
   trimLayout->addStretch();
   auto* hint = new QLabel(
-      tr("Alt+←/→ nudge · Shift=10 frames · Ctrl=ripple · V/W/R/N/Y/U tools"), precision_trim_);
+      tr("Alt+←/→ nudge · Shift=10 · Ctrl=ripple · V/C/P/H/Z/R/W/N/Y/U tools"), precision_trim_);
   hint->setProperty("muted", true);
   trimLayout->addWidget(hint);
   precision_trim_->hide();
@@ -768,6 +776,9 @@ void EditorWindow::createActions() {
   create(QStringLiteral("grabFrame"), tr("Grab Frame"),
          tr("Save the current program monitor frame as an image"),
          QKeySequence{tr("Ctrl+Shift+E")});
+  create(QStringLiteral("freezeFrame"), tr("Freeze Frame"),
+         tr("Hold the frame under the playhead for the rest of the clip"),
+         QKeySequence{tr("Ctrl+Shift+H")});
   create(QStringLiteral("sequenceSettings"), tr("Sequence Settings…"),
          tr("Edit the active sequence name and format"));
   create(QStringLiteral("duplicateSequence"), tr("Duplicate Sequence"),
@@ -784,12 +795,16 @@ void EditorWindow::createActions() {
          tr("Clear the program monitor out point"), QKeySequence{tr("Alt+O")});
   create(QStringLiteral("clearProgramMarks"), tr("Clear Program In and Out"),
          tr("Clear both program monitor marks"), QKeySequence{tr("Alt+X")});
-  create(QStringLiteral("deleteSelection"), tr("Delete"), tr("Delete the selection"),
-         QKeySequence{Qt::Key_Delete});
-  create(QStringLiteral("rippleDelete"), tr("Ripple Delete"),
-         tr("Delete the selection and close the gap"), QKeySequence{tr("Shift+Delete")});
-  auto* nestSelectedClips = create(QStringLiteral("nestSelectedClips"), tr("Nest Selected Clips"),
-                                   tr("Create a nested sequence from the selected clips"));
+  create(QStringLiteral("deleteSelection"), tr("Delete / Lift"),
+         tr("Remove the selection and leave a gap"), QKeySequence{Qt::Key_Delete});
+  create(QStringLiteral("rippleDelete"), tr("Ripple Delete / Extract"),
+         tr("Remove the selection and close the gap"), QKeySequence{tr("Shift+Delete")});
+  create(QStringLiteral("liftSelection"), tr("Lift"),
+         tr("Remove the selection and leave a gap"), QKeySequence{Qt::Key_Semicolon});
+  create(QStringLiteral("extractSelection"), tr("Extract"),
+         tr("Remove the selection and close the gap"), QKeySequence{Qt::Key_Apostrophe});
+  create(QStringLiteral("nestSelectedClips"), tr("Nest Selected Clips"),
+         tr("Create a nested sequence from the selected clips"));
 
   auto* previous = create(QStringLiteral("previousFrame"), tr("Previous Frame"),
                           tr("Move one frame backward"), QKeySequence{Qt::Key_Comma});
@@ -858,6 +873,17 @@ void EditorWindow::createActions() {
                                              tr("Track Select Forward"),
                                              tr("Select this clip and all later clips on the track"),
                                              QKeySequence{Qt::Key_A});
+  addTimelineTool(QStringLiteral("tool.razor"), tr("Razor"),
+                  tr("Split clips by clicking; Shift splits every unlocked track"),
+                  QKeySequence{Qt::Key_C});
+  addTimelineTool(QStringLiteral("tool.pen"), tr("Pen"),
+                  tr("Edit clip volume or opacity envelopes; Alt-click removes a keyframe"),
+                  QKeySequence{Qt::Key_P});
+  addTimelineTool(QStringLiteral("tool.hand"), tr("Hand"),
+                  tr("Pan the timeline; middle-mouse pans in any tool"), QKeySequence{Qt::Key_H});
+  addTimelineTool(QStringLiteral("tool.zoom"), tr("Zoom"),
+                  tr("Click to zoom in, Alt-click to zoom out, drag to frame a range"),
+                  QKeySequence{Qt::Key_Z});
 
   auto* sourceMonitor =
       create(QStringLiteral("sourceMonitor"), tr("Source Monitor"),
@@ -984,6 +1010,8 @@ void EditorWindow::createActions() {
           &EditorWindow::toggleFollowPlayheadRequested);
   connect(action(QStringLiteral("grabFrame")), &QAction::triggered, this,
           &EditorWindow::grabFrameRequested);
+  connect(action(QStringLiteral("freezeFrame")), &QAction::triggered, this,
+          &EditorWindow::freezeFrameRequested);
   connect(action(QStringLiteral("sequenceSettings")), &QAction::triggered, this,
           &EditorWindow::sequenceSettingsRequested);
   connect(action(QStringLiteral("duplicateSequence")), &QAction::triggered, this,
@@ -1010,6 +1038,10 @@ void EditorWindow::createActions() {
   connect(action(QStringLiteral("deleteSelection")), &QAction::triggered, this,
           [this] { emit deleteSelectionRequested(false); });
   connect(action(QStringLiteral("rippleDelete")), &QAction::triggered, this,
+          [this] { emit deleteSelectionRequested(true); });
+  connect(action(QStringLiteral("liftSelection")), &QAction::triggered, this,
+          [this] { emit deleteSelectionRequested(false); });
+  connect(action(QStringLiteral("extractSelection")), &QAction::triggered, this,
           [this] { emit deleteSelectionRequested(true); });
 
   connect(reverse, &QAction::triggered, this, [this] {
@@ -1051,6 +1083,7 @@ void EditorWindow::createActions() {
   connect(action(QStringLiteral("sourceOverwriteInsert")), &QAction::triggered, this,
           &EditorWindow::overwriteInsertFromSource);
   connect(programFullscreen, &QAction::triggered, this, &EditorWindow::toggleProgramFullscreen);
+  applyTimelineToolIcons();
 }
 
 void EditorWindow::loadShortcutOverrides() {
@@ -1112,6 +1145,7 @@ void EditorWindow::createMenus() {
   file->addSeparator();
   file->addAction(action(QStringLiteral("manageMediaCache")));
   file->addAction(action(QStringLiteral("export")));
+  file->addAction(action(QStringLiteral("grabFrame")));
   file->addSeparator();
   file->addAction(action(QStringLiteral("quit")));
 
@@ -1124,6 +1158,8 @@ void EditorWindow::createMenus() {
   edit->addAction(action(QStringLiteral("splitClip")));
   edit->addAction(action(QStringLiteral("deleteSelection")));
   edit->addAction(action(QStringLiteral("rippleDelete")));
+  edit->addAction(action(QStringLiteral("liftSelection")));
+  edit->addAction(action(QStringLiteral("extractSelection")));
   edit->addAction(action(QStringLiteral("nestSelectedClips")));
   edit->addSeparator();
   edit->addAction(action(QStringLiteral("pasteClipAttributes")));
@@ -1132,6 +1168,7 @@ void EditorWindow::createMenus() {
   edit->addAction(action(QStringLiteral("unlinkClips")));
   edit->addAction(action(QStringLiteral("disableClip")));
   edit->addAction(action(QStringLiteral("enableClip")));
+  edit->addAction(action(QStringLiteral("freezeFrame")));
   edit->addSeparator();
   edit->addAction(action(QStringLiteral("commandPalette")));
 
@@ -1162,7 +1199,8 @@ void EditorWindow::createMenus() {
   timelineMenu->addAction(action(QStringLiteral("sequenceSettings")));
   timelineMenu->addSeparator();
   for (const auto* id : {"tool.select", "tool.rippleTrim", "tool.overwriteTrim", "tool.roll",
-                         "tool.slip", "tool.slide"}) {
+                         "tool.slip", "tool.slide", "tool.razor", "tool.pen", "tool.hand",
+                         "tool.zoom", "tool.trackSelectForward"}) {
     timelineMenu->addAction(action(QString::fromLatin1(id)));
   }
 
@@ -1253,10 +1291,13 @@ void EditorWindow::createToolBars() {
   timelineTools->setObjectName(QStringLiteral("timelineToolBar"));
   timelineTools->setAccessibleName(tr("Timeline tools"));
   timelineTools->setMovable(true);
+  timelineTools->setIconSize(QSize(22, 22));
+  timelineTools->setToolButtonStyle(Qt::ToolButtonIconOnly);
   timelineTools->addAction(action(QStringLiteral("splitClip")));
   timelineTools->addSeparator();
   for (const auto* id : {"tool.select", "tool.rippleTrim", "tool.overwriteTrim", "tool.roll",
-                         "tool.slip", "tool.slide"}) {
+                         "tool.slip", "tool.slide", "tool.razor", "tool.pen", "tool.hand",
+                         "tool.zoom", "tool.trackSelectForward"}) {
     timelineTools->addAction(action(QString::fromLatin1(id)));
   }
   timelineTools->addSeparator();
@@ -1274,6 +1315,13 @@ void EditorWindow::createStatusBar() {
   workspace_label_->setObjectName(QStringLiteral("workspaceStatus"));
   workspace_label_->setAccessibleName(tr("Current workspace"));
   statusBar()->addPermanentWidget(workspace_label_);
+  auto* tool_separator = new QLabel(QStringLiteral("  •  "), statusBar());
+  tool_separator->setProperty("muted", true);
+  statusBar()->addPermanentWidget(tool_separator);
+  tool_label_ = new QLabel(tr("Tool: Select"), statusBar());
+  tool_label_->setObjectName(QStringLiteral("timelineToolStatus"));
+  tool_label_->setAccessibleName(tr("Active timeline tool"));
+  statusBar()->addPermanentWidget(tool_label_);
   auto* separator = new QLabel(QStringLiteral("  •  "), statusBar());
   separator->setProperty("muted", true);
   statusBar()->addPermanentWidget(separator);
@@ -1416,6 +1464,14 @@ void EditorWindow::connectControllerSurface() {
   bindTool("tool.roll", TimelineWidget::ToolMode::Roll);
   bindTool("tool.slip", TimelineWidget::ToolMode::Slip);
   bindTool("tool.slide", TimelineWidget::ToolMode::Slide);
+  bindTool("tool.razor", TimelineWidget::ToolMode::Razor);
+  bindTool("tool.pen", TimelineWidget::ToolMode::Pen);
+  bindTool("tool.hand", TimelineWidget::ToolMode::Hand);
+  bindTool("tool.zoom", TimelineWidget::ToolMode::Zoom);
+  connect(timeline_, &TimelineWidget::toolModeChanged, this, [this] {
+    syncTimelineToolActions();
+  });
+  syncTimelineToolActions();
   const auto bindNudge = [this](const char* objectName, int frames) {
     if (auto* button = precision_trim_->findChild<QToolButton*>(QString::fromLatin1(objectName))) {
       connect(button, &QToolButton::clicked, this, [this, frames] {
@@ -1590,6 +1646,88 @@ QString EditorWindow::settingsKeyForWorkspace(Workspace workspace) const {
   return QStringLiteral("ui/workspaces/v1/%1").arg(static_cast<int>(workspace));
 }
 
+void EditorWindow::applyTimelineToolIcons() {
+  const auto setIcon = [this](const char* id, TimelineCursorKind kind) {
+    if (auto* tool = action(QString::fromLatin1(id))) {
+      tool->setIcon(timelineToolIcon(kind));
+    }
+  };
+  setIcon("tool.select", TimelineCursorKind::Arrow);
+  setIcon("tool.rippleTrim", TimelineCursorKind::RippleTrim);
+  setIcon("tool.overwriteTrim", TimelineCursorKind::OverwriteTrim);
+  setIcon("tool.roll", TimelineCursorKind::Roll);
+  setIcon("tool.slip", TimelineCursorKind::Slip);
+  setIcon("tool.slide", TimelineCursorKind::Slide);
+  setIcon("tool.razor", TimelineCursorKind::Razor);
+  setIcon("tool.pen", TimelineCursorKind::Pen);
+  setIcon("tool.hand", TimelineCursorKind::HandOpen);
+  setIcon("tool.zoom", TimelineCursorKind::ZoomIn);
+  setIcon("tool.trackSelectForward", TimelineCursorKind::TrackSelectForward);
+}
+
+void EditorWindow::syncTimelineToolActions() {
+  if (timeline_ == nullptr) {
+    return;
+  }
+  const auto mode = timeline_->toolMode();
+  const auto check = [this](const char* id, const bool on) {
+    if (auto* tool = action(QString::fromLatin1(id))) {
+      QSignalBlocker blocker(tool);
+      tool->setChecked(on);
+    }
+  };
+  check("tool.select", mode == TimelineWidget::ToolMode::Select);
+  check("tool.rippleTrim", mode == TimelineWidget::ToolMode::RippleTrim);
+  check("tool.overwriteTrim", mode == TimelineWidget::ToolMode::OverwriteTrim);
+  check("tool.roll", mode == TimelineWidget::ToolMode::Roll);
+  check("tool.slip", mode == TimelineWidget::ToolMode::Slip);
+  check("tool.slide", mode == TimelineWidget::ToolMode::Slide);
+  check("tool.razor", mode == TimelineWidget::ToolMode::Razor);
+  check("tool.pen", mode == TimelineWidget::ToolMode::Pen);
+  check("tool.hand", mode == TimelineWidget::ToolMode::Hand);
+  check("tool.zoom", mode == TimelineWidget::ToolMode::Zoom);
+  check("tool.trackSelectForward", mode == TimelineWidget::ToolMode::TrackSelectForward);
+
+  QString name = tr("Select");
+  switch (mode) {
+  case TimelineWidget::ToolMode::RippleTrim:
+    name = tr("Ripple Trim");
+    break;
+  case TimelineWidget::ToolMode::OverwriteTrim:
+    name = tr("Overwrite Trim");
+    break;
+  case TimelineWidget::ToolMode::Roll:
+    name = tr("Roll");
+    break;
+  case TimelineWidget::ToolMode::Slip:
+    name = tr("Slip");
+    break;
+  case TimelineWidget::ToolMode::Slide:
+    name = tr("Slide");
+    break;
+  case TimelineWidget::ToolMode::TrackSelectForward:
+    name = tr("Track Select");
+    break;
+  case TimelineWidget::ToolMode::Razor:
+    name = tr("Razor");
+    break;
+  case TimelineWidget::ToolMode::Pen:
+    name = tr("Pen");
+    break;
+  case TimelineWidget::ToolMode::Hand:
+    name = tr("Hand");
+    break;
+  case TimelineWidget::ToolMode::Zoom:
+    name = tr("Zoom");
+    break;
+  case TimelineWidget::ToolMode::Select:
+    break;
+  }
+  if (tool_label_ != nullptr) {
+    tool_label_->setText(tr("Tool: %1").arg(name));
+  }
+}
+
 QString EditorWindow::workspaceDisplayName(Workspace workspace) {
   switch (workspace) {
   case Workspace::Import:
@@ -1607,50 +1745,64 @@ QString EditorWindow::workspaceDisplayName(Workspace workspace) {
 QString EditorWindow::darkStyleSheet() {
   return QStringLiteral(R"(
         QMainWindow, QDialog, QWidget {
-            background: #1f2228;
-            color: #d9dde5;
+            background: #141618;
+            color: #d8dce4;
+            font-family: "Noto Sans", "Cantarell", "Source Sans 3", sans-serif;
             font-size: 10pt;
         }
-        QMainWindow::separator { background: #353943; width: 4px; height: 4px; }
-        QMenuBar { background: #252830; border-bottom: 1px solid #3a3e48; padding: 2px; }
-        QMenuBar::item { padding: 5px 9px; border-radius: 3px; }
-        QMenuBar::item:selected, QMenu::item:selected { background: #3c506f; }
-        QMenu { background: #282c33; border: 1px solid #4a4f5b; padding: 5px; }
-        QMenu::item { padding: 6px 28px 6px 10px; border-radius: 3px; }
-        QToolBar { background: #282b32; border: 0; border-bottom: 1px solid #3a3e48; spacing: 3px; padding: 3px; }
-        QToolButton { background: transparent; color: #dce1e9; border: 1px solid transparent; border-radius: 4px; padding: 5px; }
-        QToolButton:hover { background: #373c46; border-color: #4a505c; }
-        QToolButton:pressed, QToolButton:checked { background: #415b80; border-color: #6384b3; }
-        QToolButton:disabled { color: #737985; }
-        QPushButton { background: #35445b; border: 1px solid #526987; border-radius: 4px; padding: 7px 12px; }
-        QPushButton:hover { background: #405879; }
-        QPushButton:pressed { background: #2f4059; }
+        QMainWindow::separator { background: #2a2e34; width: 4px; height: 4px; }
+        QMenuBar { background: #1a1d21; border-bottom: 1px solid #2f343b; padding: 1px; }
+        QMenuBar::item { padding: 4px 8px; border-radius: 2px; }
+        QMenuBar::item:selected, QMenu::item:selected { background: #3a2e22; }
+        QMenu { background: #1c2025; border: 1px solid #3a4048; padding: 4px; }
+        QMenu::item { padding: 5px 26px 5px 10px; border-radius: 2px; }
+        QToolBar { background: #1a1d21; border: 0; border-bottom: 1px solid #2f343b; spacing: 2px; padding: 2px; }
+        QToolButton { background: transparent; color: #d8dce4; border: 1px solid transparent; border-radius: 3px; padding: 4px; }
+        QToolButton:hover { background: #2a2f36; border-color: #3d444d; }
+        QToolButton:pressed, QToolButton:checked { background: #4a3420; border-color: #c4783a; }
+        QToolButton:disabled { color: #6d7380; }
+        QPushButton { background: #2c333c; border: 1px solid #4a5360; border-radius: 3px; padding: 6px 11px; }
+        QPushButton:hover { background: #384049; }
+        QPushButton:pressed { background: #252b32; }
         QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit {
-            background: #181a1f; border: 1px solid #444a55; border-radius: 4px; padding: 5px; selection-background-color: #476892;
+            background: #101214; border: 1px solid #3a4048; border-radius: 3px; padding: 4px; selection-background-color: #4a3420;
         }
-        QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QPlainTextEdit:focus { border-color: #6d91c4; }
+        QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QPlainTextEdit:focus { border-color: #c4783a; }
         QComboBox::drop-down { border: 0; width: 22px; }
-        QDockWidget { color: #dce1e9; font-weight: 600; }
-        QDockWidget::title { background: #2a2e36; border-bottom: 1px solid #3e434e; padding: 7px 8px; text-align: left; }
-        QGroupBox { border: 1px solid #3e434e; border-radius: 5px; margin-top: 12px; padding-top: 7px; font-weight: 600; }
-        QGroupBox::title { subcontrol-origin: margin; left: 9px; padding: 0 4px; color: #c9cfda; }
-        QTableWidget, QListWidget { background: #202329; alternate-background-color: #24272e; border: 1px solid #3b404a; border-radius: 4px; outline: 0; }
-        QTableWidget::item, QListWidget::item { padding: 5px; }
-        QTableWidget::item:selected, QListWidget::item:selected { background: #415f86; color: #ffffff; }
-        QHeaderView::section { background: #2b2f37; color: #bfc5d0; border: 0; border-right: 1px solid #3c414b; border-bottom: 1px solid #3c414b; padding: 5px; }
-        QScrollBar:vertical { background: #202329; width: 12px; margin: 0; }
-        QScrollBar:horizontal { background: #202329; height: 12px; margin: 0; }
-        QScrollBar::handle { background: #505662; border-radius: 5px; min-height: 24px; min-width: 24px; margin: 2px; }
-        QScrollBar::handle:hover { background: #626a78; }
+        QDockWidget { color: #d8dce4; font-weight: 600; }
+        QDockWidget::title { background: #1c2025; border-bottom: 1px solid #2f343b; padding: 6px 8px; text-align: left; }
+        QGroupBox { border: 1px solid #2f343b; border-radius: 4px; margin-top: 12px; padding-top: 6px; font-weight: 600; }
+        QGroupBox::title { subcontrol-origin: margin; left: 9px; padding: 0 4px; color: #c4cad4; }
+        QTableWidget, QListWidget { background: #16191d; alternate-background-color: #1a1e22; border: 1px solid #2f343b; border-radius: 3px; outline: 0; }
+        QTableWidget::item, QListWidget::item { padding: 4px; }
+        QTableWidget::item:selected, QListWidget::item:selected { background: #4a3420; color: #ffffff; }
+        QHeaderView::section { background: #1c2025; color: #b8bfc9; border: 0; border-right: 1px solid #2f343b; border-bottom: 1px solid #2f343b; padding: 4px; }
+        QScrollBar:vertical { background: #16191d; width: 11px; margin: 0; }
+        QScrollBar:horizontal { background: #16191d; height: 11px; margin: 0; }
+        QScrollBar::handle { background: #4a515c; border-radius: 4px; min-height: 24px; min-width: 24px; margin: 2px; }
+        QScrollBar::handle:hover { background: #5c6572; }
         QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
-        QSplitter::handle { background: #383d46; }
-        QStatusBar { background: #252830; border-top: 1px solid #3a3e48; color: #b9c0cb; }
-        QLabel[muted="true"] { color: #9299a6; }
-        QProgressBar { background: #15171b; border: 1px solid #3a3f49; border-radius: 3px; }
-        QProgressBar::chunk { background: #58b27c; }
-        QSlider::groove:vertical { background: #15171b; width: 5px; border-radius: 2px; }
-        QSlider::handle:vertical { background: #aab5c7; border: 1px solid #d4dae4; height: 12px; margin: 0 -5px; border-radius: 3px; }
-        QToolTip { background: #111318; color: #eef1f6; border: 1px solid #5b626f; padding: 4px; }
+        QSplitter::handle { background: #2a2e34; }
+        QStatusBar { background: #1a1d21; border-top: 1px solid #2f343b; color: #b3bac4; }
+        QLabel[muted="true"] { color: #8b929e; }
+        QProgressBar { background: #101214; border: 1px solid #2f343b; border-radius: 3px; }
+        QProgressBar::chunk { background: #c4783a; }
+        QSlider::groove:horizontal { background: #101214; height: 5px; border-radius: 2px; }
+        QSlider::handle:horizontal { background: #c4cad4; border: 1px solid #d8dce4; width: 12px; margin: -5px 0; border-radius: 3px; }
+        QSlider::groove:vertical { background: #101214; width: 5px; border-radius: 2px; }
+        QSlider::handle:vertical { background: #c4cad4; border: 1px solid #d8dce4; height: 12px; margin: 0 -5px; border-radius: 3px; }
+        QCheckBox, QRadioButton { spacing: 6px; }
+        QCheckBox::indicator, QRadioButton::indicator { width: 14px; height: 14px; border: 1px solid #4a5360; background: #101214; }
+        QCheckBox::indicator { border-radius: 2px; }
+        QRadioButton::indicator { border-radius: 7px; }
+        QCheckBox::indicator:checked, QRadioButton::indicator:checked { background: #c4783a; border-color: #e08a45; }
+        QTreeWidget, QTreeView { background: #16191d; alternate-background-color: #1a1e22; border: 1px solid #2f343b; }
+        QTreeWidget::item:selected, QTreeView::item:selected { background: #4a3420; color: #ffffff; }
+        QTabWidget::pane { border: 1px solid #2f343b; background: #16191d; }
+        QAbstractSpinBox { background: #101214; border: 1px solid #3a4048; border-radius: 3px; padding: 3px; }
+        QToolTip { background: #0e1013; color: #eef1f6; border: 1px solid #c4783a; padding: 4px; }
+        QTabBar::tab { background: #1a1d21; color: #b3bac4; padding: 6px 12px; border: 1px solid #2f343b; }
+        QTabBar::tab:selected { background: #24292f; color: #eef1f6; border-bottom-color: #c4783a; }
     )");
 }
 

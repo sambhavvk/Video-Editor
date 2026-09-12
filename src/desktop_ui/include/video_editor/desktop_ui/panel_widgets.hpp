@@ -113,6 +113,56 @@ private:
   QListWidget* list_{nullptr};
 };
 
+class ColorWheelWidget final : public QWidget {
+  Q_OBJECT
+
+public:
+  enum class Role { Lift, Gamma, Gain };
+  Q_ENUM(Role)
+
+  explicit ColorWheelWidget(Role role, QWidget* parent = nullptr);
+
+  void setRgb(double red, double green, double blue);
+  [[nodiscard]] double red() const noexcept {
+    return red_;
+  }
+  [[nodiscard]] double green() const noexcept {
+    return green_;
+  }
+  [[nodiscard]] double blue() const noexcept {
+    return blue_;
+  }
+  [[nodiscard]] Role role() const noexcept {
+    return role_;
+  }
+
+  [[nodiscard]] QSize sizeHint() const override;
+
+signals:
+  void rgbChanged(double red, double green, double blue);
+
+protected:
+  void paintEvent(QPaintEvent* event) override;
+  void mousePressEvent(QMouseEvent* event) override;
+  void mouseMoveEvent(QMouseEvent* event) override;
+  void mouseReleaseEvent(QMouseEvent* event) override;
+
+private:
+  void applyWheelPosition(const QPoint& position);
+  void publish();
+  [[nodiscard]] QRect discRect() const;
+  [[nodiscard]] QRect masterRect() const;
+  [[nodiscard]] double masterValue() const;
+  void setMasterValue(double master);
+
+  Role role_{Role::Lift};
+  double red_{0.0};
+  double green_{0.0};
+  double blue_{0.0};
+  bool dragging_disc_{false};
+  bool dragging_master_{false};
+};
+
 class InspectorWidget final : public QWidget {
   Q_OBJECT
 
@@ -161,6 +211,8 @@ private:
   void selectKeyframe(int index);
   void refreshKeyframeEditor();
   void publishAssetMetadata();
+  void syncColorWheels();
+  void publishColorWheel(ColorWheelWidget* wheel);
 
   QLabel* selection_name_{nullptr};
   QPushButton* delete_clip_{nullptr};
@@ -178,6 +230,10 @@ private:
   QWidget* title_controls_{nullptr};
   QWidget* speed_controls_{nullptr};
   QGroupBox* effects_controls_{nullptr};
+  QWidget* color_wheels_{nullptr};
+  ColorWheelWidget* lift_wheel_{nullptr};
+  ColorWheelWidget* gamma_wheel_{nullptr};
+  ColorWheelWidget* gain_wheel_{nullptr};
   QPushButton* pick_white_balance_{nullptr};
   QWidget* effect_parameter_editor_{nullptr};
   QFormLayout* effect_parameter_form_{nullptr};

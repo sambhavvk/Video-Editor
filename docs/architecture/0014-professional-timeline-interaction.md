@@ -37,8 +37,11 @@ revision-checked, undoable project edit.
 - Roll, slip, and slide pointer tools emit transient previews and one commit. The controller maps
   the committed intent to the existing exact typed commands and the model remains responsible for
   adjacency, source handles, locks, rates, reverse mapping, and overlap validation.
-- Keyboard nudging is expressed in frame counts. The controller converts frame numbers through the
-  sequence's exact `Rate`; the widget does not accumulate a rounded frame duration.
+- Razor, hand, zoom, and pen are presentation tools. Razor emits split intents; hand pans; zoom
+  changes `pixelsPerSecond`; pen and the volume/opacity rubber-band commit clip gain, opacity, or
+  `audio.volume` / `video.opacity` keyframes through existing typed commands. Keyboard nudging is expressed in frame
+  counts. The controller converts frame numbers through the sequence's exact `Rate`; the widget does
+  not accumulate a rounded frame duration.
 
 ### Tracks, markers, gaps, and snapping
 

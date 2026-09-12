@@ -394,6 +394,53 @@ TEST(CpuRenderer, EvaluatesColorKeyframesAtClipLocalTime) {
   EXPECT_NEAR(after_frame->pixel(0, 0)[0], 1.0F, 0.001F);
 }
 
+TEST(CpuRenderer, AppliesAnimatedOpacityEnvelope) {
+  const auto asset_id = edit::EntityId::generate();
+  edit::Effect effect;
+  effect.type = "video.opacity";
+  edit::EffectParameter opacity{.id = "opacity", .value = 1.0, .keyframes = {}};
+  opacity.keyframes = {
+      edit::Keyframe{.time = edit::Time(0, 1), .value = 1.0},
+      edit::Keyframe{.time = edit::Time(1, 2), .value = 0.0},
+  };
+  effect.parameters.emplace(opacity.id, opacity);
+  const auto snapshot = make_effect_snapshot(asset_id, {effect});
+  auto source = std::make_shared<CpuFrame>(2, 1);
+  source->clear(1.0F, 0.0F, 0.0F, 1.0F);
+  auto provider = std::make_shared<PatternProvider>();
+  provider->frames.emplace(asset_id, source);
+  CpuRenderer renderer(provider);
+  renderer.begin_epoch(1);
+  const auto start = renderer.request_frame(snapshot, edit::Time(0, 1), {}, 1);
+  const auto end = renderer.request_frame(snapshot, edit::Time(1, 2), {}, 1);
+  ASSERT_TRUE(start);
+  ASSERT_TRUE(end);
+  const auto start_frame = std::get<std::shared_ptr<const CpuFrame>>(start.value->storage);
+  const auto end_frame = std::get<std::shared_ptr<const CpuFrame>>(end.value->storage);
+  EXPECT_NEAR(start_frame->pixel(0, 0)[0], 1.0F, 0.001F);
+  EXPECT_NEAR(end_frame->pixel(0, 0)[0], 0.0F, 0.001F);
+}
+
+TEST(CpuRenderer, AppliesLiftGammaGainColorWheels) {
+  const auto asset_id = edit::EntityId::generate();
+  edit::Effect effect;
+  effect.type = "video.color";
+  effect.parameters.emplace("lift_r",
+                            edit::EffectParameter{.id = "lift_r", .value = 0.2, .keyframes = {}});
+  const auto snapshot = make_effect_snapshot(asset_id, {effect});
+  auto source = std::make_shared<CpuFrame>(2, 1);
+  source->clear(0.25F, 0.25F, 0.25F, 1.0F);
+  auto provider = std::make_shared<PatternProvider>();
+  provider->frames.emplace(asset_id, source);
+  CpuRenderer renderer(provider);
+  renderer.begin_epoch(1);
+  const auto result = renderer.request_frame(snapshot, edit::Time(0, 1), {}, 1);
+  ASSERT_TRUE(result);
+  const auto frame = std::get<std::shared_ptr<const CpuFrame>>(result.value->storage);
+  EXPECT_NEAR(frame->pixel(0, 0)[0], 0.45F, 0.001F);
+  EXPECT_NEAR(frame->pixel(0, 0)[1], 0.25F, 0.001F);
+}
+
 TEST(CpuRenderer, BypassesGaussianBlurOnlyForPreview) {
   const auto asset_id = edit::EntityId::generate();
   edit::Effect effect;

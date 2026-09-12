@@ -4,6 +4,7 @@
 
 #include "video_editor/render_engine/color_curves.h"
 #include "video_editor/render_engine/lut3d.h"
+#include "video_editor/edit_model/edit_points.h"
 #include "video_editor/edit_model/effect_evaluator.h"
 #include "video_editor/edit_model/model.h"
 #include "video_editor/render_engine/text_shaper.h"
@@ -75,10 +76,7 @@ float blend_channel(const edit::BlendMode mode, const float source, const float 
 }
 
 edit::Time source_time_for(const edit::Clip& clip, const edit::Time timeline_time) {
-  edit::Time offset = timeline_time - clip.timeline_range.start;
-  offset = offset.scaled(clip.playback_rate.numerator(), clip.playback_rate.denominator(),
-                         edit::RoundingMode::NearestTiesEven);
-  return clip.reversed ? clip.source_range.end() - offset : clip.source_range.start + offset;
+  return edit::sourceTimeAtTimelineTime(clip, timeline_time);
 }
 
 [[nodiscard]] double time_ratio(const edit::Time numerator, const edit::Time denominator) {
@@ -238,6 +236,28 @@ void apply_color(CpuFrame& frame, const edit::Effect& effect, const edit::Time l
       red += temperature * 0.1 + tint * 0.05;
       green -= tint * 0.1;
       blue -= temperature * 0.1 + tint * 0.05;
+      const double lift_r = effect_number(effect, "lift_r", local_time).value_or(0.0);
+      const double lift_g = effect_number(effect, "lift_g", local_time).value_or(0.0);
+      const double lift_b = effect_number(effect, "lift_b", local_time).value_or(0.0);
+      const double gamma_r = effect_number(effect, "gamma_r", local_time).value_or(1.0);
+      const double gamma_g = effect_number(effect, "gamma_g", local_time).value_or(1.0);
+      const double gamma_b = effect_number(effect, "gamma_b", local_time).value_or(1.0);
+      const double gain_r = effect_number(effect, "gain_r", local_time).value_or(1.0);
+      const double gain_g = effect_number(effect, "gain_g", local_time).value_or(1.0);
+      const double gain_b = effect_number(effect, "gain_b", local_time).value_or(1.0);
+      red = std::max(0.0, red + lift_r);
+      green = std::max(0.0, green + lift_g);
+      blue = std::max(0.0, blue + lift_b);
+      const auto apply_gamma = [](double channel, double gamma) {
+        const double safe = std::max(0.1, gamma);
+        return std::pow(std::max(0.0, channel), 1.0 / safe);
+      };
+      red = apply_gamma(red, gamma_r);
+      green = apply_gamma(green, gamma_g);
+      blue = apply_gamma(blue, gamma_b);
+      red *= gain_r;
+      green *= gain_g;
+      blue *= gain_b;
       pixel[0] = static_cast<float>(std::clamp(red, 0.0, 1.0) * alpha);
       pixel[1] = static_cast<float>(std::clamp(green, 0.0, 1.0) * alpha);
       pixel[2] = static_cast<float>(std::clamp(blue, 0.0, 1.0) * alpha);
@@ -672,7 +692,7 @@ bool clip_has_unsupported_gpu_effects(const std::vector<edit::Effect>& effects) 
     }
     return effect.type != "video.color" && effect.type != "video.gaussian_blur" &&
            effect.type != "video.crop" && effect.type != "video.lut" &&
-           effect.type != "video.curves";
+           effect.type != "video.curves" && effect.type != "video.opacity";
   });
 }
 
@@ -743,6 +763,8 @@ void apply_clip_visual_effects(CpuFrame& frame, edit::Clip& clip, const edit::Ti
       }
     }
   }
+  clip.transform.opacity = std::clamp(
+      clip.transform.opacity * edit::additionalClipOpacity(clip, local_time), 0.0, 1.0);
 }
 
 void apply_clip_lut_curves_effects(CpuFrame& frame, const std::vector<edit::Effect>& effects,

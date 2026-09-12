@@ -22,6 +22,7 @@ add_library(video_editor_desktop_ui STATIC
     include/video_editor/desktop_ui/program_output_window.hpp
     include/video_editor/desktop_ui/program_viewer.hpp
     include/video_editor/desktop_ui/scope_widget.hpp
+    include/video_editor/desktop_ui/timeline_cursors.hpp
     include/video_editor/desktop_ui/timeline_widget.hpp
     include/video_editor/desktop_ui/ui_types.hpp
     src/cache_browser_dialog.cpp
@@ -35,6 +36,7 @@ add_library(video_editor_desktop_ui STATIC
     src/program_output_window.cpp
     src/program_viewer.cpp
     src/scope_widget.cpp
+    src/timeline_cursors.cpp
     src/timeline_widget.cpp
 )
 

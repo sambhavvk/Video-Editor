@@ -37,7 +37,9 @@
 #include <QToolButton>
 
 #include <algorithm>
+#include <cstdint>
 #include <memory>
+#include <variant>
 
 namespace {
 
@@ -191,6 +193,10 @@ private slots:
   void otioMenuActionsEmitImportExportSignals();
   void showingWindowDoesNotCrashDuringGpuPresentationInit();
   void emptyTimelineActionsReportWhyTheyDidNothing();
+  void razorAddEditsSplitsUnlockedClips();
+  void volumeEnvelopeUpsertsAudioVolumeKeyframe();
+  void opacityEnvelopeUpsertsVideoOpacityKeyframe();
+  void freezeFrameHoldsSourceAtPlayhead();
 
 private:
   std::unique_ptr<QTemporaryDir> application_data_;
@@ -1661,6 +1667,9 @@ void EditorControllerTest::emptyTimelineActionsReportWhyTheyDidNothing() {
   window.defaultTransitionRequested();
   QCOMPARE(window.statusBar()->currentMessage(),
            QStringLiteral("No edit point at the playhead for a default transition"));
+  window.freezeFrameRequested();
+  QCOMPARE(window.statusBar()->currentMessage(),
+           QStringLiteral("Place the playhead on a video clip to freeze a frame"));
   window.audioMixer()->normalizationApplyRequested();
   QCOMPARE(window.statusBar()->currentMessage(),
            QStringLiteral("Analyze loudness before applying normalization"));
@@ -1707,6 +1716,196 @@ void EditorControllerTest::emptyTimelineActionsReportWhyTheyDidNothing() {
   QVERIFY(found_paste);
   QVERIFY(found_trim);
   palette->close();
+}
+
+void EditorControllerTest::razorAddEditsSplitsUnlockedClips() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString video_path = directory.filePath(QStringLiteral("razor-clip.mp4"));
+  QVERIFY(writePlaybackVideo(video_path));
+
+  QSettings settings(directory.filePath(QStringLiteral("razor-ui.ini")), QSettings::IniFormat);
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+  controller.importPaths({video_path});
+  QTRY_COMPARE_WITH_TIMEOUT(
+      controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
+  window.mediaActivated(window.mediaBin()->items().front().id);
+  window.rippleInsertFromSource();
+
+  auto project = controller.editor().projectAt(controller.editor().revision());
+  std::size_t video_clips = 0;
+  for (const auto& track : project->sequences.front().tracks) {
+    if (track.kind == video_editor::edit::TrackKind::Video) {
+      video_clips += track.clips.size();
+    }
+  }
+  QCOMPARE(video_clips, 1U);
+  QVERIFY(!window.timeline()->clips().isEmpty());
+  const auto view = window.timeline()->clips().front();
+  const qint64 mid = view.start + view.duration / 2;
+  QVERIFY(mid > view.start);
+  QVERIFY(mid < view.start + view.duration);
+  window.timeline()->addEditsAtRequested(mid);
+  project = controller.editor().projectAt(controller.editor().revision());
+  video_clips = 0;
+  for (const auto& track : project->sequences.front().tracks) {
+    if (track.kind == video_editor::edit::TrackKind::Video) {
+      video_clips += track.clips.size();
+    }
+  }
+  QCOMPARE(video_clips, 2U);
+}
+
+void EditorControllerTest::volumeEnvelopeUpsertsAudioVolumeKeyframe() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString wave_path = directory.filePath(QStringLiteral("envelope.wav"));
+  writeSilentWave(wave_path, 48'000);
+
+  QSettings settings(directory.filePath(QStringLiteral("envelope-ui.ini")), QSettings::IniFormat);
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+  controller.importPaths({wave_path});
+  QTRY_COMPARE_WITH_TIMEOUT(
+      controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
+  window.mediaActivated(window.mediaBin()->items().front().id);
+  window.rippleInsertFromSource();
+
+  QString clip_id;
+  qint64 duration = 0;
+  const auto project = controller.editor().projectAt(controller.editor().revision());
+  for (const auto& track : project->sequences.front().tracks) {
+    if (track.kind == video_editor::edit::TrackKind::Audio && !track.clips.empty()) {
+      clip_id = QString::fromStdString(track.clips.front().id.toString());
+      duration = window.timeline()->clips().isEmpty() ? 0 : window.timeline()->clips().front().duration;
+      break;
+    }
+  }
+  QVERIFY(!clip_id.isEmpty());
+  QVERIFY(duration > 1);
+  window.timeline()->clipVolumeKeyframeUpserted(clip_id, {}, duration / 2, -6.0);
+
+  const auto updated = controller.editor().projectAt(controller.editor().revision());
+  const auto* audio = [&]() -> const video_editor::edit::Clip* {
+    for (const auto& track : updated->sequences.front().tracks) {
+      if (track.kind == video_editor::edit::TrackKind::Audio && !track.clips.empty()) {
+        return &track.clips.front();
+      }
+    }
+    return nullptr;
+  }();
+  QVERIFY(audio != nullptr);
+  const auto volume = std::find_if(
+      audio->effects.begin(), audio->effects.end(), [](const video_editor::edit::Effect& effect) {
+        return effect.type == "audio.volume";
+      });
+  QVERIFY(volume != audio->effects.end());
+  const auto parameter = volume->parameters.find("gain_db");
+  QVERIFY(parameter != volume->parameters.end());
+  QCOMPARE(parameter->second.keyframes.size(), std::size_t{1});
+  QCOMPARE(std::get<double>(parameter->second.keyframes.front().value), -6.0);
+}
+
+void EditorControllerTest::opacityEnvelopeUpsertsVideoOpacityKeyframe() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString video_path = directory.filePath(QStringLiteral("opacity-clip.mp4"));
+  QVERIFY(writePlaybackVideo(video_path));
+
+  QSettings settings(directory.filePath(QStringLiteral("opacity-ui.ini")), QSettings::IniFormat);
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+  controller.importPaths({video_path});
+  QTRY_COMPARE_WITH_TIMEOUT(
+      controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
+  window.mediaActivated(window.mediaBin()->items().front().id);
+  window.rippleInsertFromSource();
+
+  QString clip_id;
+  qint64 duration = 0;
+  const auto project = controller.editor().projectAt(controller.editor().revision());
+  for (const auto& track : project->sequences.front().tracks) {
+    if (track.kind == video_editor::edit::TrackKind::Video && !track.clips.empty()) {
+      clip_id = QString::fromStdString(track.clips.front().id.toString());
+      duration = window.timeline()->clips().isEmpty() ? 0 : window.timeline()->clips().front().duration;
+      break;
+    }
+  }
+  QVERIFY(!clip_id.isEmpty());
+  QVERIFY(duration > 1);
+  window.timeline()->clipOpacityKeyframeUpserted(clip_id, {}, duration / 2, 0.25);
+
+  const auto updated = controller.editor().projectAt(controller.editor().revision());
+  const auto* video = [&]() -> const video_editor::edit::Clip* {
+    for (const auto& track : updated->sequences.front().tracks) {
+      if (track.kind == video_editor::edit::TrackKind::Video && !track.clips.empty()) {
+        return &track.clips.front();
+      }
+    }
+    return nullptr;
+  }();
+  QVERIFY(video != nullptr);
+  const auto opacity = std::find_if(
+      video->effects.begin(), video->effects.end(), [](const video_editor::edit::Effect& effect) {
+        return effect.type == "video.opacity";
+      });
+  QVERIFY(opacity != video->effects.end());
+  const auto parameter = opacity->parameters.find("opacity");
+  QVERIFY(parameter != opacity->parameters.end());
+  QCOMPARE(parameter->second.keyframes.size(), std::size_t{1});
+  QCOMPARE(std::get<double>(parameter->second.keyframes.front().value), 0.25);
+}
+
+void EditorControllerTest::freezeFrameHoldsSourceAtPlayhead() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString video_path = directory.filePath(QStringLiteral("freeze-clip.mp4"));
+  QVERIFY(writePlaybackVideo(video_path));
+
+  QSettings settings(directory.filePath(QStringLiteral("freeze-ui.ini")), QSettings::IniFormat);
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+  controller.importPaths({video_path});
+  QTRY_COMPARE_WITH_TIMEOUT(
+      controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
+  window.mediaActivated(window.mediaBin()->items().front().id);
+  window.rippleInsertFromSource();
+
+  QString clip_id;
+  qint64 start = 0;
+  qint64 duration = 0;
+  const auto project = controller.editor().projectAt(controller.editor().revision());
+  for (const auto& track : project->sequences.front().tracks) {
+    if (track.kind == video_editor::edit::TrackKind::Video && !track.clips.empty()) {
+      clip_id = QString::fromStdString(track.clips.front().id.toString());
+      start = window.timeline()->clips().front().start;
+      duration = window.timeline()->clips().front().duration;
+      break;
+    }
+  }
+  QVERIFY(!clip_id.isEmpty());
+  QVERIFY(duration > 2);
+  window.timeline()->clipFreezeFrameRequested(clip_id, start + duration / 2);
+
+  const auto updated = controller.editor().projectAt(controller.editor().revision());
+  std::size_t video_clips = 0;
+  const video_editor::edit::Clip* held = nullptr;
+  for (const auto& track : updated->sequences.front().tracks) {
+    if (track.kind != video_editor::edit::TrackKind::Video) {
+      continue;
+    }
+    video_clips += track.clips.size();
+    if (track.clips.size() >= 2) {
+      held = &track.clips.back();
+    }
+  }
+  QCOMPARE(video_clips, 2U);
+  QVERIFY(held != nullptr);
+  const double source_seconds =
+      static_cast<double>(held->source_range.duration.value()) /
+      static_cast<double>(std::max<std::uint32_t>(1, held->source_range.duration.timescale()));
+  QVERIFY(source_seconds <= 1.0);
 }
 
 void EditorControllerTest::otioMenuActionsEmitImportExportSignals() {

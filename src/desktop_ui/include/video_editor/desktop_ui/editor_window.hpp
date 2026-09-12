@@ -189,6 +189,7 @@ signals:
   void zoomToSelectionRequested();
   void defaultTransitionRequested();
   void grabFrameRequested();
+  void freezeFrameRequested();
   void revealMediaInFilesRequested();
   void sequenceSettingsRequested();
   void duplicateSequenceRequested();
@@ -268,6 +269,8 @@ private:
   void applyDefaultLayout(Workspace workspace);
   void updateWorkspaceActions();
   void updateWorkspaceLabel();
+  void syncTimelineToolActions();
+  void applyTimelineToolIcons();
   void rebuildProgramOutputMenu();
   void restoreProgramOutputScreen();
   void setShuttleRate(double rate);
@@ -330,6 +333,7 @@ private:
   CommandPalette* command_palette_{nullptr};
   CommandContext command_context_{};
   QLabel* workspace_label_{nullptr};
+  QLabel* tool_label_{nullptr};
   QLabel* av_sync_label_{nullptr};
   QLabel* transport_label_{nullptr};
   QLabel* sequence_format_label_{nullptr};

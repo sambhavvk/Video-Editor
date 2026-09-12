@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "video_editor/desktop_ui/timeline_cursors.hpp"
 #include "video_editor/desktop_ui/ui_types.hpp"
 
 #include <QAbstractScrollArea>
@@ -38,6 +39,8 @@ public:
     TrimIn,
     TrimOut,
     Transition,
+    Envelope,
+    EnvelopeKeyframe,
   };
   Q_ENUM(ClipHitRegion)
 
@@ -59,6 +62,10 @@ public:
     Slip,
     Slide,
     TrackSelectForward,
+    Razor,
+    Hand,
+    Zoom,
+    Pen,
   };
   Q_ENUM(ToolMode)
 
@@ -117,6 +124,9 @@ public:
   [[nodiscard]] ToolMode toolMode() const noexcept {
     return tool_mode_;
   }
+  [[nodiscard]] TimelineCursorKind hoverCursorKind(
+      const QPoint& viewportPosition,
+      Qt::KeyboardModifiers modifiers = Qt::NoModifier) const;
   [[nodiscard]] int visibleClipCount() const noexcept {
     return visible_clip_count_;
   }
@@ -137,8 +147,10 @@ public slots:
   void clearTransitionSelection();
   void setPlayhead(qint64 position);
   void setPixelsPerSecond(double pixelsPerSecond);
+  void setPixelsPerSecond(double pixelsPerSecond, int anchorViewportX);
   void zoomIn();
   void zoomOut();
+  void zoomAt(int viewportX, double factor);
   void zoomToFit();
   void zoomToSelection();
   void setSnapEnabled(bool enabled);
@@ -152,6 +164,10 @@ public slots:
   void setSnapThresholdPixels(int threshold);
   void setFrameRate(quint32 numerator, quint32 denominator);
   void setToolMode(ToolMode mode);
+  void setTrackHeight(int height);
+  [[nodiscard]] int trackHeight() const noexcept {
+    return track_height_;
+  }
   void nudgeActiveClipByFrames(int frameCount, EditIntent intent = EditIntent::Normal);
 
 signals:
@@ -168,9 +184,20 @@ signals:
   void clipUnlinkRequested(const QString& clipId);
   void clipEnabledToggledRequested(const QString& clipId, bool enabled);
   void clipFadeEdited(const QString& clipId, qint64 fadeIn, qint64 fadeOut);
+  void clipAudioGainEdited(const QString& clipId, double gainDb);
+  void clipOpacityEdited(const QString& clipId, double opacity);
+  void clipVolumeKeyframeUpserted(const QString& clipId, const QString& keyframeId,
+                                  qint64 localTime, double gainDb);
+  void clipVolumeKeyframeRemoved(const QString& clipId, const QString& keyframeId);
+  void clipOpacityKeyframeUpserted(const QString& clipId, const QString& keyframeId,
+                                   qint64 localTime, double opacity);
+  void clipOpacityKeyframeRemoved(const QString& clipId, const QString& keyframeId);
+  void clipFreezeFrameRequested(const QString& clipId, qint64 uiTime);
   void followPlayheadDisabled();
   void playheadChanged(qint64 position);
   void zoomChanged(double pixelsPerSecond);
+  void toolModeChanged(ToolMode mode);
+  void addEditsAtRequested(qint64 uiTime);
   // Deltas use the widget's exact integer time scale. Control requests a ripple
   // edit and Alt requests overwrite during pointer gestures.
   void clipEditPreview(const QString& clipId, int destinationTrackIndex, qint64 startDelta,
@@ -245,16 +272,31 @@ private:
   void selectMarker(int markerIndex);
   void selectGap(int gapIndex);
   void beginClipGesture(int clipIndex, const QPoint& position, ClipHitRegion hitRegion);
+  void beginEnvelopeGesture(int clipIndex, const QPoint& position, ClipHitRegion hitRegion,
+                            Qt::KeyboardModifiers modifiers);
   void updateClipGesture(const QPoint& position, Qt::KeyboardModifiers modifiers,
                          bool allowAutoScroll);
   void finishClipGesture(const QPoint& position, Qt::KeyboardModifiers modifiers);
   void cancelClipGesture();
   void cancelMarkerGesture();
-  void updateHoverCursor(const QPoint& position);
+  void beginPanGesture(const QPoint& position);
+  void updatePanGesture(const QPoint& position);
+  void finishPanGesture();
+  void cancelPanGesture();
+  void zoomToMarquee(const QRect& rect);
+  void updateHoverCursor(const QPoint& position, Qt::KeyboardModifiers modifiers = Qt::NoModifier);
   void autoScrollForDrag(const QPoint& position);
   void updateScrollBars();
   void revealPlayhead();
   void movePlayheadFromPointer(int viewportX, bool emitRequest);
+  [[nodiscard]] QRect envelopeBand(const QRect& clipRect) const;
+  [[nodiscard]] double envelopeExtraAt(const TimelineClipView& clip, qint64 localTime) const;
+  [[nodiscard]] double displayedEnvelopeValue(const TimelineClipView& clip, qint64 localTime) const;
+  [[nodiscard]] int envelopeYForValue(const QRect& band, const TimelineClipView& clip,
+                                      double value) const;
+  [[nodiscard]] double envelopeValueForY(const QRect& band, const TimelineClipView& clip,
+                                         int viewportY) const;
+  [[nodiscard]] int envelopeKeyframeAt(int clipIndex, const QPoint& position) const;
 
   QVector<TimelineTrackView> tracks_;
   QVector<TimelineClipView> clips_;
@@ -276,6 +318,7 @@ private:
   bool snap_enabled_{true};
   bool follow_playhead_enabled_{true};
   bool marquee_active_{false};
+  bool marquee_zoom_{false};
   QPoint marquee_origin_;
   QRect marquee_rect_;
   int trim_handle_pixels_{7};
@@ -288,6 +331,15 @@ private:
   QString active_marker_id_;
   QString active_gap_key_;
   ToolMode tool_mode_{ToolMode::Select};
+
+  struct PanGesture {
+    bool pointerDown{false};
+    bool dragging{false};
+    QPoint pressPosition;
+    int pressScrollX{0};
+    int pressScrollY{0};
+  };
+  PanGesture pan_gesture_;
 
   struct ClipGesture {
     bool pointerDown{false};
@@ -316,6 +368,13 @@ private:
     qint64 originalFadeOut{0};
     qint64 targetFadeIn{0};
     qint64 targetFadeOut{0};
+    bool editingEnvelope{false};
+    bool envelopeSetStatic{false};
+    QString envelopeKeyframeId;
+    qint64 envelopeLocalTime{0};
+    double envelopeKeyValue{0.0};
+    double envelopeStaticValue{0.0};
+    TimelineClipView::EnvelopeKind envelopeKind{TimelineClipView::EnvelopeKind::None};
   };
   ClipGesture clip_gesture_;
 

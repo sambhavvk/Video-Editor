@@ -633,6 +633,16 @@ QString speedBadgeForClip(const edit::Clip& clip) {
   if (clip.reversed) {
     return QStringLiteral("REV");
   }
+  const double source_seconds =
+      static_cast<double>(clip.source_range.duration.value()) /
+      static_cast<double>(std::max<std::uint32_t>(1, clip.source_range.duration.timescale()));
+  const double timeline_seconds =
+      static_cast<double>(clip.timeline_range.duration.value()) /
+      static_cast<double>(std::max<std::uint32_t>(1, clip.timeline_range.duration.timescale()));
+  if (clip.kind == edit::ClipKind::Video && source_seconds <= (1.0 / 12.0) &&
+      timeline_seconds > source_seconds * 2.0) {
+    return QStringLiteral("HOLD");
+  }
   if (clip.playback_rate.numerator() != clip.playback_rate.denominator()) {
     const double rate = static_cast<double>(clip.playback_rate.numerator()) /
                         static_cast<double>(clip.playback_rate.denominator());
@@ -823,6 +833,9 @@ QString effectDisplayName(const std::string& type) {
   if (id == QStringLiteral("video.color")) {
     return QObject::tr("Color Adjustments");
   }
+  if (id == QStringLiteral("video.opacity")) {
+    return QObject::tr("Opacity");
+  }
   if (id == QStringLiteral("video.crop")) {
     return QObject::tr("Crop");
   }
@@ -847,6 +860,47 @@ QString effectDisplayName(const std::string& type) {
   if (id == QStringLiteral("audio.limiter")) {
     return QObject::tr("Limiter");
   }
+  if (id == QStringLiteral("audio.volume")) {
+    return QObject::tr("Volume");
+  }
+  return id;
+}
+
+QString effectParameterDisplayName(const std::string& type, const std::string& parameter_id) {
+  const QString id = QString::fromStdString(parameter_id);
+  if (id == QStringLiteral("lift_r")) {
+    return QObject::tr("Lift R");
+  }
+  if (id == QStringLiteral("lift_g")) {
+    return QObject::tr("Lift G");
+  }
+  if (id == QStringLiteral("lift_b")) {
+    return QObject::tr("Lift B");
+  }
+  if (id == QStringLiteral("gamma_r")) {
+    return QObject::tr("Gamma R");
+  }
+  if (id == QStringLiteral("gamma_g")) {
+    return QObject::tr("Gamma G");
+  }
+  if (id == QStringLiteral("gamma_b")) {
+    return QObject::tr("Gamma B");
+  }
+  if (id == QStringLiteral("gain_r")) {
+    return QObject::tr("Gain R");
+  }
+  if (id == QStringLiteral("gain_g")) {
+    return QObject::tr("Gain G");
+  }
+  if (id == QStringLiteral("gain_b")) {
+    return QObject::tr("Gain B");
+  }
+  if (id == QStringLiteral("opacity") && type == "video.opacity") {
+    return QObject::tr("Opacity");
+  }
+  if (id == QStringLiteral("gain_db")) {
+    return QObject::tr("Gain");
+  }
   return id;
 }
 
@@ -863,6 +917,15 @@ edit::Effect effectPreset(const QString& effectId) {
     add("saturation", 1.0);
     add("temperature", 0.0);
     add("tint", 0.0);
+    add("lift_r", 0.0);
+    add("lift_g", 0.0);
+    add("lift_b", 0.0);
+    add("gamma_r", 1.0);
+    add("gamma_g", 1.0);
+    add("gamma_b", 1.0);
+    add("gain_r", 1.0);
+    add("gain_g", 1.0);
+    add("gain_b", 1.0);
   } else if (effectId == QStringLiteral("video.crop")) {
     add("left", 0.0);
     add("top", 0.0);
@@ -892,6 +955,10 @@ edit::Effect effectPreset(const QString& effectId) {
     add(std::string(audio_render::kDenoiseThresholdDb).c_str(), -45.0);
   } else if (effectId == QStringLiteral("audio.limiter")) {
     add(std::string(audio_render::kLimiterCeilingDb).c_str(), -1.0);
+  } else if (effectId == QStringLiteral("audio.volume")) {
+    add("gain_db", 0.0);
+  } else if (effectId == QStringLiteral("video.opacity")) {
+    add("opacity", 1.0);
   } else {
     add("amount", 0.0);
   }
@@ -1210,6 +1277,20 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::setClipEnabledFromTimeline);
   connect(window_.timeline(), &desktop_ui::TimelineWidget::clipFadeEdited, this,
           &EditorController::updateClipFadeFromTimeline);
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::clipAudioGainEdited, this,
+          &EditorController::updateClipAudioGainFromTimeline);
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::clipOpacityEdited, this,
+          &EditorController::updateClipOpacityFromTimeline);
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::clipVolumeKeyframeUpserted, this,
+          &EditorController::upsertClipVolumeKeyframe);
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::clipVolumeKeyframeRemoved, this,
+          &EditorController::removeClipVolumeKeyframe);
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::clipOpacityKeyframeUpserted, this,
+          &EditorController::upsertClipOpacityKeyframe);
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::clipOpacityKeyframeRemoved, this,
+          &EditorController::removeClipOpacityKeyframe);
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::clipFreezeFrameRequested, this,
+          &EditorController::freezeFrameFromTimeline);
   connect(window_.timeline(), &desktop_ui::TimelineWidget::followPlayheadDisabled, this, [this] {
     if (auto* action = window_.action(QStringLiteral("toggleFollowPlayhead"))) {
       action->setChecked(false);
@@ -1233,6 +1314,8 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::applyDefaultTransition);
   connect(&window_, &desktop_ui::EditorWindow::grabFrameRequested, this,
           &EditorController::grabProgramFrame);
+  connect(&window_, &desktop_ui::EditorWindow::freezeFrameRequested, this,
+          &EditorController::freezeFrame);
   connect(&window_, &desktop_ui::EditorWindow::sequenceSettingsRequested, this,
           &EditorController::showSequenceSettings);
   connect(&window_, &desktop_ui::EditorWindow::duplicateSequenceRequested, this,
@@ -1458,6 +1541,8 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           });
   connect(window_.timeline(), &desktop_ui::TimelineWidget::clipCutAtRequested, this,
           &EditorController::splitClipAt);
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::addEditsAtRequested, this,
+          &EditorController::addEditsAt);
   connect(window_.timeline(), &desktop_ui::TimelineWidget::clipDeleteRequested, this,
           [this](const QString& clipId, const bool ripple) {
             setClipSelection({clipId}, clipId);
@@ -3965,6 +4050,58 @@ void EditorController::splitClipAt(const QString& clipIdText, const qint64 uiTim
                    tr("Could not split the clip at this position"));
 }
 
+void EditorController::addEditsAt(const qint64 uiTime) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    explainUnavailable(window_, "editor_controller.cpp:addEditsAt",
+                       tr("Open a sequence before adding edits"));
+    return;
+  }
+  const auto covering = edit::clipsCoveringPlayhead(
+      *sequence, edit::CoveringClipQuery{.playhead = timelineTime(uiTime),
+                                         .targeted_tracks_only = false,
+                                         .unlocked_tracks_only = true});
+  if (covering.empty()) {
+    window_.showTransientMessage(tr("No unlocked clips under the razor"));
+    return;
+  }
+  std::unordered_set<edit::EntityId> consumed;
+  std::vector<edit::EditCommand> commands;
+  for (const auto& clip_id : covering) {
+    if (consumed.contains(clip_id)) {
+      continue;
+    }
+    const edit::Clip* clip = edit::findClip(*sequence, clip_id);
+    if (clip == nullptr) {
+      continue;
+    }
+    const auto split_time = timelineTime(uiTime);
+    if (split_time <= clip->timeline_range.start || split_time >= clip->timeline_range.end()) {
+      continue;
+    }
+    const auto participants = expandLinkedSelection(*sequence, {clip_id});
+    consumed.insert(participants.begin(), participants.end());
+    edit::SplitClipCommand split{.sequence_id = sequence->id,
+                                 .clip_id = clip_id,
+                                 .split_time = split_time,
+                                 .right_clip_id = edit::EntityId::generate(),
+                                 .include_linked = participants.size() > 1,
+                                 .linked_right_clip_ids = {}};
+    for (const auto& participant : participants) {
+      if (participant != clip_id) {
+        split.linked_right_clip_ids.push_back(
+            {.clip_id = participant, .right_clip_id = edit::EntityId::generate()});
+      }
+    }
+    commands.push_back({.operation = std::move(split), .coalescing_key = {}});
+  }
+  if (commands.empty()) {
+    window_.showTransientMessage(tr("Click inside a clip to add an edit"));
+    return;
+  }
+  (void)applyBatch(std::move(commands), tr("Could not add edits at this position"));
+}
+
 void EditorController::selectClipsAtPlayhead() {
   const edit::Sequence* sequence = currentSequence();
   if (sequence == nullptr) {
@@ -4576,6 +4713,384 @@ void EditorController::updateClipFadeFromTimeline(const QString& clipIdText, con
                    .fade_in = timelineTime(fadeIn),
                    .fade_out = timelineTime(fadeOut)}},
              tr("Could not update clip fades"));
+}
+
+void EditorController::updateClipAudioGainFromTimeline(const QString& clipIdText,
+                                                       const double gainDb) {
+  const edit::Sequence* sequence = currentSequence();
+  const auto clip_id = parseId(clipIdText);
+  if (sequence == nullptr || !clip_id.has_value()) {
+    return;
+  }
+  const edit::Clip* clip = edit::findClip(*sequence, *clip_id);
+  if (clip == nullptr) {
+    return;
+  }
+  (void)apply({.operation = edit::SetClipAudioPropertiesCommand{
+                   .sequence_id = sequence->id,
+                   .clip_id = *clip_id,
+                   .gain_db = std::clamp(gainDb, -96.0, 24.0),
+                   .pan = clip->audio_pan,
+                   .fade_in = clip->fade_in,
+                   .fade_out = clip->fade_out}},
+             tr("Could not update clip gain"));
+}
+
+void EditorController::updateClipOpacityFromTimeline(const QString& clipIdText,
+                                                     const double opacity) {
+  const edit::Sequence* sequence = currentSequence();
+  const auto clip_id = parseId(clipIdText);
+  if (sequence == nullptr || !clip_id.has_value()) {
+    return;
+  }
+  const edit::Clip* clip = edit::findClip(*sequence, *clip_id);
+  if (clip == nullptr) {
+    return;
+  }
+  auto transform = clip->transform;
+  transform.opacity = std::clamp(opacity, 0.0, 1.0);
+  (void)apply({.operation = edit::SetClipTransformCommand{.sequence_id = sequence->id,
+                                                          .clip_id = *clip_id,
+                                                          .transform = transform}},
+             tr("Could not update clip opacity"));
+}
+
+void EditorController::upsertClipVolumeKeyframe(const QString& clipIdText,
+                                                const QString& keyframeIdText,
+                                                const qint64 localTime, const double gainDb) {
+  const edit::Sequence* sequence = currentSequence();
+  const auto clip_id = parseId(clipIdText);
+  if (sequence == nullptr || !clip_id.has_value()) {
+    return;
+  }
+  const edit::Clip* clip = edit::findClip(*sequence, *clip_id);
+  if (clip == nullptr || clip->kind != edit::ClipKind::Audio) {
+    return;
+  }
+  const edit::Time clip_duration = clip->timeline_range.duration;
+  if (clip_duration.isZero() || clip_duration.isNegative()) {
+    return;
+  }
+  const edit::Time max_time = clip_duration - edit::Time(1, clip_duration.timescale());
+  edit::Time key_time =
+      timelineTime(localTime).rescaledTo(std::max<std::uint32_t>(1, clip_duration.timescale()),
+                                         edit::RoundingMode::NearestTiesEven);
+  key_time = std::clamp(key_time, edit::Time(0, key_time.timescale()), max_time);
+  const double value = std::clamp(gainDb, -96.0, 24.0);
+  const auto existing_effect =
+      std::find_if(clip->effects.begin(), clip->effects.end(), [](const edit::Effect& effect) {
+        return effect.enabled && effect.type == "audio.volume";
+      });
+
+  auto apply_parameter = [&](edit::EntityId effect_id, edit::EffectParameter parameter) {
+    const auto parsed_key = parseId(keyframeIdText);
+    auto found = parameter.keyframes.end();
+    if (parsed_key.has_value()) {
+      found = std::find_if(parameter.keyframes.begin(), parameter.keyframes.end(),
+                           [&parsed_key](const edit::Keyframe& key) {
+                             return key.id == *parsed_key;
+                           });
+    }
+    if (found == parameter.keyframes.end()) {
+      for (const auto& key : parameter.keyframes) {
+        if (key.time == key_time) {
+          key_time = key_time + edit::Time(1, std::max<std::uint32_t>(1, key_time.timescale()));
+          if (key_time > max_time) {
+            key_time = max_time;
+          }
+          break;
+        }
+      }
+      parameter.keyframes.push_back({.time = key_time,
+                                     .value = value,
+                                     .interpolation = edit::KeyframeInterpolation::Linear});
+    } else {
+      found->time = key_time;
+      found->value = value;
+    }
+    std::sort(parameter.keyframes.begin(), parameter.keyframes.end(),
+              [](const edit::Keyframe& left, const edit::Keyframe& right) {
+                return left.time < right.time;
+              });
+    (void)apply({.operation = edit::SetClipEffectParameterCommand{.sequence_id = sequence->id,
+                                                                  .clip_id = *clip_id,
+                                                                  .effect_id = effect_id,
+                                                                  .parameter = std::move(parameter)}},
+               tr("Could not update the volume envelope"));
+  };
+
+  if (existing_effect == clip->effects.end()) {
+    edit::Effect effect = effectPreset(QStringLiteral("audio.volume"));
+    auto parameter = effect.parameters.at("gain_db");
+    parameter.keyframes.push_back({.time = key_time,
+                                   .value = value,
+                                   .interpolation = edit::KeyframeInterpolation::Linear});
+    effect.parameters["gain_db"] = parameter;
+    (void)apply({.operation = edit::AddClipEffectCommand{.sequence_id = sequence->id,
+                                                         .clip_id = *clip_id,
+                                                         .effect = std::move(effect)}},
+               tr("Could not add a volume envelope"));
+    return;
+  }
+
+  auto parameter = existing_effect->parameters.contains("gain_db")
+                       ? existing_effect->parameters.at("gain_db")
+                       : edit::EffectParameter{.id = "gain_db", .value = 0.0, .keyframes = {}};
+  apply_parameter(existing_effect->id, std::move(parameter));
+}
+
+void EditorController::removeClipVolumeKeyframe(const QString& clipIdText,
+                                                const QString& keyframeIdText) {
+  const edit::Sequence* sequence = currentSequence();
+  const auto clip_id = parseId(clipIdText);
+  const auto key_id = parseId(keyframeIdText);
+  if (sequence == nullptr || !clip_id.has_value() || !key_id.has_value()) {
+    return;
+  }
+  const edit::Clip* clip = edit::findClip(*sequence, *clip_id);
+  if (clip == nullptr) {
+    return;
+  }
+  const auto existing_effect =
+      std::find_if(clip->effects.begin(), clip->effects.end(), [](const edit::Effect& effect) {
+        return effect.enabled && effect.type == "audio.volume";
+      });
+  if (existing_effect == clip->effects.end()) {
+    return;
+  }
+  auto found = existing_effect->parameters.find("gain_db");
+  if (found == existing_effect->parameters.end()) {
+    return;
+  }
+  auto parameter = found->second;
+  const auto key = std::find_if(
+      parameter.keyframes.begin(), parameter.keyframes.end(),
+      [&key_id](const edit::Keyframe& candidate) { return candidate.id == *key_id; });
+  if (key == parameter.keyframes.end()) {
+    return;
+  }
+  parameter.keyframes.erase(key);
+  (void)apply({.operation = edit::SetClipEffectParameterCommand{.sequence_id = sequence->id,
+                                                                .clip_id = *clip_id,
+                                                                .effect_id = existing_effect->id,
+                                                                .parameter = std::move(parameter)}},
+             tr("Could not remove the volume keyframe"));
+}
+
+void EditorController::upsertClipOpacityKeyframe(const QString& clipIdText,
+                                                 const QString& keyframeIdText,
+                                                 const qint64 localTime, const double opacity) {
+  const edit::Sequence* sequence = currentSequence();
+  const auto clip_id = parseId(clipIdText);
+  if (sequence == nullptr || !clip_id.has_value()) {
+    return;
+  }
+  const edit::Clip* clip = edit::findClip(*sequence, *clip_id);
+  if (clip == nullptr ||
+      (clip->kind != edit::ClipKind::Video && clip->kind != edit::ClipKind::Title &&
+       clip->kind != edit::ClipKind::NestedSequence)) {
+    return;
+  }
+  const edit::Time clip_duration = clip->timeline_range.duration;
+  if (clip_duration.isZero() || clip_duration.isNegative()) {
+    return;
+  }
+  const edit::Time max_time = clip_duration - edit::Time(1, clip_duration.timescale());
+  edit::Time key_time =
+      timelineTime(localTime).rescaledTo(std::max<std::uint32_t>(1, clip_duration.timescale()),
+                                         edit::RoundingMode::NearestTiesEven);
+  key_time = std::clamp(key_time, edit::Time(0, key_time.timescale()), max_time);
+  const double value = std::clamp(opacity, 0.0, 1.0);
+  const auto existing_effect =
+      std::find_if(clip->effects.begin(), clip->effects.end(), [](const edit::Effect& effect) {
+        return effect.enabled && effect.type == "video.opacity";
+      });
+
+  auto apply_parameter = [&](edit::EntityId effect_id, edit::EffectParameter parameter) {
+    const auto parsed_key = parseId(keyframeIdText);
+    auto found = parameter.keyframes.end();
+    if (parsed_key.has_value()) {
+      found = std::find_if(parameter.keyframes.begin(), parameter.keyframes.end(),
+                           [&parsed_key](const edit::Keyframe& key) {
+                             return key.id == *parsed_key;
+                           });
+    }
+    if (found == parameter.keyframes.end()) {
+      for (const auto& key : parameter.keyframes) {
+        if (key.time == key_time) {
+          key_time = key_time + edit::Time(1, std::max<std::uint32_t>(1, key_time.timescale()));
+          if (key_time > max_time) {
+            key_time = max_time;
+          }
+          break;
+        }
+      }
+      parameter.keyframes.push_back({.time = key_time,
+                                     .value = value,
+                                     .interpolation = edit::KeyframeInterpolation::Linear});
+    } else {
+      found->time = key_time;
+      found->value = value;
+    }
+    std::sort(parameter.keyframes.begin(), parameter.keyframes.end(),
+              [](const edit::Keyframe& left, const edit::Keyframe& right) {
+                return left.time < right.time;
+              });
+    (void)apply({.operation = edit::SetClipEffectParameterCommand{.sequence_id = sequence->id,
+                                                                  .clip_id = *clip_id,
+                                                                  .effect_id = effect_id,
+                                                                  .parameter = std::move(parameter)}},
+               tr("Could not update the opacity envelope"));
+  };
+
+  if (existing_effect == clip->effects.end()) {
+    edit::Effect effect = effectPreset(QStringLiteral("video.opacity"));
+    auto parameter = effect.parameters.at("opacity");
+    parameter.keyframes.push_back({.time = key_time,
+                                   .value = value,
+                                   .interpolation = edit::KeyframeInterpolation::Linear});
+    effect.parameters["opacity"] = parameter;
+    (void)apply({.operation = edit::AddClipEffectCommand{.sequence_id = sequence->id,
+                                                         .clip_id = *clip_id,
+                                                         .effect = std::move(effect)}},
+               tr("Could not add an opacity envelope"));
+    return;
+  }
+
+  auto parameter = existing_effect->parameters.contains("opacity")
+                       ? existing_effect->parameters.at("opacity")
+                       : edit::EffectParameter{.id = "opacity", .value = 1.0, .keyframes = {}};
+  apply_parameter(existing_effect->id, std::move(parameter));
+}
+
+void EditorController::removeClipOpacityKeyframe(const QString& clipIdText,
+                                                 const QString& keyframeIdText) {
+  const edit::Sequence* sequence = currentSequence();
+  const auto clip_id = parseId(clipIdText);
+  const auto key_id = parseId(keyframeIdText);
+  if (sequence == nullptr || !clip_id.has_value() || !key_id.has_value()) {
+    return;
+  }
+  const edit::Clip* clip = edit::findClip(*sequence, *clip_id);
+  if (clip == nullptr) {
+    return;
+  }
+  const auto existing_effect =
+      std::find_if(clip->effects.begin(), clip->effects.end(), [](const edit::Effect& effect) {
+        return effect.enabled && effect.type == "video.opacity";
+      });
+  if (existing_effect == clip->effects.end()) {
+    return;
+  }
+  auto found = existing_effect->parameters.find("opacity");
+  if (found == existing_effect->parameters.end()) {
+    return;
+  }
+  auto parameter = found->second;
+  const auto key = std::find_if(
+      parameter.keyframes.begin(), parameter.keyframes.end(),
+      [&key_id](const edit::Keyframe& candidate) { return candidate.id == *key_id; });
+  if (key == parameter.keyframes.end()) {
+    return;
+  }
+  parameter.keyframes.erase(key);
+  (void)apply({.operation = edit::SetClipEffectParameterCommand{.sequence_id = sequence->id,
+                                                                .clip_id = *clip_id,
+                                                                .effect_id = existing_effect->id,
+                                                                .parameter = std::move(parameter)}},
+             tr("Could not remove the opacity keyframe"));
+}
+
+void EditorController::freezeFrame() {
+  freezeFrameFromTimeline(QString(), -1);
+}
+
+void EditorController::freezeFrameFromTimeline(const QString& clipIdText, const qint64 uiTime) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    explainUnavailable(window_, "editor_controller.cpp:freezeFrame",
+                       tr("Open a sequence before freezing a frame"));
+    return;
+  }
+  const edit::Time freeze_time = uiTime >= 0 ? timelineTime(uiTime) : playheadTime();
+  const edit::Clip* clip = nullptr;
+  const auto requested = parseId(clipIdText);
+  if (requested.has_value()) {
+    clip = edit::findClip(*sequence, *requested);
+  }
+  if (clip == nullptr) {
+    const auto covering = edit::clipsCoveringPlayhead(
+        *sequence, edit::CoveringClipQuery{.playhead = freeze_time, .targeted_tracks_only = false});
+    for (const auto& clip_id : covering) {
+      const edit::Clip* candidate = edit::findClip(*sequence, clip_id);
+      if (candidate != nullptr && candidate->kind == edit::ClipKind::Video) {
+        clip = candidate;
+        break;
+      }
+    }
+  }
+  if (clip == nullptr || clip->kind != edit::ClipKind::Video) {
+    explainUnavailable(window_, "editor_controller.cpp:freezeFrame",
+                       tr("Place the playhead on a video clip to freeze a frame"));
+    return;
+  }
+  if (freeze_time < clip->timeline_range.start || freeze_time >= clip->timeline_range.end()) {
+    explainUnavailable(window_, "editor_controller.cpp:freezeFrame",
+                       tr("Freeze a frame inside the video clip"));
+    return;
+  }
+  const auto project = editor_->projectAt(editor_->revision());
+  if (!project) {
+    explainUnavailable(window_, "editor_controller.cpp:freezeFrame",
+                       tr("The clip has no source media to freeze"));
+    return;
+  }
+  const edit::Asset* asset = edit::findAsset(*project, clip->asset_id);
+  if (asset == nullptr) {
+    explainUnavailable(window_, "editor_controller.cpp:freezeFrame",
+                       tr("The clip has no source media to freeze"));
+    return;
+  }
+  std::vector<edit::EditCommand> commands;
+  edit::EntityId target_id = clip->id;
+  edit::TimeRange timeline_range = clip->timeline_range;
+  edit::Time freeze_source = edit::sourceTimeAtTimelineTime(*clip, freeze_time);
+  if (freeze_time > clip->timeline_range.start) {
+    const auto right_id = edit::EntityId::generate();
+    commands.push_back({.operation = edit::SplitClipCommand{.sequence_id = sequence->id,
+                                                            .clip_id = clip->id,
+                                                            .split_time = freeze_time,
+                                                            .right_clip_id = right_id,
+                                                            .include_linked = false,
+                                                            .linked_right_clip_ids = {}},
+                        .coalescing_key = {}});
+    target_id = right_id;
+    timeline_range = edit::TimeRange(freeze_time, clip->timeline_range.end() - freeze_time);
+  }
+  edit::Time hold = sequence->frame_rate.frameTime();
+  if (hold.isZero() || hold.isNegative()) {
+    hold = edit::Time(1, std::max<std::uint32_t>(1, freeze_source.timescale()));
+  }
+  if (freeze_source + hold > asset->duration) {
+    hold = asset->duration - freeze_source;
+  }
+  if (hold.isZero() || hold.isNegative()) {
+    explainUnavailable(window_, "editor_controller.cpp:freezeFrame",
+                       tr("There is no source frame left to hold"));
+    return;
+  }
+  if (freeze_source < clip->source_range.start) {
+    freeze_source = clip->source_range.start;
+  }
+  commands.push_back({.operation = edit::TrimClipCommand{.sequence_id = sequence->id,
+                                                         .clip_id = target_id,
+                                                         .timeline_range = timeline_range,
+                                                         .source_range = edit::TimeRange(
+                                                             freeze_source, hold),
+                                                         .include_linked = false,
+                                                         .mode = edit::InsertMode::RejectOverlap},
+                      .coalescing_key = {}});
+  (void)applyBatch(std::move(commands), tr("Could not freeze the frame"));
 }
 
 void EditorController::gotoTimecode() {
@@ -6621,17 +7136,42 @@ void EditorController::updateSelectedEffectParameter(const QString& effectId,
   }
   const auto parameter = effect->parameters.find(parameterId.toStdString());
   if (parameter == effect->parameters.end()) {
+    edit::EffectParameter created{.id = parameterId.toStdString(),
+                                  .value = value.toDouble(),
+                                  .keyframes = {}};
+    const QString family = parameterId.startsWith(QStringLiteral("lift_"))
+                               ? QStringLiteral("lift")
+                           : parameterId.startsWith(QStringLiteral("gamma_"))
+                               ? QStringLiteral("gamma")
+                           : parameterId.startsWith(QStringLiteral("gain_"))
+                               ? QStringLiteral("gain")
+                               : parameterId;
+    (void)apply(
+        edit::EditCommand{
+            .operation = edit::SetClipEffectParameterCommand{.sequence_id = sequence->id,
+                                                             .clip_id = clip->id,
+                                                             .effect_id = effect->id,
+                                                             .parameter = std::move(created)},
+            .coalescing_key = "effect:" + effectId.toStdString() + ":" + family.toStdString()},
+        tr("Could not update the effect parameter"));
     return;
   }
   edit::EffectParameter updated = parameter->second;
   updated.value = effectValueFromUi(updated.value, value);
+  const QString family = parameterId.startsWith(QStringLiteral("lift_"))
+                             ? QStringLiteral("lift")
+                         : parameterId.startsWith(QStringLiteral("gamma_"))
+                             ? QStringLiteral("gamma")
+                         : parameterId.startsWith(QStringLiteral("gain_"))
+                             ? QStringLiteral("gain")
+                             : parameterId;
   (void)apply(
       edit::EditCommand{
           .operation = edit::SetClipEffectParameterCommand{.sequence_id = sequence->id,
                                                            .clip_id = clip->id,
                                                            .effect_id = effect->id,
                                                            .parameter = std::move(updated)},
-          .coalescing_key = "effect:" + effectId.toStdString() + ":" + parameterId.toStdString()},
+          .coalescing_key = "effect:" + effectId.toStdString() + ":" + family.toStdString()},
       tr("Could not update the effect parameter"));
 }
 
@@ -8776,7 +9316,7 @@ void EditorController::refreshTimelineView() {
     for (const edit::Clip& clip : track.clips) {
       const auto* record = findImported(imported_assets_, clip.asset_id.toString());
       const auto waveform = media_waveforms_.find(clip.asset_id.toString());
-      clips.push_back({
+      desktop_ui::TimelineClipView view{
           .id = QString::fromStdString(clip.id.toString()),
           .displayName = QString::fromStdString(clip.name),
           .trackIndex = static_cast<int>(track_index),
@@ -8794,7 +9334,78 @@ void EditorController::refreshTimelineView() {
           .waveform = waveform == media_waveforms_.end()
                           ? QVector<desktop_ui::WaveformBucketView>{}
                           : waveform->second,
-      });
+      };
+      if (track.kind == edit::TrackKind::Audio) {
+        view.envelopeKind = desktop_ui::TimelineClipView::EnvelopeKind::Volume;
+        view.envelopeStatic = clip.audio_gain_db;
+        const auto volume = std::find_if(
+            clip.effects.begin(), clip.effects.end(), [](const edit::Effect& effect) {
+              return effect.enabled && effect.type == "audio.volume";
+            });
+        if (volume != clip.effects.end()) {
+          view.envelopeEffectId = QString::fromStdString(volume->id.toString());
+          if (const auto parameter = volume->parameters.find("gain_db");
+              parameter != volume->parameters.end()) {
+            if (const auto* base = std::get_if<double>(&parameter->second.value)) {
+              view.envelopeEffectBase = *base;
+            }
+            for (const auto& keyframe : parameter->second.keyframes) {
+              desktop_ui::KeyframeView key;
+              key.id = QString::fromStdString(keyframe.id.toString());
+              key.time = timelineValue(keyframe.time);
+              if (const auto* value = std::get_if<double>(&keyframe.value)) {
+                key.value = *value;
+              }
+              key.interpolation = keyframe.interpolation == edit::KeyframeInterpolation::Hold
+                                      ? desktop_ui::KeyframeInterpolationView::Hold
+                                  : keyframe.interpolation == edit::KeyframeInterpolation::Bezier
+                                      ? desktop_ui::KeyframeInterpolationView::Bezier
+                                      : desktop_ui::KeyframeInterpolationView::Linear;
+              key.incomingControl =
+                  QPointF{keyframe.incoming_control.x, keyframe.incoming_control.y};
+              key.outgoingControl =
+                  QPointF{keyframe.outgoing_control.x, keyframe.outgoing_control.y};
+              view.envelopeKeyframes.push_back(std::move(key));
+            }
+          }
+        }
+      } else if (track.kind == edit::TrackKind::Video) {
+        view.envelopeKind = desktop_ui::TimelineClipView::EnvelopeKind::Opacity;
+        view.envelopeStatic = clip.transform.opacity;
+        view.envelopeEffectBase = 1.0;
+        const auto opacity = std::find_if(
+            clip.effects.begin(), clip.effects.end(), [](const edit::Effect& effect) {
+              return effect.enabled && effect.type == "video.opacity";
+            });
+        if (opacity != clip.effects.end()) {
+          view.envelopeEffectId = QString::fromStdString(opacity->id.toString());
+          if (const auto parameter = opacity->parameters.find("opacity");
+              parameter != opacity->parameters.end()) {
+            if (const auto* base = std::get_if<double>(&parameter->second.value)) {
+              view.envelopeEffectBase = *base;
+            }
+            for (const auto& keyframe : parameter->second.keyframes) {
+              desktop_ui::KeyframeView key;
+              key.id = QString::fromStdString(keyframe.id.toString());
+              key.time = timelineValue(keyframe.time);
+              if (const auto* value = std::get_if<double>(&keyframe.value)) {
+                key.value = *value;
+              }
+              key.interpolation = keyframe.interpolation == edit::KeyframeInterpolation::Hold
+                                      ? desktop_ui::KeyframeInterpolationView::Hold
+                                  : keyframe.interpolation == edit::KeyframeInterpolation::Bezier
+                                      ? desktop_ui::KeyframeInterpolationView::Bezier
+                                      : desktop_ui::KeyframeInterpolationView::Linear;
+              key.incomingControl =
+                  QPointF{keyframe.incoming_control.x, keyframe.incoming_control.y};
+              key.outgoingControl =
+                  QPointF{keyframe.outgoing_control.x, keyframe.outgoing_control.y};
+              view.envelopeKeyframes.push_back(std::move(key));
+            }
+          }
+        }
+      }
+      clips.push_back(std::move(view));
     }
     ++track_index;
   }
@@ -9032,7 +9643,7 @@ void EditorController::refreshInspectorView() {
       view.effectType = QString::fromStdString(effect.type);
       view.effectName = effect_name;
       view.parameterId = QString::fromStdString(parameter_id);
-      view.displayName = view.parameterId;
+      view.displayName = effectParameterDisplayName(effect.type, parameter_id);
       view.value = effectValueForUi(parameter.value);
       view.duration = toUiTime(clip->timeline_range.duration);
       view.keyframes.reserve(static_cast<qsizetype>(parameter.keyframes.size()));

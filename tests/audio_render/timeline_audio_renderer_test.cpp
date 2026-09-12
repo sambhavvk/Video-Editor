@@ -320,6 +320,30 @@ TEST(TimelineAudioRenderer, SumsTracksAndAppliesGainPanAndFades) {
   EXPECT_NEAR(result.value().channel(1)[100], 0.0F, 0.00001F);
 }
 
+TEST(TimelineAudioRenderer, AppliesAnimatedVolumeEnvelope) {
+  auto timeline = make_timeline();
+  auto clip = audio_clip(timeline.constant_asset_id, 0, 0, 100);
+  auto volume = audio_effect("audio.volume");
+  volume.parameters["gain_db"] = {
+      .id = "gain_db",
+      .value = 0.0,
+      .keyframes = {{.time = edit::Time(0, kTimelineAudioSampleRate),
+                     .value = 0.0,
+                     .interpolation = edit::KeyframeInterpolation::Linear},
+                    {.time = edit::Time(50, kTimelineAudioSampleRate),
+                     .value = 6.020599913279624,
+                     .interpolation = edit::KeyframeInterpolation::Linear}}};
+  clip.effects.push_back(std::move(volume));
+  const auto registry = registry_for(timeline);
+  TimelineAudioRenderer renderer(registry);
+  const auto result = renderer.render(snapshot(timeline, {audio_track({clip})}),
+                                      {.start_sample = 0, .sample_count = 100});
+  ASSERT_TRUE(result) << result.error().message;
+  EXPECT_NEAR(result.value().channel(0)[0], 0.125F, 0.00002F);
+  EXPECT_NEAR(result.value().channel(0)[50], 0.25F, 0.00005F);
+  EXPECT_NEAR(result.value().channel(0)[99], 0.25F, 0.00005F);
+}
+
 TEST(TimelineAudioRenderer, MuteAndSoloResolveBeforeMixing) {
   auto timeline = make_timeline();
   auto ramp = audio_clip(timeline.ramp_asset_id, 0, 0, 20);

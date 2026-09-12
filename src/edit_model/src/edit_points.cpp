@@ -2,6 +2,7 @@
 #include "video_editor/edit_model/edit_points.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <set>
 
 namespace video_editor::edit {
@@ -121,7 +122,17 @@ Time sourceTimeAtTimelineTime(const Clip& clip, Time timeline_time) {
   Time offset = timeline_time - clip.timeline_range.start;
   offset = offset.scaled(clip.playback_rate.numerator(), clip.playback_rate.denominator(),
                          RoundingMode::NearestTiesEven);
-  return clip.reversed ? clip.source_range.end() - offset : clip.source_range.start + offset;
+  Time source_time =
+      clip.reversed ? clip.source_range.end() - offset : clip.source_range.start + offset;
+  if (clip.source_range.contains(source_time)) {
+    return source_time;
+  }
+  if (source_time < clip.source_range.start) {
+    return clip.source_range.start;
+  }
+  const auto scale = std::max<std::uint32_t>(1, clip.source_range.duration.timescale());
+  Time last = clip.source_range.end() - Time(1, scale);
+  return last < clip.source_range.start ? clip.source_range.start : last;
 }
 
 } // namespace video_editor::edit

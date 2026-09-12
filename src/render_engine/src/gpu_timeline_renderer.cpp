@@ -2,6 +2,7 @@
 #include "video_editor/render_engine/gpu_timeline_renderer.h"
 
 #include "video_editor/render_engine/cpu_renderer.h"
+#include "video_editor/edit_model/edit_points.h"
 #include "video_editor/edit_model/model.h"
 
 #include <algorithm>
@@ -21,10 +22,7 @@ constexpr int kMaximumNestedSequenceDepth = 8;
 }
 
 [[nodiscard]] edit::Time source_time_for(const edit::Clip& clip, const edit::Time timeline_time) {
-  edit::Time offset = timeline_time - clip.timeline_range.start;
-  offset = offset.scaled(clip.playback_rate.numerator(), clip.playback_rate.denominator(),
-                         edit::RoundingMode::NearestTiesEven);
-  return clip.reversed ? clip.source_range.end() - offset : clip.source_range.start + offset;
+  return edit::sourceTimeAtTimelineTime(clip, timeline_time);
 }
 
 [[nodiscard]] RenderResult<GpuImage> stale() {

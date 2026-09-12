@@ -89,4 +89,12 @@ TEST(EditPointsTest, SourceTimeAtTimelineTimeHonorsRateAndReverse) {
   EXPECT_EQ(sourceTimeAtTimelineTime(clip, Time(3, 1)), Time(22, 1));
 }
 
+TEST(EditPointsTest, SourceTimeClampsToTheSourceRange) {
+  Clip clip;
+  clip.timeline_range = TimeRange(Time(0, 1), Time(10, 1));
+  clip.source_range = TimeRange(Time(5, 1), Time(1, 1));
+  EXPECT_EQ(sourceTimeAtTimelineTime(clip, Time(0, 1)), Time(5, 1));
+  EXPECT_EQ(sourceTimeAtTimelineTime(clip, Time(9, 1)), Time(5, 1));
+}
+
 } // namespace video_editor::edit

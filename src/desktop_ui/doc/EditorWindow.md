@@ -9,9 +9,9 @@ Namespace: `video_editor::desktop_ui`
 ## Class overview
 
 `EditorWindow` is the top-level Qt Widgets shell for the Import, Edit, Audio & Captions, and Deliver
-workspaces. It owns the program/source viewers, virtualized timeline, dock panels, menus, toolbars,
-command palette, status presentation, and persistent workspace layouts. It exposes presentation
-surfaces to `EditorController` and emits user intent without editing canonical state itself.
+The window uses a dense Linux-first dark NLE theme (Noto Sans/Cantarell, orange tool accent).
+Timeline tools include Select, Ripple/Overwrite Trim, Roll, Slip, Slide, Razor, Hand, and Zoom,
+each with a drawn professional cursor. Lift (`;`) and Extract (`'`) alias delete and ripple-delete.
 
 ## Project structure and dependencies
 

@@ -30,4 +30,12 @@ validateEffect(const Effect& effect, std::optional<Time> clip_duration = std::nu
 [[nodiscard]] std::optional<EffectValue> evaluateEffectParameter(const EffectParameter& parameter,
                                                                  Time clip_local_time);
 
+// Extra dB from enabled `audio.volume` effects at clip-local time. Added to
+// `Clip.audio_gain_db` by the audio renderer. Missing or invalid curves contribute 0.
+[[nodiscard]] double additionalVolumeGainDb(const Clip& clip, Time clip_local_time);
+
+// Product of enabled `video.opacity` effects at clip-local time. Multiplied with
+// `Clip.transform.opacity` by the renderer. Missing or invalid curves contribute 1.
+[[nodiscard]] double additionalClipOpacity(const Clip& clip, Time clip_local_time);
+
 } // namespace video_editor::edit

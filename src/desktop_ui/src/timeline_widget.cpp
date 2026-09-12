@@ -4,6 +4,8 @@
 
 #include "video_editor/desktop_ui/timeline_widget.hpp"
 
+#include "video_editor/desktop_ui/timeline_cursors.hpp"
+
 #include <QApplication>
 #include <QContextMenuEvent>
 #include <QCursor>
@@ -36,6 +38,10 @@ constexpr QColor kMutedText{139, 145, 157};
 constexpr QColor kPlayhead{244, 89, 93};
 constexpr QColor kSnapGuide{94, 214, 194};
 constexpr QColor kEditPreview{230, 238, 255, 105};
+constexpr double kVolumeDbMin = -60.0;
+constexpr double kVolumeDbMax = 12.0;
+constexpr int kEnvelopeHitSlop = 6;
+constexpr int kEnvelopeKeyHit = 7;
 
 void paintClipWaveform(QPainter& painter, const QRect& rect,
                        const QVector<WaveformBucketView>& waveform, const bool leaveBottomBadge) {
@@ -106,10 +112,11 @@ TimelineWidget::TimelineWidget(QWidget* parent) : QAbstractScrollArea(parent) {
   setFocusPolicy(Qt::StrongFocus);
   setFrameShape(QFrame::NoFrame);
   setMouseTracking(true);
+  viewport()->setMouseTracking(true);
   setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
   setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
   viewport()->setObjectName(QStringLiteral("timelineViewport"));
-  viewport()->setCursor(Qt::ArrowCursor);
+  viewport()->setCursor(timelineCursor(TimelineCursorKind::Arrow));
 
   connect(horizontalScrollBar(), &QScrollBar::valueChanged, viewport(),
           qOverload<>(&QWidget::update));
@@ -142,6 +149,12 @@ void TimelineWidget::setTimeline(qint64 duration, qint64 timeScale,
   if (marker_gesture_.pointerDown) {
     cancelMarkerGesture();
   }
+  if (pan_gesture_.pointerDown) {
+    cancelPanGesture();
+  }
+  marquee_active_ = false;
+  marquee_zoom_ = false;
+  marquee_rect_ = QRect();
   if (transition_gesture_.pointerDown) {
     transition_gesture_ = TransitionGesture{};
   }
@@ -324,19 +337,23 @@ void TimelineWidget::setPlayhead(qint64 position) {
 }
 
 void TimelineWidget::setPixelsPerSecond(double pixelsPerSecond) {
+  setPixelsPerSecond(pixelsPerSecond, std::max(header_width_, viewport()->width() / 2));
+}
+
+void TimelineWidget::setPixelsPerSecond(double pixelsPerSecond, int anchorViewportX) {
   const auto bounded = std::clamp(pixelsPerSecond, 8.0, 2'400.0);
   if (qFuzzyCompare(pixels_per_second_, bounded)) {
     return;
   }
 
-  const auto centerTime = timeForX(std::max(header_width_, viewport()->width() / 2));
+  const auto anchorTime = timeForX(std::max(header_width_, anchorViewportX));
   pixels_per_second_ = bounded;
   updateScrollBars();
 
-  const auto centerPixels = static_cast<int>(std::llround(
-      static_cast<double>(centerTime) / static_cast<double>(time_scale_) * pixels_per_second_));
-  horizontalScrollBar()->setValue(centerPixels -
-                                  std::max(0, viewport()->width() / 2 - header_width_));
+  const auto anchorPixels = static_cast<int>(std::llround(
+      static_cast<double>(anchorTime) / static_cast<double>(time_scale_) * pixels_per_second_));
+  horizontalScrollBar()->setValue(anchorPixels -
+                                  std::max(0, std::max(header_width_, anchorViewportX) - header_width_));
   viewport()->update();
   emit zoomChanged(pixels_per_second_);
 }
@@ -347,6 +364,10 @@ void TimelineWidget::zoomIn() {
 
 void TimelineWidget::zoomOut() {
   setPixelsPerSecond(pixels_per_second_ / 1.25);
+}
+
+void TimelineWidget::zoomAt(int viewportX, double factor) {
+  setPixelsPerSecond(pixels_per_second_ * factor, viewportX);
 }
 
 void TimelineWidget::zoomToFit() {
@@ -411,7 +432,14 @@ void TimelineWidget::setToolMode(ToolMode mode) {
   if (clip_gesture_.pointerDown) {
     cancelClipGesture();
   }
+  if (pan_gesture_.pointerDown) {
+    cancelPanGesture();
+  }
+  marquee_active_ = false;
+  marquee_zoom_ = false;
+  marquee_rect_ = QRect();
   tool_mode_ = mode;
+  emit toolModeChanged(tool_mode_);
   updateHoverCursor(viewport()->mapFromGlobal(QCursor::pos()));
   viewport()->update();
 }
@@ -427,15 +455,46 @@ TimelineWidget::clipHitRegionAt(const QPoint& viewportPosition) const {
     return ClipHitRegion::None;
   }
 
-  const auto rect = clipRect(clips_.at(index));
+  const auto& clip = clips_.at(index);
+  const auto rect = clipRect(clip);
   const auto edgeWidth = std::min(trim_handle_pixels_, std::max(1, rect.width() / 3));
-  if (viewportPosition.x() <= rect.left() + edgeWidth) {
-    return ClipHitRegion::TrimIn;
+  if (tool_mode_ != ToolMode::Pen) {
+    if (viewportPosition.x() <= rect.left() + edgeWidth) {
+      return ClipHitRegion::TrimIn;
+    }
+    if (viewportPosition.x() >= rect.right() - edgeWidth) {
+      return ClipHitRegion::TrimOut;
+    }
   }
-  if (viewportPosition.x() >= rect.right() - edgeWidth) {
-    return ClipHitRegion::TrimOut;
+  if (clip.envelopeKind != TimelineClipView::EnvelopeKind::None) {
+    if (envelopeKeyframeAt(index, viewportPosition) >= 0) {
+      return ClipHitRegion::EnvelopeKeyframe;
+    }
+    const QRect band = envelopeBand(rect);
+    if (band.isValid() && band.height() >= 8) {
+      const qint64 localTime =
+          std::clamp(timeForX(viewportPosition.x()) - clip.start, qint64{0},
+                     std::max<qint64>(0, clip.duration - 1));
+      const int lineY = envelopeYForValue(band, clip, displayedEnvelopeValue(clip, localTime));
+      if (std::abs(viewportPosition.y() - lineY) <= kEnvelopeHitSlop) {
+        return ClipHitRegion::Envelope;
+      }
+    }
+    if (tool_mode_ == ToolMode::Pen) {
+      return ClipHitRegion::Envelope;
+    }
   }
   return ClipHitRegion::Body;
+}
+
+void TimelineWidget::setTrackHeight(int height) {
+  const int bounded = std::clamp(height, 36, 160);
+  if (bounded == track_height_) {
+    return;
+  }
+  track_height_ = bounded;
+  updateScrollBars();
+  viewport()->update();
 }
 
 void TimelineWidget::nudgeActiveClipByFrames(int frameCount, EditIntent intent) {
@@ -596,6 +655,87 @@ void TimelineWidget::paintEvent(QPaintEvent* event) {
                      fontMetrics().elidedText(clip.displayName, Qt::ElideRight,
                                               std::max(0, rect.width() - badgeSpace - 12)));
     paintClipWaveform(painter, rect, clip.waveform, clip.offline);
+    if (clip.envelopeKind != TimelineClipView::EnvelopeKind::None) {
+      TimelineClipView painted = clip;
+      if (clip_gesture_.editingEnvelope && clip_gesture_.clipIndex >= 0 &&
+          clip_gesture_.clipIndex < clips_.size() &&
+          clips_.at(clip_gesture_.clipIndex).id == clip.id) {
+        if (clip_gesture_.envelopeSetStatic) {
+          painted.envelopeStatic = clip_gesture_.envelopeStaticValue;
+        } else {
+          bool found = false;
+          for (auto& key : painted.envelopeKeyframes) {
+            if (key.id == clip_gesture_.envelopeKeyframeId) {
+              key.time = clip_gesture_.envelopeLocalTime;
+              key.value = clip_gesture_.envelopeKeyValue;
+              found = true;
+              break;
+            }
+          }
+          if (!found) {
+            KeyframeView added;
+            added.id = clip_gesture_.envelopeKeyframeId.isEmpty() ? QStringLiteral("preview")
+                                                                 : clip_gesture_.envelopeKeyframeId;
+            added.time = clip_gesture_.envelopeLocalTime;
+            added.value = clip_gesture_.envelopeKeyValue;
+            painted.envelopeKeyframes.push_back(added);
+          }
+        }
+      }
+      const QRect band = envelopeBand(rect);
+      if (band.width() > 4 && band.height() > 8) {
+        QPainterPath curve;
+        bool started = false;
+        for (int x = band.left(); x <= band.right(); x += 2) {
+          const qint64 localTime = std::clamp(timeForX(x) - painted.start, qint64{0},
+                                              std::max<qint64>(0, painted.duration - 1));
+          const int y = envelopeYForValue(band, painted, displayedEnvelopeValue(painted, localTime));
+          if (!started) {
+            curve.moveTo(x, y);
+            started = true;
+          } else {
+            curve.lineTo(x, y);
+          }
+        }
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen{painted.envelopeKind == TimelineClipView::EnvelopeKind::Volume
+                                ? QColor{120, 228, 176}
+                                : QColor{214, 186, 255},
+                            1.6});
+        painter.drawPath(curve);
+        if (painted.envelopeKind == TimelineClipView::EnvelopeKind::Volume) {
+          const int zeroY = envelopeYForValue(band, painted, 0.0);
+          painter.setPen(QPen{QColor{236, 240, 247, 50}, 1, Qt::DotLine});
+          painter.drawLine(band.left(), zeroY, band.right(), zeroY);
+        }
+        painter.setPen(QPen{QColor{18, 20, 24}, 1});
+        painter.setBrush(QColor{244, 186, 92});
+        for (const auto& key : painted.envelopeKeyframes) {
+          const int kx = xForTime(painted.start + key.time);
+          const int ky =
+              envelopeYForValue(band, painted, displayedEnvelopeValue(painted, key.time));
+          painter.drawEllipse(QPoint{kx, ky}, 4, 4);
+        }
+      }
+    }
+    if (clip.fadeIn > 0 && rect.width() > 12) {
+      const int fadeX = xForTime(clip.start + clip.fadeIn);
+      QPainterPath fade;
+      fade.moveTo(rect.left(), rect.bottom() - 2);
+      fade.lineTo(std::min(fadeX, rect.right()), rect.bottom() - 2);
+      fade.lineTo(rect.left(), rect.top() + 16);
+      fade.closeSubpath();
+      painter.fillPath(fade, QColor{255, 255, 255, 28});
+    }
+    if (clip.fadeOut > 0 && rect.width() > 12) {
+      const int fadeX = xForTime(clip.start + clip.duration - clip.fadeOut);
+      QPainterPath fade;
+      fade.moveTo(rect.right(), rect.bottom() - 2);
+      fade.lineTo(std::max(fadeX, rect.left()), rect.bottom() - 2);
+      fade.lineTo(rect.right(), rect.top() + 16);
+      fade.closeSubpath();
+      painter.fillPath(fade, QColor{255, 255, 255, 28});
+    }
     if (clip.proxy && rect.width() > 70) {
       painter.setFont(QFont{font().family(), std::max(7, font().pointSize() - 2), QFont::DemiBold});
       painter.setPen(QColor{224, 233, 246});
@@ -848,8 +988,10 @@ void TimelineWidget::paintEvent(QPaintEvent* event) {
   }
 
   if (marquee_active_ && !marquee_rect_.isNull()) {
-    painter.setPen(QPen{QColor{120, 170, 255, 200}, 1, Qt::DashLine});
-    painter.setBrush(QColor{120, 170, 255, 40});
+    const auto fill = marquee_zoom_ ? QColor{94, 214, 194, 40} : QColor{120, 170, 255, 40};
+    const auto pen = marquee_zoom_ ? QColor{94, 214, 194, 210} : QColor{120, 170, 255, 200};
+    painter.setPen(QPen{pen, 1, Qt::DashLine});
+    painter.setBrush(fill);
     painter.drawRect(marquee_rect_);
   }
 
@@ -867,8 +1009,14 @@ void TimelineWidget::resizeEvent(QResizeEvent* event) {
 }
 
 void TimelineWidget::wheelEvent(QWheelEvent* event) {
+  if (event->position().x() < header_width_ &&
+      !event->modifiers().testFlag(Qt::ControlModifier)) {
+    setTrackHeight(track_height_ + (event->angleDelta().y() > 0 ? 8 : -8));
+    event->accept();
+    return;
+  }
   if (event->modifiers().testFlag(Qt::ControlModifier)) {
-    event->angleDelta().y() > 0 ? zoomIn() : zoomOut();
+    zoomAt(static_cast<int>(event->position().x()), event->angleDelta().y() > 0 ? 1.25 : 0.8);
     event->accept();
     return;
   }
@@ -883,6 +1031,44 @@ void TimelineWidget::wheelEvent(QWheelEvent* event) {
 void TimelineWidget::mousePressEvent(QMouseEvent* event) {
   setFocus(Qt::MouseFocusReason);
   const auto position = event->position().toPoint();
+
+  if (event->button() == Qt::MiddleButton) {
+    beginPanGesture(position);
+    event->accept();
+    return;
+  }
+  if (event->button() == Qt::LeftButton && tool_mode_ == ToolMode::Hand) {
+    beginPanGesture(position);
+    event->accept();
+    return;
+  }
+  if (event->button() == Qt::LeftButton && tool_mode_ == ToolMode::Zoom &&
+      position.x() >= header_width_) {
+    marquee_active_ = true;
+    marquee_zoom_ = true;
+    marquee_origin_ = position;
+    marquee_rect_ = QRect(position, QSize());
+    event->accept();
+    return;
+  }
+  if (event->button() == Qt::LeftButton && tool_mode_ == ToolMode::Razor &&
+      (position.y() > ruler_height_ || position.x() < header_width_)) {
+    const auto cutTime = timeForX(position.x());
+    if (event->modifiers().testFlag(Qt::ShiftModifier)) {
+      emit addEditsAtRequested(cutTime);
+    } else {
+      const auto clipIndex = clipAt(position);
+      if (clipIndex >= 0) {
+        const auto& clip = clips_.at(clipIndex);
+        if (clip.trackIndex >= 0 && clip.trackIndex < tracks_.size() &&
+            !tracks_.at(clip.trackIndex).locked) {
+          emit clipCutAtRequested(clip.id, cutTime);
+        }
+      }
+    }
+    event->accept();
+    return;
+  }
 
   if (event->button() == Qt::LeftButton) {
     const auto transitionIndex = transitionAt(position);
@@ -985,6 +1171,40 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
       emit clipActivated(active_clip_id_);
       const auto hitRegion = clipHitRegionAt(position);
       const auto trackIndex = clips_.at(clipIndex).trackIndex;
+      const auto locked = trackIndex < 0 || trackIndex >= tracks_.size() ||
+                          tracks_.at(trackIndex).locked;
+      const auto envelopeHit = hitRegion == ClipHitRegion::Envelope ||
+                               hitRegion == ClipHitRegion::EnvelopeKeyframe;
+      if (!locked &&
+          (tool_mode_ == ToolMode::Pen || envelopeHit) &&
+          clips_.at(clipIndex).envelopeKind != TimelineClipView::EnvelopeKind::None) {
+        if (tool_mode_ == ToolMode::Pen && event->modifiers().testFlag(Qt::AltModifier) &&
+            hitRegion == ClipHitRegion::EnvelopeKeyframe) {
+          const int keyIndex = envelopeKeyframeAt(clipIndex, position);
+          if (keyIndex >= 0) {
+            const auto& envelopeClip = clips_.at(clipIndex);
+            if (envelopeClip.envelopeKind == TimelineClipView::EnvelopeKind::Volume) {
+              emit clipVolumeKeyframeRemoved(envelopeClip.id,
+                                             envelopeClip.envelopeKeyframes.at(keyIndex).id);
+            } else if (envelopeClip.envelopeKind == TimelineClipView::EnvelopeKind::Opacity) {
+              emit clipOpacityKeyframeRemoved(envelopeClip.id,
+                                              envelopeClip.envelopeKeyframes.at(keyIndex).id);
+            }
+          }
+          viewport()->update();
+          event->accept();
+          return;
+        }
+        beginEnvelopeGesture(clipIndex, position, hitRegion, event->modifiers());
+        viewport()->update();
+        event->accept();
+        return;
+      }
+      if (tool_mode_ == ToolMode::Pen) {
+        viewport()->update();
+        event->accept();
+        return;
+      }
       const auto requiresEdge = tool_mode_ == ToolMode::RippleTrim ||
                                 tool_mode_ == ToolMode::OverwriteTrim ||
                                 tool_mode_ == ToolMode::Roll;
@@ -1001,6 +1221,7 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
     }
     if (tool_mode_ == ToolMode::Select && position.y() > ruler_height_) {
       marquee_active_ = true;
+      marquee_zoom_ = false;
       marquee_origin_ = position;
       marquee_rect_ = QRect(position, QSize());
       if (!event->modifiers().testFlag(Qt::ShiftModifier) &&
@@ -1016,6 +1237,11 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
 }
 
 void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
+  if (pan_gesture_.pointerDown) {
+    updatePanGesture(event->position().toPoint());
+    event->accept();
+    return;
+  }
   if (dragging_playhead_) {
     movePlayheadFromPointer(static_cast<int>(event->position().x()), true);
     event->accept();
@@ -1113,11 +1339,18 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event) {
     event->accept();
     return;
   }
-  updateHoverCursor(event->position().toPoint());
+  updateHoverCursor(event->position().toPoint(), event->modifiers());
   QAbstractScrollArea::mouseMoveEvent(event);
 }
 
 void TimelineWidget::mouseReleaseEvent(QMouseEvent* event) {
+  if (pan_gesture_.pointerDown &&
+      (event->button() == Qt::LeftButton || event->button() == Qt::MiddleButton)) {
+    finishPanGesture();
+    updateHoverCursor(event->position().toPoint(), event->modifiers());
+    event->accept();
+    return;
+  }
   if (dragging_playhead_ && event->button() == Qt::LeftButton) {
     dragging_playhead_ = false;
     movePlayheadFromPointer(static_cast<int>(event->position().x()), true);
@@ -1161,10 +1394,24 @@ void TimelineWidget::mouseReleaseEvent(QMouseEvent* event) {
     return;
   }
   if (marquee_active_ && event->button() == Qt::LeftButton) {
+    const auto zoomMarquee = marquee_zoom_;
+    const QRect selection = marquee_rect_.normalized();
     marquee_active_ = false;
+    marquee_zoom_ = false;
+    marquee_rect_ = QRect();
+    if (zoomMarquee) {
+      if (selection.width() >= QApplication::startDragDistance()) {
+        zoomToMarquee(selection);
+      } else {
+        const auto factor = event->modifiers().testFlag(Qt::AltModifier) ? 0.8 : 1.25;
+        zoomAt(event->position().toPoint().x(), factor);
+      }
+      updateHoverCursor(event->position().toPoint(), event->modifiers());
+      event->accept();
+      return;
+    }
     QStringList selected;
     QString active;
-    const QRect selection = marquee_rect_.normalized();
     for (const auto& clip : clips_) {
       const auto rect = clipRect(clip);
       if (!selection.intersects(rect)) {
@@ -1175,7 +1422,6 @@ void TimelineWidget::mouseReleaseEvent(QMouseEvent* event) {
         active = clip.id;
       }
     }
-    marquee_rect_ = QRect();
     if (!selected.isEmpty()) {
       emit clipSelectionChanged(selected, active);
     }
@@ -1349,6 +1595,8 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
     auto* unlink = menu.addAction(tr("Unlink"));
     auto* toggleEnabled =
         menu.addAction(clip.enabled ? tr("Disable Clip") : tr("Enable Clip"));
+    auto* freezeFrame = menu.addAction(tr("Freeze Frame"));
+    freezeFrame->setToolTip(tr("Hold the frame under the pointer for the rest of the clip"));
     auto* cutHere = menu.addAction(tr("Cut here"));
     cutHere->setEnabled(cutInside);
     cutHere->setToolTip(tr("Split the clip at the clicked position"));
@@ -1366,6 +1614,8 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
       emit clipUnlinkRequested(clip.id);
     } else if (chosen == toggleEnabled) {
       emit clipEnabledToggledRequested(clip.id, !clip.enabled);
+    } else if (chosen == freezeFrame) {
+      emit clipFreezeFrameRequested(clip.id, clickTime);
     } else if (chosen == cutHere && cutInside) {
       emit clipCutAtRequested(clip.id, clickTime);
     } else if (chosen == remove) {
@@ -1385,6 +1635,19 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event) {
 }
 
 void TimelineWidget::keyPressEvent(QKeyEvent* event) {
+  if (event->key() == Qt::Key_Escape && pan_gesture_.pointerDown) {
+    cancelPanGesture();
+    event->accept();
+    return;
+  }
+  if (event->key() == Qt::Key_Escape && marquee_active_) {
+    marquee_active_ = false;
+    marquee_zoom_ = false;
+    marquee_rect_ = QRect();
+    viewport()->update();
+    event->accept();
+    return;
+  }
   if (event->key() == Qt::Key_Escape && marker_gesture_.pointerDown) {
     cancelMarkerGesture();
     event->accept();
@@ -1896,10 +2159,106 @@ void TimelineWidget::beginClipGesture(int clipIndex, const QPoint& position,
   }
 }
 
+void TimelineWidget::beginEnvelopeGesture(int clipIndex, const QPoint& position,
+                                          ClipHitRegion hitRegion,
+                                          Qt::KeyboardModifiers modifiers) {
+  if (clipIndex < 0 || clipIndex >= clips_.size()) {
+    return;
+  }
+  const auto& clip = clips_.at(clipIndex);
+  if (clip.envelopeKind == TimelineClipView::EnvelopeKind::None) {
+    return;
+  }
+  clip_gesture_ = ClipGesture{};
+  clip_gesture_.pointerDown = true;
+  clip_gesture_.clipIndex = clipIndex;
+  clip_gesture_.pressPosition = position;
+  clip_gesture_.pressPointerTime = timeForX(position.x());
+  clip_gesture_.originalStart = clip.start;
+  clip_gesture_.originalDuration = clip.duration;
+  clip_gesture_.editingEnvelope = true;
+  clip_gesture_.envelopeKind = clip.envelopeKind;
+  clip_gesture_.envelopeStaticValue = clip.envelopeStatic;
+  const qint64 localTime = std::clamp(timeForX(position.x()) - clip.start, qint64{0},
+                                      std::max<qint64>(0, clip.duration - 1));
+  const int keyIndex = envelopeKeyframeAt(clipIndex, position);
+  const bool keyed = clip.envelopeKind == TimelineClipView::EnvelopeKind::Volume ||
+                     clip.envelopeKind == TimelineClipView::EnvelopeKind::Opacity;
+  const bool addKey = keyed && (tool_mode_ == ToolMode::Pen ||
+                                 hitRegion == ClipHitRegion::EnvelopeKeyframe ||
+                                 modifiers.testFlag(Qt::ControlModifier) ||
+                                 (hitRegion == ClipHitRegion::Envelope &&
+                                  !clip.envelopeKeyframes.isEmpty()));
+  if (keyed && keyIndex >= 0) {
+    const auto& key = clip.envelopeKeyframes.at(keyIndex);
+    clip_gesture_.envelopeKeyframeId = key.id;
+    clip_gesture_.envelopeLocalTime = key.time;
+    clip_gesture_.envelopeKeyValue = key.value;
+    clip_gesture_.envelopeSetStatic = false;
+  } else if (addKey) {
+    clip_gesture_.envelopeSetStatic = false;
+    clip_gesture_.envelopeKeyframeId.clear();
+    clip_gesture_.envelopeLocalTime = localTime;
+    clip_gesture_.envelopeKeyValue = envelopeExtraAt(clip, localTime);
+    if (clip.envelopeKind == TimelineClipView::EnvelopeKind::Opacity &&
+        clip.envelopeKeyframes.isEmpty()) {
+      clip_gesture_.envelopeKeyValue = 1.0;
+    }
+  } else {
+    clip_gesture_.envelopeSetStatic = true;
+    clip_gesture_.envelopeStaticValue = displayedEnvelopeValue(clip, localTime);
+  }
+  if (QApplication::platformName() != QStringLiteral("offscreen")) {
+    viewport()->grabMouse();
+  }
+}
+
 void TimelineWidget::updateClipGesture(const QPoint& position, Qt::KeyboardModifiers modifiers,
                                        bool allowAutoScroll) {
   if (!clip_gesture_.pointerDown || clip_gesture_.clipIndex < 0 ||
       clip_gesture_.clipIndex >= clips_.size()) {
+    return;
+  }
+
+  if (clip_gesture_.editingEnvelope) {
+    if (!clip_gesture_.dragging) {
+      if ((position - clip_gesture_.pressPosition).manhattanLength() <
+          QApplication::startDragDistance()) {
+        return;
+      }
+      clip_gesture_.dragging = true;
+    }
+    if (clip_gesture_.clipIndex < 0 || clip_gesture_.clipIndex >= clips_.size()) {
+      return;
+    }
+    const auto& clip = clips_.at(clip_gesture_.clipIndex);
+    const auto rect = clipRect(clip);
+    const QRect band = envelopeBand(rect);
+    qint64 localTime = std::clamp(timeForX(position.x()) - clip.start, qint64{0},
+                                  std::max<qint64>(0, clip.duration - 1));
+    if (snap_enabled_ && !modifiers.testFlag(Qt::ShiftModifier)) {
+      const auto frame = roundedFrameDuration();
+      if (frame > 0) {
+        localTime = (localTime / frame) * frame;
+      }
+    }
+    const double displayed = envelopeValueForY(band, clip, position.y());
+    if (clip_gesture_.envelopeSetStatic) {
+      clip_gesture_.envelopeStaticValue =
+          clip.envelopeKind == TimelineClipView::EnvelopeKind::Opacity
+              ? std::clamp(displayed, 0.0, 1.0)
+              : std::clamp(displayed, -96.0, 24.0);
+    } else {
+      clip_gesture_.envelopeLocalTime = localTime;
+      if (clip.envelopeKind == TimelineClipView::EnvelopeKind::Volume) {
+        clip_gesture_.envelopeKeyValue =
+            std::clamp(displayed - clip.envelopeStatic, -96.0, 24.0);
+      } else {
+        const double staticOpacity = std::max(clip.envelopeStatic, 1.0e-6);
+        clip_gesture_.envelopeKeyValue = std::clamp(displayed / staticOpacity, 0.0, 1.0);
+      }
+    }
+    viewport()->update();
     return;
   }
 
@@ -2051,11 +2410,11 @@ void TimelineWidget::updateClipGesture(const QPoint& position, Qt::KeyboardModif
   emit clipBatchEditPreview(clip_gesture_.clipIds, clip_gesture_.destinationTrackIndex,
                             clip_gesture_.startDelta, clip_gesture_.durationDelta,
                             clip_gesture_.mode, clip_gesture_.intent, clip_gesture_.snap);
-  viewport()->setCursor((clip_gesture_.mode == EditMode::Move ||
-                         clip_gesture_.mode == EditMode::Slip ||
-                         clip_gesture_.mode == EditMode::Slide)
-                            ? Qt::ClosedHandCursor
-                            : Qt::SizeHorCursor);
+  viewport()->setCursor(timelineCursor(clip_gesture_.mode == EditMode::Move ||
+                                               clip_gesture_.mode == EditMode::Slip ||
+                                               clip_gesture_.mode == EditMode::Slide
+                                           ? TimelineCursorKind::HandClosed
+                                           : TimelineCursorKind::Trim));
   viewport()->update();
 }
 
@@ -2064,7 +2423,9 @@ void TimelineWidget::finishClipGesture(const QPoint& position, Qt::KeyboardModif
     return;
   }
   updateClipGesture(position, modifiers, false);
-  if (!clip_gesture_.dragging || clip_gesture_.clipIndex < 0 ||
+  const bool envelopeKeyClick =
+      clip_gesture_.editingEnvelope && !clip_gesture_.envelopeSetStatic;
+  if ((!clip_gesture_.dragging && !envelopeKeyClick) || clip_gesture_.clipIndex < 0 ||
       clip_gesture_.clipIndex >= clips_.size()) {
     clip_gesture_ = ClipGesture{};
     if (QWidget::mouseGrabber() == viewport()) {
@@ -2081,6 +2442,27 @@ void TimelineWidget::finishClipGesture(const QPoint& position, Qt::KeyboardModif
     viewport()->releaseMouse();
   }
   viewport()->update();
+  if (completed.editingEnvelope) {
+    if (completed.envelopeSetStatic) {
+      if (!completed.dragging) {
+        return;
+      }
+      if (completed.envelopeKind == TimelineClipView::EnvelopeKind::Opacity) {
+        emit clipOpacityEdited(clipId, completed.envelopeStaticValue);
+      } else {
+        emit clipAudioGainEdited(clipId, completed.envelopeStaticValue);
+      }
+      return;
+    }
+    if (completed.envelopeKind == TimelineClipView::EnvelopeKind::Opacity) {
+      emit clipOpacityKeyframeUpserted(clipId, completed.envelopeKeyframeId,
+                                       completed.envelopeLocalTime, completed.envelopeKeyValue);
+      return;
+    }
+    emit clipVolumeKeyframeUpserted(clipId, completed.envelopeKeyframeId,
+                                    completed.envelopeLocalTime, completed.envelopeKeyValue);
+    return;
+  }
   if (completed.editingFade) {
     emit clipFadeEdited(clipId, completed.targetFadeIn, completed.targetFadeOut);
     return;
@@ -2102,13 +2484,14 @@ void TimelineWidget::cancelClipGesture() {
   if (clip_gesture_.clipIndex >= 0 && clip_gesture_.clipIndex < clips_.size()) {
     clipId = clips_.at(clip_gesture_.clipIndex).id;
   }
+  const auto editingEnvelope = clip_gesture_.editingEnvelope;
   clip_gesture_ = ClipGesture{};
   if (QWidget::mouseGrabber() == viewport()) {
     viewport()->releaseMouse();
   }
-  viewport()->setCursor(Qt::ArrowCursor);
+  viewport()->setCursor(timelineCursor(TimelineCursorKind::Arrow));
   viewport()->update();
-  if (!clipId.isEmpty()) {
+  if (!editingEnvelope && !clipId.isEmpty()) {
     emit clipEditCanceled(clipId);
     emit clipBatchEditCanceled(clipIds);
   }
@@ -2129,66 +2512,175 @@ void TimelineWidget::cancelMarkerGesture() {
   }
 }
 
-void TimelineWidget::updateHoverCursor(const QPoint& position) {
-  if (transition_gesture_.pointerDown && transition_gesture_.index >= 0) {
-    viewport()->setCursor(Qt::SizeHorCursor);
+void TimelineWidget::beginPanGesture(const QPoint& position) {
+  pan_gesture_ = PanGesture{.pointerDown = true,
+                            .dragging = false,
+                            .pressPosition = position,
+                            .pressScrollX = horizontalScrollBar()->value(),
+                            .pressScrollY = verticalScrollBar()->value()};
+  if (follow_playhead_enabled_) {
+    follow_playhead_enabled_ = false;
+    emit followPlayheadDisabled();
+  }
+  viewport()->setCursor(timelineCursor(TimelineCursorKind::HandClosed));
+  if (QApplication::platformName() != QStringLiteral("offscreen")) {
+    viewport()->grabMouse();
+  }
+}
+
+void TimelineWidget::updatePanGesture(const QPoint& position) {
+  if (!pan_gesture_.pointerDown) {
     return;
   }
-  const auto transitionIndex = transitionAt(position);
-  if (transitionIndex >= 0) {
-    const auto& transition = transitions_.at(transitionIndex);
-    const auto rect = transitionRect(transition);
-    const int handleWidth = transition_handle_pixels_;
-    const bool onLeftEdge = position.x() <= rect.left() + handleWidth;
-    const bool onRightEdge = position.x() >= rect.right() - handleWidth + 1;
-    if (onLeftEdge || onRightEdge) {
-      viewport()->setCursor(Qt::SizeHorCursor);
-      return;
-    }
+  if (!pan_gesture_.dragging &&
+      (position - pan_gesture_.pressPosition).manhattanLength() >=
+          QApplication::startDragDistance()) {
+    pan_gesture_.dragging = true;
   }
+  horizontalScrollBar()->setValue(pan_gesture_.pressScrollX -
+                                  (position.x() - pan_gesture_.pressPosition.x()));
+  verticalScrollBar()->setValue(pan_gesture_.pressScrollY -
+                                (position.y() - pan_gesture_.pressPosition.y()));
+  viewport()->setCursor(timelineCursor(TimelineCursorKind::HandClosed));
+  viewport()->update();
+}
+
+void TimelineWidget::finishPanGesture() {
+  pan_gesture_ = PanGesture{};
+  if (QWidget::mouseGrabber() == viewport()) {
+    viewport()->releaseMouse();
+  }
+}
+
+void TimelineWidget::cancelPanGesture() {
+  if (!pan_gesture_.pointerDown) {
+    return;
+  }
+  horizontalScrollBar()->setValue(pan_gesture_.pressScrollX);
+  verticalScrollBar()->setValue(pan_gesture_.pressScrollY);
+  pan_gesture_ = PanGesture{};
+  if (QWidget::mouseGrabber() == viewport()) {
+    viewport()->releaseMouse();
+  }
+  viewport()->update();
+}
+
+void TimelineWidget::zoomToMarquee(const QRect& rect) {
+  const auto bounds = rect.normalized();
+  const auto left = timeForX(std::max(header_width_, bounds.left()));
+  const auto right = timeForX(std::max(header_width_ + 1, bounds.right()));
+  if (right <= left) {
+    return;
+  }
+  const auto available = std::max(1, viewport()->width() - header_width_ - 12);
+  const auto seconds =
+      static_cast<double>(right - left) / static_cast<double>(time_scale_);
+  setPixelsPerSecond(static_cast<double>(available) / seconds, header_width_);
+  horizontalScrollBar()->setValue(static_cast<int>(std::llround(
+      static_cast<double>(left) / static_cast<double>(time_scale_) * pixels_per_second_)));
+}
+
+TimelineCursorKind TimelineWidget::hoverCursorKind(const QPoint& position,
+                                                   Qt::KeyboardModifiers modifiers) const {
+  if (pan_gesture_.pointerDown) {
+    return TimelineCursorKind::HandClosed;
+  }
+  if (clip_gesture_.pointerDown) {
+    if (clip_gesture_.editingEnvelope) {
+      return TimelineCursorKind::Envelope;
+    }
+    if (clip_gesture_.editingFade) {
+      return TimelineCursorKind::Trim;
+    }
+    if (clip_gesture_.mode == EditMode::Move || clip_gesture_.mode == EditMode::Slip ||
+        clip_gesture_.mode == EditMode::Slide) {
+      return TimelineCursorKind::HandClosed;
+    }
+    if (clip_gesture_.mode == EditMode::Roll) {
+      return TimelineCursorKind::Roll;
+    }
+    if (tool_mode_ == ToolMode::RippleTrim) {
+      return TimelineCursorKind::RippleTrim;
+    }
+    if (tool_mode_ == ToolMode::OverwriteTrim) {
+      return TimelineCursorKind::OverwriteTrim;
+    }
+    return TimelineCursorKind::Trim;
+  }
+  if (marquee_active_ && marquee_zoom_) {
+    return modifiers.testFlag(Qt::AltModifier) ? TimelineCursorKind::ZoomOut
+                                               : TimelineCursorKind::ZoomIn;
+  }
+  if (tool_mode_ == ToolMode::Hand) {
+    return TimelineCursorKind::HandOpen;
+  }
+  if (tool_mode_ == ToolMode::Zoom) {
+    return modifiers.testFlag(Qt::AltModifier) ? TimelineCursorKind::ZoomOut
+                                               : TimelineCursorKind::ZoomIn;
+  }
+  if (tool_mode_ == ToolMode::Razor) {
+    return TimelineCursorKind::Razor;
+  }
+  if (tool_mode_ == ToolMode::Pen) {
+    return TimelineCursorKind::Pen;
+  }
+
   const auto hit = clipHitRegionAt(position);
   const auto isEdge = hit == ClipHitRegion::TrimIn || hit == ClipHitRegion::TrimOut;
-  if ((tool_mode_ == ToolMode::RippleTrim || tool_mode_ == ToolMode::OverwriteTrim ||
-       tool_mode_ == ToolMode::Roll) &&
-      isEdge) {
-    viewport()->setCursor(Qt::SizeHorCursor);
-    return;
+  if (tool_mode_ == ToolMode::RippleTrim) {
+    return isEdge ? TimelineCursorKind::RippleTrim : TimelineCursorKind::Arrow;
   }
-  if ((tool_mode_ == ToolMode::RippleTrim || tool_mode_ == ToolMode::OverwriteTrim ||
-       tool_mode_ == ToolMode::Roll) &&
-      hit != ClipHitRegion::None) {
-    viewport()->setCursor(Qt::ArrowCursor);
-    return;
+  if (tool_mode_ == ToolMode::OverwriteTrim) {
+    return isEdge ? TimelineCursorKind::OverwriteTrim : TimelineCursorKind::Arrow;
   }
-  if ((tool_mode_ == ToolMode::Slip || tool_mode_ == ToolMode::Slide) &&
-      hit == ClipHitRegion::Body) {
-    viewport()->setCursor(Qt::OpenHandCursor);
-    return;
+  if (tool_mode_ == ToolMode::Roll) {
+    return isEdge ? TimelineCursorKind::Roll : TimelineCursorKind::Arrow;
   }
-  if ((tool_mode_ == ToolMode::Slip || tool_mode_ == ToolMode::Slide) &&
-      hit != ClipHitRegion::None) {
-    viewport()->setCursor(Qt::ArrowCursor);
-    return;
+  if (tool_mode_ == ToolMode::Slip) {
+    return hit == ClipHitRegion::Body ? TimelineCursorKind::Slip : TimelineCursorKind::Arrow;
   }
-  if (tool_mode_ == ToolMode::TrackSelectForward && hit == ClipHitRegion::Body) {
-    viewport()->setCursor(Qt::PointingHandCursor);
-    return;
+  if (tool_mode_ == ToolMode::Slide) {
+    return hit == ClipHitRegion::Body ? TimelineCursorKind::Slide : TimelineCursorKind::Arrow;
+  }
+  if (tool_mode_ == ToolMode::TrackSelectForward) {
+    return hit == ClipHitRegion::Body ? TimelineCursorKind::TrackSelectForward
+                                      : TimelineCursorKind::Arrow;
+  }
+  if (transition_gesture_.pointerDown || transitionAt(position) >= 0) {
+    const auto transitionIndex = transitionAt(position);
+    if (transitionIndex >= 0) {
+      const auto& transition = transitions_.at(transitionIndex);
+      const auto rect = transitionRect(transition);
+      const int handleWidth = transition_handle_pixels_;
+      const bool onLeftEdge = position.x() <= rect.left() + handleWidth;
+      const bool onRightEdge = position.x() >= rect.right() - handleWidth + 1;
+      if (onLeftEdge || onRightEdge) {
+        return TimelineCursorKind::Trim;
+      }
+    }
   }
   switch (hit) {
   case ClipHitRegion::TrimIn:
   case ClipHitRegion::TrimOut:
-    viewport()->setCursor(Qt::SizeHorCursor);
-    break;
+    return TimelineCursorKind::Trim;
+  case ClipHitRegion::Envelope:
+  case ClipHitRegion::EnvelopeKeyframe:
+    return TimelineCursorKind::Envelope;
   case ClipHitRegion::Body:
-    viewport()->setCursor(Qt::OpenHandCursor);
-    break;
+    return TimelineCursorKind::SelectMove;
   case ClipHitRegion::Transition:
-    viewport()->setCursor(Qt::ArrowCursor);
-    break;
   case ClipHitRegion::None:
-    viewport()->setCursor(Qt::ArrowCursor);
     break;
   }
+  return TimelineCursorKind::Arrow;
+}
+
+void TimelineWidget::updateHoverCursor(const QPoint& position, Qt::KeyboardModifiers modifiers) {
+  if (transition_gesture_.pointerDown && transition_gesture_.index >= 0) {
+    viewport()->setCursor(timelineCursor(TimelineCursorKind::Trim));
+    return;
+  }
+  viewport()->setCursor(timelineCursor(hoverCursorKind(position, modifiers)));
 }
 
 void TimelineWidget::autoScrollForDrag(const QPoint& position) {
@@ -2241,6 +2733,125 @@ void TimelineWidget::movePlayheadFromPointer(int viewportX, bool emitRequest) {
   if (emitRequest) {
     emit seekRequested(position);
   }
+}
+
+QRect TimelineWidget::envelopeBand(const QRect& clipRect) const {
+  return QRect{clipRect.left() + 6, clipRect.top() + 16, std::max(0, clipRect.width() - 12),
+               std::max(0, clipRect.height() - 22)};
+}
+
+double TimelineWidget::envelopeExtraAt(const TimelineClipView& clip, qint64 localTime) const {
+  const auto& keys = clip.envelopeKeyframes;
+  if (keys.isEmpty()) {
+    return clip.envelopeEffectBase;
+  }
+  if (localTime < keys.front().time) {
+    return clip.envelopeEffectBase;
+  }
+  if (localTime >= keys.back().time) {
+    return keys.back().value;
+  }
+  for (int index = 1; index < keys.size(); ++index) {
+    if (localTime < keys.at(index).time) {
+      const auto& left = keys.at(index - 1);
+      const auto& right = keys.at(index);
+      if (left.interpolation == KeyframeInterpolationView::Hold || right.time == left.time) {
+        return left.value;
+      }
+      const double progress = static_cast<double>(localTime - left.time) /
+                              static_cast<double>(right.time - left.time);
+      if (left.interpolation == KeyframeInterpolationView::Bezier) {
+        const auto cubic = [](double p0, double p1, double p2, double p3, double t) {
+          const double one = 1.0 - t;
+          return (one * one * one * p0) + (3.0 * one * one * t * p1) + (3.0 * one * t * t * p2) +
+                 (t * t * t * p3);
+        };
+        double low = 0.0;
+        double high = 1.0;
+        for (int iteration = 0; iteration < 24; ++iteration) {
+          const double middle = (low + high) * 0.5;
+          if (cubic(0.0, left.outgoingControl.x(), 1.0 + right.incomingControl.x(), 1.0, middle) <
+              progress) {
+            low = middle;
+          } else {
+            high = middle;
+          }
+        }
+        const double parameter = (low + high) * 0.5;
+        const double adjusted = std::clamp(
+            cubic(0.0, left.outgoingControl.y(), 1.0 + right.incomingControl.y(), 1.0, parameter),
+            0.0, 1.0);
+        return left.value + (right.value - left.value) * adjusted;
+      }
+      return left.value + (right.value - left.value) * progress;
+    }
+  }
+  return keys.back().value;
+}
+
+double TimelineWidget::displayedEnvelopeValue(const TimelineClipView& clip,
+                                              qint64 localTime) const {
+  if (clip.envelopeKind == TimelineClipView::EnvelopeKind::Opacity) {
+    return std::clamp(clip.envelopeStatic * envelopeExtraAt(clip, localTime), 0.0, 1.0);
+  }
+  return clip.envelopeStatic + envelopeExtraAt(clip, localTime);
+}
+
+int TimelineWidget::envelopeYForValue(const QRect& band, const TimelineClipView& clip,
+                                      double value) const {
+  if (!band.isValid() || band.height() <= 1) {
+    return band.center().y();
+  }
+  double t = 0.0;
+  if (clip.envelopeKind == TimelineClipView::EnvelopeKind::Opacity) {
+    t = 1.0 - std::clamp(value, 0.0, 1.0);
+  } else {
+    const double clamped = std::clamp(value, kVolumeDbMin, kVolumeDbMax);
+    t = (kVolumeDbMax - clamped) / (kVolumeDbMax - kVolumeDbMin);
+  }
+  return band.top() + static_cast<int>(std::lround(t * static_cast<double>(band.height() - 1)));
+}
+
+double TimelineWidget::envelopeValueForY(const QRect& band, const TimelineClipView& clip,
+                                         int viewportY) const {
+  if (!band.isValid() || band.height() <= 1) {
+    return clip.envelopeKind == TimelineClipView::EnvelopeKind::Opacity ? clip.envelopeStatic : 0.0;
+  }
+  const double t = std::clamp(static_cast<double>(viewportY - band.top()) /
+                                  static_cast<double>(band.height() - 1),
+                              0.0, 1.0);
+  if (clip.envelopeKind == TimelineClipView::EnvelopeKind::Opacity) {
+    return 1.0 - t;
+  }
+  return kVolumeDbMax - t * (kVolumeDbMax - kVolumeDbMin);
+}
+
+int TimelineWidget::envelopeKeyframeAt(int clipIndex, const QPoint& position) const {
+  if (clipIndex < 0 || clipIndex >= clips_.size()) {
+    return -1;
+  }
+  const auto& clip = clips_.at(clipIndex);
+  if (clip.envelopeKind == TimelineClipView::EnvelopeKind::None ||
+      clip.envelopeKeyframes.isEmpty()) {
+    return -1;
+  }
+  const QRect band = envelopeBand(clipRect(clip));
+  if (!band.isValid()) {
+    return -1;
+  }
+  int best = -1;
+  int bestDistance = kEnvelopeKeyHit + 1;
+  for (int index = 0; index < clip.envelopeKeyframes.size(); ++index) {
+    const auto& key = clip.envelopeKeyframes.at(index);
+    const int x = xForTime(clip.start + key.time);
+    const int y = envelopeYForValue(band, clip, displayedEnvelopeValue(clip, key.time));
+    const int distance = std::abs(position.x() - x) + std::abs(position.y() - y);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = index;
+    }
+  }
+  return best;
 }
 
 } // namespace video_editor::desktop_ui

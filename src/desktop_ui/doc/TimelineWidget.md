@@ -38,9 +38,9 @@ testing operate only on the visible viewport.
 
 | Enum | Values | Description |
 | --- | --- | --- |
-| `ClipHitRegion` | `None`, `Body`, `TrimIn`, `TrimOut` | Pointer location relative to a clip and its edge handles. |
+| `ClipHitRegion` | `None`, `Body`, `TrimIn`, `TrimOut`, `Envelope`, `EnvelopeKeyframe` | Pointer location relative to a clip, its edge handles, or its volume/opacity rubber-band. |
 | `EditMode` | `Move`, `TrimIn`, `TrimOut`, `Roll`, `Slip`, `Slide` | Geometry intent emitted for a completed gesture. |
-| `ToolMode` | `Select`, `RippleTrim`, `OverwriteTrim`, `Roll`, `Slip`, `Slide` | Persistent active timeline tool. Ripple/overwrite/roll require an edge; slip/slide use a body. |
+| `ToolMode` | `Select`, `RippleTrim`, `OverwriteTrim`, `Roll`, `Slip`, `Slide`, `TrackSelectForward`, `Razor`, `Hand`, `Zoom`, `Pen` | Persistent active timeline tool. Ripple/overwrite/roll require an edge; slip/slide use a body; razor splits on click; pen edits volume and opacity envelopes; hand pans; zoom click/drags around the pointer. The viewport cursor is a drawn professional cursor for the tool and hit region. |
 | `EditIntent` | `Normal`, `Ripple`, `Overwrite` | Overlap/trim policy requested from the controller. |
 
 ## Public methods
@@ -112,7 +112,17 @@ Sets the display/nudge frame-rate metadata with nonzero components.
 
 ### `void setToolMode(ToolMode mode)`
 
-Cancels an active clip gesture, changes the tool, and refreshes cursor/accessible description.
+Cancels an active clip or pan gesture, changes the tool, emits `toolModeChanged`, and refreshes the
+professional viewport cursor.
+
+### `void setTrackHeight(int pixels)`
+
+Sets the uniform clip-track row height used for envelope editing. Values are clamped to 36–160 px.
+
+### `TimelineCursorKind hoverCursorKind(const QPoint& viewportPosition, Qt::KeyboardModifiers modifiers = Qt::NoModifier) const`
+
+Returns the cursor that `updateHoverCursor` applies: razor/hand/zoom follow the tool even on empty
+canvas; trim tools use dual-arrow variants on edges; select uses a move hand on clip bodies.
 
 ### `void nudgeActiveClipByFrames(int frameCount, EditIntent intent = EditIntent::Normal)`
 
@@ -162,6 +172,22 @@ Requests restoration of authoritative geometry after Escape/cancellation without
 ### `void frameNudgeRequested(const QStringList& clipIds, int frameCount, EditIntent intent)`
 
 Requests exact frame-rate movement for the current selection.
+
+### `void clipAudioGainEdited(const QString& clipId, double gainDb)` / `void clipOpacityEdited(const QString& clipId, double opacity)`
+
+Commit a rubber-band drag that changes clip gain or transform opacity without keyframes.
+
+### `void clipVolumeKeyframeUpserted(const QString& clipId, const QString& keyframeId, qint64 localTime, double gainDb)` / `void clipVolumeKeyframeRemoved(const QString& clipId, const QString& keyframeId)`
+
+Pen/Ctrl envelope edits on audio clips. An empty keyframe ID creates `audio.volume` as needed.
+
+### `void clipOpacityKeyframeUpserted(const QString& clipId, const QString& keyframeId, qint64 localTime, double opacity)` / `void clipOpacityKeyframeRemoved(const QString& clipId, const QString& keyframeId)`
+
+Pen/Ctrl envelope edits on video clips. An empty keyframe ID creates `video.opacity` as needed.
+
+### `void clipFreezeFrameRequested(const QString& clipId, qint64 uiTime)`
+
+Requests a hold of the source frame at `uiTime` for the rest of the clip.
 
 ### `void markerSelectionChanged(const QString& markerId)`
 
@@ -214,7 +240,8 @@ Requests removal only after an explicit context-menu choice; opening the menu it
 ## Protected event handlers
 
 `paintEvent` draws only visible tracks/clips plus ruler, markers, gaps, guides, previews, headers,
-and focus. `resizeEvent` updates scroll ranges. `wheelEvent` supports zoom and horizontal scroll.
+envelopes, and focus. `resizeEvent` updates scroll ranges. `wheelEvent` supports zoom, horizontal
+scroll, and track-height changes when the pointer is over a track header.
 Mouse press/move/release implement selection and cancelable gestures; double-click adds markers;
 `contextMenuEvent` exposes non-destructive menus; `keyPressEvent` supports Escape, playhead movement,
 frame nudging, markers, gaps, track creation and reordering, and track lock/visibility/target toggles.

@@ -309,6 +309,13 @@ std::optional<std::string> validateEffect(const Effect& effect,
         range = std::pair{0.0, 8.0};
       } else if (parameter.id == "temperature" || parameter.id == "tint") {
         range = std::pair{-1.0, 1.0};
+      } else if (parameter.id == "lift_r" || parameter.id == "lift_g" || parameter.id == "lift_b") {
+        range = std::pair{-1.0, 1.0};
+      } else if (parameter.id == "gamma_r" || parameter.id == "gamma_g" ||
+                 parameter.id == "gamma_b") {
+        range = std::pair{0.1, 4.0};
+      } else if (parameter.id == "gain_r" || parameter.id == "gain_g" || parameter.id == "gain_b") {
+        range = std::pair{0.0, 4.0};
       }
     } else if (effect.type == "video.crop") {
       range = std::pair{0.0, 1.0};
@@ -339,6 +346,10 @@ std::optional<std::string> validateEffect(const Effect& effect,
         range = std::pair{-96.0, 0.0};
     } else if (effect.type == "audio.limiter" && parameter.id == "ceiling_db") {
       range = std::pair{-24.0, 0.0};
+    } else if (effect.type == "audio.volume" && parameter.id == "gain_db") {
+      range = std::pair{-96.0, 24.0};
+    } else if (effect.type == "video.opacity" && parameter.id == "opacity") {
+      range = std::pair{0.0, 1.0};
     }
     if (range) {
       if (const auto issue = validate_number(range->first, range->second)) {
@@ -388,6 +399,48 @@ std::optional<EffectValue> evaluateEffectParameter(const EffectParameter& parame
           ? bezierProgress(left.outgoing_control, right.incoming_control, progress)
           : progress;
   return interpolate(left.value, right.value, adjusted);
+}
+
+double additionalVolumeGainDb(const Clip& clip, const Time clip_local_time) {
+  double extra = 0.0;
+  for (const auto& effect : clip.effects) {
+    if (!effect.enabled || effect.type != "audio.volume") {
+      continue;
+    }
+    const auto found = effect.parameters.find("gain_db");
+    if (found == effect.parameters.end()) {
+      continue;
+    }
+    const auto evaluated = evaluateEffectParameter(found->second, clip_local_time);
+    if (!evaluated.has_value()) {
+      continue;
+    }
+    if (const auto* value = std::get_if<double>(&*evaluated)) {
+      extra += *value;
+    }
+  }
+  return extra;
+}
+
+double additionalClipOpacity(const Clip& clip, const Time clip_local_time) {
+  double multiplier = 1.0;
+  for (const auto& effect : clip.effects) {
+    if (!effect.enabled || effect.type != "video.opacity") {
+      continue;
+    }
+    const auto found = effect.parameters.find("opacity");
+    if (found == effect.parameters.end()) {
+      continue;
+    }
+    const auto evaluated = evaluateEffectParameter(found->second, clip_local_time);
+    if (!evaluated.has_value()) {
+      continue;
+    }
+    if (const auto* value = std::get_if<double>(&*evaluated)) {
+      multiplier *= std::clamp(*value, 0.0, 1.0);
+    }
+  }
+  return multiplier;
 }
 
 } // namespace video_editor::edit

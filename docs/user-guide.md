@@ -130,15 +130,27 @@ playhead, marker boundaries, other clip edges, and the sequence frame grid with 
 priority. Moving clips and markers are excluded from their own candidates. Hold **Shift** during a
 drag to disable snapping.
 
-Choose a timeline tool from the toolbar/menu or its shortcut:
+Choose a timeline tool from the toolbar/menu or its shortcut. The pointer changes to match the
+active tool, including razor, pen, hand, zoom, ripple/overwrite trim, roll, slip, and slide.
 
-- **V — Select:** move clip bodies; drag an edge for a normal trim.
+- **V — Select:** move clip bodies; drag an edge for a normal trim. The pointer becomes a move
+  hand on a clip body and a dual-arrow trim cursor on edges. Drag the volume line on an audio clip
+  or the opacity line on a video clip to change the clip level. **Ctrl+click** the volume line to
+  add a keyframe.
+- **C — Razor:** click a clip to split at the pointer. **Shift+click** adds an edit on every
+  unlocked clip covering that time.
+- **P — Pen:** edit rubber-band envelopes. Click to add a volume or opacity keyframe, drag to
+  move it, and **Alt-click** a key to remove it. On video clips the same tool edits opacity.
+- **H — Hand:** drag to pan the timeline. Middle-mouse pans in any tool.
+- **Z — Zoom:** click to zoom in at the pointer, **Alt-click** to zoom out, or drag a range to
+  frame it. **Ctrl+wheel** also zooms around the pointer.
 - **R — Ripple Trim:** drag an edge and shift following material by the exact duration change.
 - **W — Overwrite Trim:** drag an edge without moving later positions; covered material is removed
   or edge-trimmed.
 - **N — Roll:** drag the shared edge between adjacent clips while preserving the outer span.
 - **Y — Slip:** drag a clip body to change its source window without changing timeline position.
 - **U — Slide:** drag a middle clip body and trim its immediate neighbors.
+- **A — Track Select Forward:** click a clip to select it and every later clip on the track.
 
 Control requests ripple intent and Alt requests overwrite intent for compatible Select-tool
 gestures. Invalid destinations, overlaps, missing source handles, non-adjacent precision edits, and
@@ -152,12 +164,14 @@ Other editing operations:
 - **Split Clip** splits every selected clip at the playhead and automatically includes linked A/V;
   all right-half IDs are explicit and the complete operation is atomic. Each half is renamed with
   whole-second timeline ranges, for example `clip1[0:130]` and `clip1[130:600]`.
-- **Delete** removes the selected clips and their linked A/V while leaving gaps. The Inspector also
-  exposes a **Delete clip** button when a clip is selected.
-- **Ripple Delete** removes them and closes each affected track independently.
+- **Delete** / **Lift** (`;`) removes the selected clips and their linked A/V while leaving gaps.
+  The Inspector also exposes a **Delete clip** button when a clip is selected.
+- **Ripple Delete** / **Extract** (`'`) removes them and closes each affected track independently.
 - Undo and redo treat a multi-selection or linked operation as one step.
 - **Alt+Left/Right** nudges the selection by one exact sequence frame; add **Shift** for ten frames
   and **Ctrl** for ripple intent. Relative offsets inside a multi-selection are preserved.
+- **Freeze Frame** (`Ctrl+Shift+H`) splits at the playhead if needed and holds that source frame
+  for the rest of the clip. Right-click a video clip for the same command at the pointer.
 
 ### Tracks, markers, and gaps
 
@@ -189,6 +203,10 @@ vertically; the renderer uses the magnitude for sizing.
 
 Selecting an audio clip reveals Gain (-96 to +24 dB), Pan, Fade In, and Fade Out. Those edits are
 validated, undoable, persistent, and used by realtime forward playback and reference export.
+Audio clips also show a volume rubber-band; dragging the line changes clip gain, and the Pen tool
+authors `audio.volume` keyframes that the renderer adds to clip gain. Video clips show an opacity
+rubber-band; dragging the line changes `transform.opacity`, and the Pen tool authors `video.opacity`
+keyframes that the renderer multiplies with clip opacity.
 
 Use **Add title** to create a title at the playhead. A selected title exposes text, font family,
 size, horizontal alignment, bold, and italic controls. `sans-serif`, empty, `Noto Sans`, and
@@ -202,9 +220,9 @@ that frame unsupported.
 
 Adjacent Inspector changes to the same property and clip use one coalescing key so continuous
 spin-box adjustment collapses in undo history. The Effects panel adds supported color, curves, LUT,
-crop, and blur nodes. Expand **Effects & animation** to edit typed values, add/remove a keyframe at
+crop, blur, volume, and opacity nodes. Expand **Effects & animation** to edit typed values, add/remove a keyframe at
 the playhead, select a keyframe, enter exact clip-local time/value, choose Hold/Linear/Bezier,
-delete it, or edit its curve. Color Adjustments includes a **Pick white balance** eyedropper that
+delete it, or edit its curve. Color Adjustments includes Lift/Gamma/Gain wheels plus a **Pick white balance** eyedropper that
 samples linear preview pixels and writes temperature/tint. LUT effects store a filesystem `.cube`
 path (not LUT bytes in the project) and expose a **Browse LUT…** control. Curves use
 `x,y;x,y` strings in `[0,1]` per channel (default identity `0,0;1,1`). A curve drag commits once
@@ -368,7 +386,7 @@ software fallback.
 
 ## Keyboard shortcuts
 
-Qt maps standard shortcuts to the platform convention; the table uses the Windows/Linux spelling.
+Qt maps standard shortcuts to the platform convention; the table uses Linux spelling.
 
 | Action | Shortcut |
 | --- | --- |
@@ -377,7 +395,10 @@ Qt maps standard shortcuts to the platform convention; the table uses the Window
 | Export video | `Ctrl+E` |
 | Undo / Redo | `Ctrl+Z` / platform redo shortcut |
 | Split selected clip | `Ctrl+B` |
-| Delete / Ripple delete | `Delete` / `Shift+Delete` |
+| Delete / Lift | `Delete` / `;` |
+| Ripple delete / Extract | `Shift+Delete` / `'` |
+| Select / Razor / Pen / Hand / Zoom | `V` / `C` / `P` / `H` / `Z` |
+| Ripple / overwrite / roll / slip / slide | `R` / `W` / `N` / `Y` / `U` |
 | Reverse / Stop / Forward | `J` / `K` / `L` |
 | Play or pause | `Space` |
 | Previous / next frame | `,` / `.` (program; `,` overwrites when source has focus) |
@@ -388,12 +409,14 @@ Qt maps standard shortcuts to the platform convention; the table uses the Window
 | Sequence start / end | `Home` / `End` |
 | Nudge active clip | `Alt+Left` / `Alt+Right` |
 | Nudge active clip ten frames | `Alt+Shift+Left` / `Alt+Shift+Right` |
-| Timeline zoom in / out / fit | standard zoom shortcuts / `Shift+Z` |
+| Timeline zoom in / out / fit | `Ctrl++` / `Ctrl+-` / `Shift+Z`; zoom tool `Z`; `Ctrl+wheel` around pointer |
+| Track height | mouse wheel over a track header |
 | Source monitor | `Shift+2` |
 | Precision trim panel | `T` |
 | Import / Edit / Audio & Captions / Deliver | `Ctrl+1` / `Ctrl+2` / `Ctrl+3` / `Ctrl+4` |
 | Open recent project | **File > Open Recent** |
 | Go to timecode | `Ctrl+G` |
+| Freeze frame | `Ctrl+Shift+H` |
 | Grab program frame | `Ctrl+Shift+E` |
 | Toggle snap | `S` |
 | Toggle follow playhead | `Ctrl+Shift+F` |

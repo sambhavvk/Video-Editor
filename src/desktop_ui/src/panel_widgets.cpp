@@ -9,19 +9,25 @@
 #include "video_editor/media_codec/encoder_capabilities.h"
 
 #include <QCheckBox>
+#include <QColor>
 #include <QColorDialog>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QGroupBox>
+#include <QHBoxLayout>
 #include <QHash>
 #include <QHeaderView>
 #include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
+#include <QLinearGradient>
 #include <QListWidget>
 #include <QMenu>
 #include <QMouseEvent>
+#include <QPainter>
+#include <QPaintEvent>
+#include <QPen>
 #include <QPixmap>
 #include <QPlainTextEdit>
 #include <QProgressBar>
@@ -669,6 +675,205 @@ void MarkerListWidget::setMarkers(const QVector<TimelineMarkerView>& markers) {
   }
 }
 
+ColorWheelWidget::ColorWheelWidget(const Role role, QWidget* parent)
+    : QWidget(parent), role_(role) {
+  setObjectName(role == Role::Lift ? QStringLiteral("colorWheelLift")
+                : role == Role::Gamma ? QStringLiteral("colorWheelGamma")
+                                      : QStringLiteral("colorWheelGain"));
+  const QString name = role == Role::Lift ? tr("Lift")
+                       : role == Role::Gamma ? tr("Gamma")
+                                             : tr("Gain");
+  setAccessibleName(name);
+  setToolTip(name);
+  setMinimumSize(96, 112);
+  setFocusPolicy(Qt::StrongFocus);
+  if (role != Role::Lift) {
+    red_ = green_ = blue_ = 1.0;
+  }
+}
+
+QSize ColorWheelWidget::sizeHint() const {
+  return {108, 124};
+}
+
+QRect ColorWheelWidget::discRect() const {
+  const int side = std::min(width() - 22, height() - 28);
+  return QRect((width() - 18 - side) / 2, 4, side, side);
+}
+
+QRect ColorWheelWidget::masterRect() const {
+  const QRect disc = discRect();
+  return QRect(disc.right() + 6, disc.top(), 10, disc.height());
+}
+
+double ColorWheelWidget::masterValue() const {
+  return (red_ + green_ + blue_) / 3.0;
+}
+
+void ColorWheelWidget::setMasterValue(const double master) {
+  const double current = masterValue();
+  const double delta = master - current;
+  if (role_ == Role::Lift) {
+    red_ = std::clamp(red_ + delta, -1.0, 1.0);
+    green_ = std::clamp(green_ + delta, -1.0, 1.0);
+    blue_ = std::clamp(blue_ + delta, -1.0, 1.0);
+    return;
+  }
+  const double scale = current <= 1.0e-6 ? 1.0 : master / current;
+  red_ = std::clamp(red_ * scale, 0.1, 4.0);
+  green_ = std::clamp(green_ * scale, 0.1, 4.0);
+  blue_ = std::clamp(blue_ * scale, 0.1, 4.0);
+}
+
+void ColorWheelWidget::setRgb(const double red, const double green, const double blue) {
+  if (role_ == Role::Lift) {
+    red_ = std::clamp(red, -1.0, 1.0);
+    green_ = std::clamp(green, -1.0, 1.0);
+    blue_ = std::clamp(blue, -1.0, 1.0);
+  } else {
+    red_ = std::clamp(red, 0.1, 4.0);
+    green_ = std::clamp(green, 0.1, 4.0);
+    blue_ = std::clamp(blue, 0.1, 4.0);
+  }
+  update();
+}
+
+void ColorWheelWidget::publish() {
+  emit rgbChanged(red_, green_, blue_);
+}
+
+void ColorWheelWidget::applyWheelPosition(const QPoint& position) {
+  const QRect disc = discRect();
+  const QPointF center = disc.center();
+  const double radius = disc.width() / 2.0;
+  const QPointF delta = QPointF(position) - center;
+  const double distance = std::hypot(delta.x(), delta.y());
+  const double sat = std::clamp(distance / std::max(1.0, radius), 0.0, 1.0);
+  double hue = std::atan2(-delta.y(), delta.x()) / (2.0 * 3.14159265358979323846);
+  if (hue < 0.0) {
+    hue += 1.0;
+  }
+  QColor chroma;
+  chroma.setHsvF(hue, sat, 1.0);
+  const double master = masterValue();
+  if (role_ == Role::Lift) {
+    red_ = std::clamp(master + (chroma.redF() - 0.5) * sat, -1.0, 1.0);
+    green_ = std::clamp(master + (chroma.greenF() - 0.5) * sat, -1.0, 1.0);
+    blue_ = std::clamp(master + (chroma.blueF() - 0.5) * sat, -1.0, 1.0);
+  } else {
+    red_ = std::clamp(master + (chroma.redF() - 0.5) * sat * 1.5, 0.1, 4.0);
+    green_ = std::clamp(master + (chroma.greenF() - 0.5) * sat * 1.5, 0.1, 4.0);
+    blue_ = std::clamp(master + (chroma.blueF() - 0.5) * sat * 1.5, 0.1, 4.0);
+  }
+  update();
+  publish();
+}
+
+void ColorWheelWidget::paintEvent(QPaintEvent*) {
+  QPainter painter(this);
+  painter.setRenderHint(QPainter::Antialiasing, true);
+  const QRect disc = discRect();
+  const QPointF center = disc.center();
+  const double radius = disc.width() / 2.0;
+  for (int y = disc.top(); y <= disc.bottom(); ++y) {
+    for (int x = disc.left(); x <= disc.right(); ++x) {
+      const double dx = static_cast<double>(x) - center.x();
+      const double dy = static_cast<double>(y) - center.y();
+      const double distance = std::hypot(dx, dy);
+      if (distance > radius) {
+        continue;
+      }
+      double hue = std::atan2(-dy, dx) / (2.0 * 3.14159265358979323846);
+      if (hue < 0.0) {
+        hue += 1.0;
+      }
+      const double sat = distance / std::max(1.0, radius);
+      QColor color;
+      color.setHsvF(hue, sat, 0.92);
+      painter.setPen(color);
+      painter.drawPoint(x, y);
+    }
+  }
+  painter.setPen(QPen(QColor{220, 224, 232}, 1));
+  painter.setBrush(Qt::NoBrush);
+  painter.drawEllipse(disc);
+  const QRect master = masterRect();
+  QLinearGradient gradient(master.topLeft(), master.bottomLeft());
+  gradient.setColorAt(0.0, QColor{236, 240, 247});
+  gradient.setColorAt(1.0, QColor{20, 22, 26});
+  painter.fillRect(master, gradient);
+  painter.setPen(QColor{90, 96, 108});
+  painter.drawRect(master);
+  double t = 0.5;
+  if (role_ == Role::Lift) {
+    t = 1.0 - ((masterValue() + 1.0) / 2.0);
+  } else {
+    t = 1.0 - std::clamp((masterValue() - 0.1) / 3.9, 0.0, 1.0);
+  }
+  const int handleY = master.top() + static_cast<int>(std::lround(t * (master.height() - 1)));
+  painter.fillRect(QRect(master.left() - 2, handleY - 2, master.width() + 4, 4),
+                   QColor{236, 240, 247});
+  painter.setPen(QColor{180, 186, 196});
+  painter.drawText(rect().adjusted(0, disc.bottom() + 2, 0, 0), Qt::AlignHCenter | Qt::AlignTop,
+                   accessibleName());
+}
+
+void ColorWheelWidget::mousePressEvent(QMouseEvent* event) {
+  if (event->button() != Qt::LeftButton) {
+    return;
+  }
+  if (masterRect().contains(event->pos())) {
+    dragging_master_ = true;
+    double t = std::clamp(static_cast<double>(event->pos().y() - masterRect().top()) /
+                              static_cast<double>(std::max(1, masterRect().height() - 1)),
+                          0.0, 1.0);
+    if (role_ == Role::Lift) {
+      setMasterValue((1.0 - t) * 2.0 - 1.0);
+    } else {
+      setMasterValue(0.1 + (1.0 - t) * 3.9);
+    }
+    update();
+    publish();
+    event->accept();
+    return;
+  }
+  if (discRect().contains(event->pos())) {
+    dragging_disc_ = true;
+    applyWheelPosition(event->pos());
+    event->accept();
+  }
+}
+
+void ColorWheelWidget::mouseMoveEvent(QMouseEvent* event) {
+  if (dragging_master_) {
+    double t = std::clamp(static_cast<double>(event->pos().y() - masterRect().top()) /
+                              static_cast<double>(std::max(1, masterRect().height() - 1)),
+                          0.0, 1.0);
+    if (role_ == Role::Lift) {
+      setMasterValue((1.0 - t) * 2.0 - 1.0);
+    } else {
+      setMasterValue(0.1 + (1.0 - t) * 3.9);
+    }
+    update();
+    publish();
+    event->accept();
+    return;
+  }
+  if (dragging_disc_) {
+    applyWheelPosition(event->pos());
+    event->accept();
+  }
+}
+
+void ColorWheelWidget::mouseReleaseEvent(QMouseEvent* event) {
+  if (event->button() != Qt::LeftButton) {
+    return;
+  }
+  dragging_disc_ = false;
+  dragging_master_ = false;
+  event->accept();
+}
+
 InspectorWidget::InspectorWidget(QWidget* parent) : QWidget(parent) {
   setObjectName(QStringLiteral("inspectorPanel"));
   setAccessibleName(tr("Inspector"));
@@ -944,6 +1149,26 @@ InspectorWidget::InspectorWidget(QWidget* parent) : QWidget(parent) {
   effectsLayout->addWidget(pick_white_balance_);
   connect(pick_white_balance_, &QPushButton::clicked, this,
           &InspectorWidget::pickWhiteBalanceRequested);
+  color_wheels_ = new QWidget(effects);
+  color_wheels_->setObjectName(QStringLiteral("colorWheels"));
+  color_wheels_->setAccessibleName(tr("Color wheels"));
+  auto* wheelsLayout = new QHBoxLayout(color_wheels_);
+  wheelsLayout->setContentsMargins(0, 4, 0, 4);
+  wheelsLayout->setSpacing(8);
+  lift_wheel_ = new ColorWheelWidget(ColorWheelWidget::Role::Lift, color_wheels_);
+  gamma_wheel_ = new ColorWheelWidget(ColorWheelWidget::Role::Gamma, color_wheels_);
+  gain_wheel_ = new ColorWheelWidget(ColorWheelWidget::Role::Gain, color_wheels_);
+  wheelsLayout->addWidget(lift_wheel_);
+  wheelsLayout->addWidget(gamma_wheel_);
+  wheelsLayout->addWidget(gain_wheel_);
+  color_wheels_->hide();
+  effectsLayout->addWidget(color_wheels_);
+  connect(lift_wheel_, &ColorWheelWidget::rgbChanged, this,
+          [this] { publishColorWheel(lift_wheel_); });
+  connect(gamma_wheel_, &ColorWheelWidget::rgbChanged, this,
+          [this] { publishColorWheel(gamma_wheel_); });
+  connect(gain_wheel_, &ColorWheelWidget::rgbChanged, this,
+          [this] { publishColorWheel(gain_wheel_); });
   auto* effectsBody = new QWidget(effects);
   effectsBody->setObjectName(QStringLiteral("effectParameterEditor"));
   effect_parameter_editor_ = effectsBody;
@@ -1219,6 +1444,72 @@ void InspectorWidget::setEffectParameters(const QVector<EffectParameterView>& pa
         });
     pick_white_balance_->setVisible(has_color_effect);
   }
+  syncColorWheels();
+}
+
+void InspectorWidget::syncColorWheels() {
+  if (color_wheels_ == nullptr || lift_wheel_ == nullptr || gamma_wheel_ == nullptr ||
+      gain_wheel_ == nullptr) {
+    return;
+  }
+  const bool has_color = std::any_of(
+      effect_parameters_.cbegin(), effect_parameters_.cend(), [](const EffectParameterView& view) {
+        return view.effectType == QStringLiteral("video.color");
+      });
+  color_wheels_->setVisible(has_color);
+  if (!has_color) {
+    return;
+  }
+  const auto valueOf = [this](const QString& id, double fallback) {
+    for (const auto& parameter : effect_parameters_) {
+      if (parameter.effectType == QStringLiteral("video.color") && parameter.parameterId == id) {
+        return parameter.value.toDouble();
+      }
+    }
+    return fallback;
+  };
+  const QSignalBlocker liftBlock(lift_wheel_);
+  const QSignalBlocker gammaBlock(gamma_wheel_);
+  const QSignalBlocker gainBlock(gain_wheel_);
+  lift_wheel_->setRgb(valueOf(QStringLiteral("lift_r"), 0.0), valueOf(QStringLiteral("lift_g"), 0.0),
+                      valueOf(QStringLiteral("lift_b"), 0.0));
+  gamma_wheel_->setRgb(valueOf(QStringLiteral("gamma_r"), 1.0),
+                       valueOf(QStringLiteral("gamma_g"), 1.0),
+                       valueOf(QStringLiteral("gamma_b"), 1.0));
+  gain_wheel_->setRgb(valueOf(QStringLiteral("gain_r"), 1.0), valueOf(QStringLiteral("gain_g"), 1.0),
+                      valueOf(QStringLiteral("gain_b"), 1.0));
+}
+
+void InspectorWidget::publishColorWheel(ColorWheelWidget* wheel) {
+  if (wheel == nullptr) {
+    return;
+  }
+  QString effectId;
+  for (const auto& parameter : effect_parameters_) {
+    if (parameter.effectType == QStringLiteral("video.color")) {
+      effectId = parameter.effectId;
+      break;
+    }
+  }
+  if (effectId.isEmpty()) {
+    return;
+  }
+  const auto emitChannel = [this, &effectId](const QString& id, double value) {
+    emit effectParameterEdited(effectId, id, value);
+  };
+  if (wheel->role() == ColorWheelWidget::Role::Lift) {
+    emitChannel(QStringLiteral("lift_r"), wheel->red());
+    emitChannel(QStringLiteral("lift_g"), wheel->green());
+    emitChannel(QStringLiteral("lift_b"), wheel->blue());
+  } else if (wheel->role() == ColorWheelWidget::Role::Gamma) {
+    emitChannel(QStringLiteral("gamma_r"), wheel->red());
+    emitChannel(QStringLiteral("gamma_g"), wheel->green());
+    emitChannel(QStringLiteral("gamma_b"), wheel->blue());
+  } else {
+    emitChannel(QStringLiteral("gain_r"), wheel->red());
+    emitChannel(QStringLiteral("gain_g"), wheel->green());
+    emitChannel(QStringLiteral("gain_b"), wheel->blue());
+  }
 }
 
 void InspectorWidget::rebuildEffectParameterFields() {
@@ -1427,10 +1718,12 @@ EffectsPanelWidget::EffectsPanelWidget(QWidget* parent) : QWidget(parent) {
       {QStringLiteral("transition.cross_dissolve"), tr("Cross Dissolve"), tr("Transitions"), true},
       {QStringLiteral("transition.dip_to_black"), tr("Dip to Black"), tr("Transitions"), true},
       {QStringLiteral("video.color"), tr("Color Adjustments"), tr("Video"), true},
+      {QStringLiteral("video.opacity"), tr("Opacity"), tr("Video"), true},
       {QStringLiteral("video.curves"), tr("Color Curves"), tr("Video"), true},
       {QStringLiteral("video.lut"), tr("LUT"), tr("Video"), true},
       {QStringLiteral("video.crop"), tr("Crop"), tr("Video"), true},
       {QStringLiteral("video.gaussian_blur"), tr("Gaussian Blur"), tr("Video"), true},
+      {QStringLiteral("audio.volume"), tr("Volume"), tr("Audio"), false},
       {QStringLiteral("audio.eq"), tr("Parametric EQ"), tr("Audio"), false},
       {QStringLiteral("audio.compressor"), tr("Compressor"), tr("Audio"), false},
       {QStringLiteral("audio.dialogue_denoise"), tr("Dialogue Noise Reduction"), tr("Audio"), false},
@@ -1919,6 +2212,7 @@ void AudioMixerWidget::buildStrips(const QVector<AudioTrackView>& tracks) {
     addEffect->setObjectName(QStringLiteral("trackEffectAdd.%1").arg(index));
     addEffect->setAccessibleName(tr("Add effect to %1").arg(track.displayName));
     addEffect->addItem(tr("Add effect…"), QString{});
+    addEffect->addItem(tr("Volume"), QStringLiteral("audio.volume"));
     addEffect->addItem(tr("Parametric EQ"), QStringLiteral("audio.eq"));
     addEffect->addItem(tr("Compressor"), QStringLiteral("audio.compressor"));
     addEffect->addItem(tr("Dialogue noise reduction"), QStringLiteral("audio.dialogue_denoise"));

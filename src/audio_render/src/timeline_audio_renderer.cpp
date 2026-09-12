@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "video_editor/audio_render/timeline_audio_renderer.h"
 #include "video_editor/audio_render/track_dsp_chain.h"
+#include "video_editor/edit_model/effect_evaluator.h"
 #include "video_editor/edit_model/model.h"
 #include "video_editor/media_codec/format_open.h"
 
@@ -159,6 +160,38 @@ extern "C" int interrupt_requested(void* opaque) noexcept {
     factor = std::min(factor, std::clamp(time_ratio(remaining, clip.fade_out), 0.0, 1.0));
   }
   return static_cast<float>(factor);
+}
+
+[[nodiscard]] bool has_stateful_audio_dsp(const edit::Clip& clip) noexcept {
+  for (const edit::Effect& effect : clip.effects) {
+    if (!effect.enabled) {
+      continue;
+    }
+    if (effect.type == "audio.eq" || effect.type == "audio.compressor" ||
+        effect.type == "audio.dialogue_denoise" || effect.type == "audio.limiter") {
+      return true;
+    }
+  }
+  return false;
+}
+
+[[nodiscard]] bool has_animated_volume(const edit::Clip& clip) noexcept {
+  for (const edit::Effect& effect : clip.effects) {
+    if (!effect.enabled || effect.type != "audio.volume") {
+      continue;
+    }
+    const auto found = effect.parameters.find("gain_db");
+    if (found != effect.parameters.end() && !found->second.keyframes.empty()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+[[nodiscard]] float volume_linear_gain(const edit::Clip& clip, const edit::Time timeline_time) {
+  const edit::Time local = timeline_time - clip.timeline_range.start;
+  const double db = clip.audio_gain_db + edit::additionalVolumeGainDb(clip, local);
+  return static_cast<float>(std::pow(10.0, db / 20.0));
 }
 
 [[nodiscard]] std::pair<std::size_t, std::size_t>
@@ -667,7 +700,9 @@ AudioRenderResult TimelineAudioRenderer::Impl::mix_sequence_audio(
         return Result::failure(std::move(issue));
       }
 
-      const float clip_gain = static_cast<float>(std::pow(10.0, clip.audio_gain_db / 20.0));
+      const bool animated_volume = has_animated_volume(clip);
+      const float static_clip_gain =
+          animated_volume ? 1.0F : volume_linear_gain(clip, clip.timeline_range.start);
       const float pan = static_cast<float>(std::clamp(clip.audio_pan, -1.0, 1.0));
       const float pan_angle = (pan + 1.0F) * (std::numbers::pi_v<float> / 4.0F);
       const float left_pan = std::cos(pan_angle);
@@ -676,7 +711,7 @@ AudioRenderResult TimelineAudioRenderer::Impl::mix_sequence_audio(
       const float track_pan = static_cast<float>(std::clamp(track.audio_pan, -1.0, 1.0));
       const float track_left_pan = std::clamp(1.0F - track_pan, 0.0F, 1.0F);
       const float track_right_pan = std::clamp(1.0F + track_pan, 0.0F, 1.0F);
-      const bool has_clip_dsp = !clip.effects.empty();
+      const bool has_clip_dsp = has_stateful_audio_dsp(clip);
       std::optional<audio::AudioBlock> clip_output;
       if (has_clip_dsp) {
         clip_output.emplace(
@@ -698,8 +733,10 @@ AudioRenderResult TimelineAudioRenderer::Impl::mix_sequence_audio(
         }
         const std::int64_t absolute_sample =
             request.start_sample + static_cast<std::int64_t>(index);
-        const float envelope =
-            fade_gain(clip, edit::Time(absolute_sample, kTimelineAudioSampleRate));
+        const edit::Time sample_time(absolute_sample, kTimelineAudioSampleRate);
+        const float clip_gain =
+            animated_volume ? volume_linear_gain(clip, sample_time) : static_clip_gain;
+        const float envelope = fade_gain(clip, sample_time);
         const float left_sample = found->second.left * clip_gain * left_pan * envelope;
         const float right_sample = found->second.right * clip_gain * right_pan * envelope;
         if (has_clip_dsp) {
@@ -828,12 +865,14 @@ AudioRenderResult TimelineAudioRenderer::Impl::mix_sequence_audio(
         return nested;
       }
 
-      const float clip_gain = static_cast<float>(std::pow(10.0, clip.audio_gain_db / 20.0));
+      const bool animated_volume = has_animated_volume(clip);
+      const float static_clip_gain =
+          animated_volume ? 1.0F : volume_linear_gain(clip, clip.timeline_range.start);
       const float pan = static_cast<float>(std::clamp(clip.audio_pan, -1.0, 1.0));
       const float pan_angle = (pan + 1.0F) * (std::numbers::pi_v<float> / 4.0F);
       const float left_pan = std::cos(pan_angle);
       const float right_pan = std::sin(pan_angle);
-      const bool has_clip_dsp = !clip.effects.empty();
+      const bool has_clip_dsp = has_stateful_audio_dsp(clip);
       std::optional<audio::AudioBlock> clip_output;
       if (has_clip_dsp) {
         clip_output.emplace(
@@ -858,8 +897,10 @@ AudioRenderResult TimelineAudioRenderer::Impl::mix_sequence_audio(
         const std::size_t child_index = static_cast<std::size_t>(child_sample - child_start);
         const std::int64_t absolute_sample =
             request.start_sample + static_cast<std::int64_t>(index);
-        const float envelope =
-            fade_gain(clip, edit::Time(absolute_sample, kTimelineAudioSampleRate));
+        const edit::Time sample_time(absolute_sample, kTimelineAudioSampleRate);
+        const float clip_gain =
+            animated_volume ? volume_linear_gain(clip, sample_time) : static_clip_gain;
+        const float envelope = fade_gain(clip, sample_time);
         const float left_sample =
             left_child[child_index] * clip_gain * left_pan * envelope;
         const float right_sample =
