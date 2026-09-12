@@ -280,6 +280,10 @@ The program viewer requests frames asynchronously from the current immutable tim
 New seeks use a newer request epoch so stale decode work cannot replace the latest viewer image.
 The CPU path seeks from the preceding keyframe and decodes in presentation order.
 
+Choose **Full**, **Half**, or **Quarter** preview quality from the status bar. The program viewer
+title shows the active quality plus **proxy** and **reduced effects** when those preview shortcuts
+apply. Export always renders at full resolution from originals with expensive effects enabled.
+
 The render engine requests active video/title clips and composes supported crop, position, scale,
 anchor, rotation, opacity, the five premultiplied blend modes, supported clip color/crop/blur
 effects, and Cross Dissolve/Dip to Black transitions on a compatible D3D11 (Windows) or Vulkan

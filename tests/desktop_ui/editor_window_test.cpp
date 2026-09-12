@@ -34,6 +34,7 @@
 #include <QSignalSpy>
 #include <QSlider>
 #include <QSplitter>
+#include <QStatusBar>
 #include <QTableWidget>
 #include <QTemporaryDir>
 #include <QTest>
@@ -48,6 +49,7 @@ using video_editor::desktop_ui::EditorWindow;
 using video_editor::desktop_ui::TimelineClipView;
 using video_editor::desktop_ui::TimelineTrackView;
 using video_editor::desktop_ui::TimelineWidget;
+using video_editor::desktop_ui::PreviewQualityPreset;
 using video_editor::desktop_ui::TrackHeightPreset;
 using video_editor::desktop_ui::TrackKind;
 using video_editor::desktop_ui::TrackNavWidget;
@@ -101,6 +103,7 @@ private slots:
   void inspectorShowsLinkedAvSyncControls();
   void trackNavFiltersAndFocusesTracks();
   void trackNavAppliesHeightPresets();
+  void previewQualityComboEmitsPreset();
   void programViewerRestoresProgramFrameAfterTrimCompare();
   void timelineMarkerSnappingExcludesTheDraggedMarker();
   void timelineRefreshCancelsMarkerGesturesAndUsesAuthoritativeSelection();
@@ -2216,6 +2219,20 @@ void EditorWindowTest::trackNavAppliesHeightPresets() {
   QCOMPARE(timeline.trackHeight(), 96);
   timeline.applyTrackHeightPreset(TrackHeightPreset::Normal);
   QCOMPARE(timeline.trackHeight(), 58);
+}
+
+void EditorWindowTest::previewQualityComboEmitsPreset() {
+  EditorWindow window;
+  window.show();
+  QCoreApplication::processEvents();
+  auto* combo = window.findChild<QComboBox*>(QStringLiteral("previewQualityPreset"));
+  QVERIFY(combo != nullptr);
+  QCOMPARE(combo->accessibleName(), QStringLiteral("Preview quality"));
+  QSignalSpy preset(&window, &EditorWindow::previewQualityPresetRequested);
+  combo->setCurrentIndex(combo->findData(static_cast<int>(PreviewQualityPreset::Full)));
+  emit combo->activated(combo->currentIndex());
+  QCOMPARE(preset.count(), 1);
+  QCOMPARE(preset.takeFirst().at(0).value<PreviewQualityPreset>(), PreviewQualityPreset::Full);
 }
 
 void EditorWindowTest::inspectorShowsLinkedAvSyncControls() {

@@ -19,6 +19,7 @@
 #include <QActionGroup>
 #include <QApplication>
 #include <QCloseEvent>
+#include <QComboBox>
 #include <QDesktopServices>
 #include <QDialog>
 #include <QDockWidget>
@@ -449,6 +450,18 @@ void EditorWindow::setSequenceFormatStatus(const QString& text) {
   if (sequence_format_label_ != nullptr) {
     sequence_format_label_->setText(text);
   }
+}
+
+void EditorWindow::setPreviewQualityPreset(const PreviewQualityPreset preset) {
+  if (preview_quality_combo_ == nullptr) {
+    return;
+  }
+  const int index = preview_quality_combo_->findData(static_cast<int>(preset));
+  if (index < 0) {
+    return;
+  }
+  const QSignalBlocker blocker(preview_quality_combo_);
+  preview_quality_combo_->setCurrentIndex(index);
 }
 
 void EditorWindow::setJobActivitySummary(const QString& summary) {
@@ -1678,6 +1691,20 @@ void EditorWindow::createStatusBar() {
   format->setAccessibleName(tr("Sequence output format"));
   sequence_format_label_ = format;
   statusBar()->addPermanentWidget(format);
+  auto* preview_separator = new QLabel(QStringLiteral("  •  "), statusBar());
+  preview_separator->setProperty("muted", true);
+  statusBar()->addPermanentWidget(preview_separator);
+  auto* preview_quality = new QComboBox(statusBar());
+  preview_quality->setObjectName(QStringLiteral("previewQualityPreset"));
+  preview_quality->setAccessibleName(tr("Preview quality"));
+  preview_quality->setToolTip(tr("Program and source preview resolution. Export always uses full quality."));
+  preview_quality->addItem(tr("Full"), static_cast<int>(PreviewQualityPreset::Full));
+  preview_quality->addItem(tr("Half"), static_cast<int>(PreviewQualityPreset::Half));
+  preview_quality->addItem(tr("Quarter"), static_cast<int>(PreviewQualityPreset::Quarter));
+  preview_quality->setCurrentIndex(
+      preview_quality->findData(static_cast<int>(PreviewQualityPreset::Half)));
+  preview_quality_combo_ = preview_quality;
+  statusBar()->addPermanentWidget(preview_quality);
   auto* jobs_separator = new QLabel(QStringLiteral("  •  "), statusBar());
   jobs_separator->setProperty("muted", true);
   statusBar()->addPermanentWidget(jobs_separator);
@@ -1795,6 +1822,12 @@ void EditorWindow::connectControllerSurface() {
               timeline_->applyTrackHeightPreset(preset);
             }
           });
+  if (preview_quality_combo_ != nullptr) {
+    connect(preview_quality_combo_, &QComboBox::activated, this, [this](const int index) {
+      emit previewQualityPresetRequested(
+          static_cast<PreviewQualityPreset>(preview_quality_combo_->itemData(index).toInt()));
+    });
+  }
   connect(
       media_bin_, &MediaBinWidget::revealInFilesRequested, this, [this](const QString& mediaId) {
         if (media_bin_ != nullptr) {

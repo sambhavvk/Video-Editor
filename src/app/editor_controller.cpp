@@ -778,16 +778,56 @@ QString gpuBackendName(const render::GpuBackendKind backend) {
   }
 }
 
-QString gpuReadyTitle(const render::GpuCapabilities& capabilities) {
-  QString title = QObject::tr("Program · %1 GPU ready").arg(gpuBackendName(capabilities.backend));
-  title += capabilities.presentation ? QObject::tr(" · present") : QObject::tr(" · offscreen");
-  return title;
+QString gpuReadyBackendLabel(const render::GpuCapabilities& capabilities) {
+  QString label = QObject::tr("%1 GPU ready").arg(gpuBackendName(capabilities.backend));
+  label += capabilities.presentation ? QObject::tr(" · present") : QObject::tr(" · offscreen");
+  return label;
 }
 
-QString gpuActiveTitle(const render::GpuCapabilities& capabilities) {
-  QString title = QObject::tr("Program · %1 GPU").arg(gpuBackendName(capabilities.backend));
-  title += capabilities.presentation ? QObject::tr(" · present") : QObject::tr(" · offscreen");
-  return title;
+QString gpuActiveBackendLabel(const render::GpuCapabilities& capabilities) {
+  QString label = QObject::tr("%1 GPU").arg(gpuBackendName(capabilities.backend));
+  label += capabilities.presentation ? QObject::tr(" · present") : QObject::tr(" · offscreen");
+  return label;
+}
+
+desktop_ui::PreviewQualityPreset previewPresetFromScale(const render::PreviewScale scale) {
+  using desktop_ui::PreviewQualityPreset;
+  switch (scale) {
+  case render::PreviewScale::Full:
+    return PreviewQualityPreset::Full;
+  case render::PreviewScale::Half:
+    return PreviewQualityPreset::Half;
+  case render::PreviewScale::Quarter:
+    return PreviewQualityPreset::Quarter;
+  }
+  return PreviewQualityPreset::Half;
+}
+
+render::PreviewScale previewScaleFromPreset(const desktop_ui::PreviewQualityPreset preset) {
+  using desktop_ui::PreviewQualityPreset;
+  switch (preset) {
+  case PreviewQualityPreset::Full:
+    return render::PreviewScale::Full;
+  case PreviewQualityPreset::Half:
+    return render::PreviewScale::Half;
+  case PreviewQualityPreset::Quarter:
+    return render::PreviewScale::Quarter;
+  }
+  return render::PreviewScale::Half;
+}
+
+desktop_ui::PreviewQualityPreset loadStoredPreviewQuality(const QSettings& settings) {
+  const int stored = settings.value(QStringLiteral("preview/qualityScale"),
+                                    static_cast<int>(desktop_ui::PreviewQualityPreset::Half))
+                         .toInt();
+  switch (stored) {
+  case static_cast<int>(desktop_ui::PreviewQualityPreset::Full):
+    return desktop_ui::PreviewQualityPreset::Full;
+  case static_cast<int>(desktop_ui::PreviewQualityPreset::Quarter):
+    return desktop_ui::PreviewQualityPreset::Quarter;
+  default:
+    return desktop_ui::PreviewQualityPreset::Half;
+  }
 }
 
 [[nodiscard]] bool gpuRendererUsable(const std::shared_ptr<render::GpuRenderer>& gpu) {
@@ -1270,7 +1310,10 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
   }
   transcription_network_ = new QNetworkAccessManager(this);
   gpu_fallback_latched_ = false;
-  window_.programViewer()->setTitle(tr("Program · CPU"));
+  preview_scale_ = previewScaleFromPreset(loadStoredPreviewQuality(windowSettings(window_)));
+  window_.setPreviewQualityPreset(previewPresetFromScale(preview_scale_));
+  program_viewer_backend_label_ = tr("CPU");
+  refreshProgramViewerTitle();
   window_.installEventFilter(this);
   connect(&window_, &desktop_ui::EditorWindow::newProjectRequested, this,
           &EditorController::newProject);
@@ -1428,6 +1471,8 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::applyTrackVisibilityPreset);
   connect(&window_, &desktop_ui::EditorWindow::trackVisibilityRestoreRequested, this,
           &EditorController::restoreTrackVisibility);
+  connect(&window_, &desktop_ui::EditorWindow::previewQualityPresetRequested, this,
+          [this](const desktop_ui::PreviewQualityPreset preset) { setPreviewQuality(preset); });
   connect(&window_, &desktop_ui::EditorWindow::markerListJumpRequested, this,
           [this](const QString& markerId) {
             const edit::Sequence* sequence = currentSequence();
@@ -4038,18 +4083,15 @@ void EditorController::launchSourcePreviewRequest() {
   const edit::Time source_time(source_playhead_, static_cast<std::uint32_t>(kUiTimescale));
   const std::uint64_t generation =
       playback_registry_ != nullptr ? playback_registry_->generation() : 0U;
+  const render::PreviewProfile profile = programPreviewProfile();
   const render::RenderCacheKey cache_key{
       .revision = editor_ ? editor_->revision() : edit::Revision{},
       .sequence_id = asset_id,
       .time = source_time,
       .width = 0,
       .height = 0,
-      .graph_signature = render::preview_graph_signature(
-                             {.scale = render::PreviewScale::Half,
-                              .bypass_expensive_effects = true,
-                              .use_proxies = true},
-                             generation) ^
-                         0x534f5552ULL,
+      .graph_signature =
+          render::preview_graph_signature(profile, generation) ^ 0x534f5552ULL,
   };
   source_preview_in_flight_ = true;
   using SourceWatcher = QFutureWatcher<PreviewOutcome>;
@@ -4070,7 +4112,7 @@ void EditorController::launchSourcePreviewRequest() {
       launchSourcePreviewRequest();
     }
   });
-  watcher->setFuture(QtConcurrent::run([provider, cache, cache_key, asset_id, source_time,
+  watcher->setFuture(QtConcurrent::run([provider, cache, cache_key, asset_id, source_time, profile,
                                         epoch]() {
     if (cache) {
       if (auto cached = cache->get(cache_key)) {
@@ -4083,7 +4125,7 @@ void EditorController::launchSourcePreviewRequest() {
                                      .source_time = source_time,
                                      .preferred_width = 0,
                                      .preferred_height = 0,
-                                     .permit_proxy = true,
+                                     .permit_proxy = profile.use_proxies,
                                      .request_epoch = epoch});
     if (!result) {
       return PreviewOutcome{.epoch = epoch,
@@ -8221,6 +8263,46 @@ void EditorController::refreshJobActivitySummary() {
                                                 : tr("Jobs: %1").arg(parts.join(QStringLiteral(" · "))));
 }
 
+desktop_ui::PreviewQualityPreset EditorController::previewQuality() const noexcept {
+  return previewPresetFromScale(preview_scale_);
+}
+
+render::PreviewProfile EditorController::programPreviewProfile() const noexcept {
+  return {.scale = preview_scale_, .bypass_expensive_effects = true, .use_proxies = true};
+}
+
+void EditorController::setPreviewQuality(const desktop_ui::PreviewQualityPreset preset) {
+  const render::PreviewScale scale = previewScaleFromPreset(preset);
+  if (preview_scale_ == scale) {
+    return;
+  }
+  preview_scale_ = scale;
+  windowSettings(window_).setValue(QStringLiteral("preview/qualityScale"), static_cast<int>(preset));
+  window_.setPreviewQualityPreset(preset);
+  refreshProgramViewerTitle();
+  if (preview_cache_ != nullptr) {
+    preview_cache_->clear();
+  }
+  requestPreview(PreviewRequestPolicy::Replace);
+}
+
+void EditorController::setProgramViewerBackendLabel(const QString& backendLabel) {
+  program_viewer_backend_label_ = backendLabel;
+  refreshProgramViewerTitle();
+}
+
+void EditorController::refreshProgramViewerTitle() {
+  if (window_.programViewer() == nullptr) {
+    return;
+  }
+  const QString scale_label =
+      preview_scale_ == render::PreviewScale::Full
+          ? tr("Full")
+          : preview_scale_ == render::PreviewScale::Quarter ? tr("Quarter") : tr("Half");
+  window_.programViewer()->setTitle(
+      tr("Program · %1 · proxy · reduced effects · %2").arg(scale_label, program_viewer_backend_label_));
+}
+
 void EditorController::refreshProgramViewerChrome() {
   if (window_.programViewer() == nullptr) {
     return;
@@ -8325,12 +8407,13 @@ void EditorController::updateTrimTwoUpPreview(const QStringList& clipIds, const 
   const auto provider = frame_provider_;
   QtConcurrent::run([this, provider, outgoing = *outgoing, incoming = *incoming, outgoing_source,
                      incoming_source, serial]() {
+    const render::PreviewProfile profile = programPreviewProfile();
     const auto fetch = [&](const edit::Clip& clip, const edit::Time source_time) -> QImage {
       const auto result = provider->request({.asset_id = clip.asset_id,
                                              .source_time = source_time,
                                              .preferred_width = 0,
                                              .preferred_height = 0,
-                                             .permit_proxy = true,
+                                             .permit_proxy = profile.use_proxies,
                                              .request_epoch = 0});
       if (!result || !result.value) {
         return {};
@@ -10451,7 +10534,7 @@ void EditorController::attachGpuRenderer(std::shared_ptr<render::GpuRenderer> gp
               .arg(QString::fromStdString(capabilities.diagnostic)),
           8'000);
     }
-    window_.programViewer()->setTitle(gpuReadyTitle(capabilities));
+    setProgramViewerBackendLabel(gpuReadyBackendLabel(capabilities));
     SessionEventLog::instance().log_backend(
         "gpuInit",
         std::string("success backend=") +
@@ -10471,7 +10554,7 @@ void EditorController::attachGpuRenderer(std::shared_ptr<render::GpuRenderer> gp
         tr("Native GPU presentation is unavailable; keeping offscreen GPU preview: %1")
             .arg(diagnostic),
         8'000);
-    window_.programViewer()->setTitle(gpuReadyTitle(gpu_renderer_->capabilities()));
+    setProgramViewerBackendLabel(gpuReadyBackendLabel(gpu_renderer_->capabilities()));
     return;
   }
 
@@ -10486,7 +10569,7 @@ void EditorController::attachGpuRenderer(std::shared_ptr<render::GpuRenderer> gp
   gpu_fallback_latched_ = true;
   gpu_renderer_.reset();
   gpu_timeline_renderer_.reset();
-  window_.programViewer()->setTitle(tr("Program · CPU"));
+  setProgramViewerBackendLabel(tr("CPU"));
   window_.showTransientMessage(
       tr("GPU preview unavailable; using the CPU renderer: %1").arg(diagnostic), 8'000);
 }
@@ -10562,13 +10645,7 @@ void EditorController::launchPreviewRequest() {
   const bool secondary_native = gpu_secondary_presentation_;
   const bool scopes_visible =
       window_.scopesWidget() != nullptr && window_.scopesWidget()->isVisible();
-  const bool gpu_can_present = gpu_renderer != nullptr && gpu_renderer->capabilities().presentation;
-  const bool playing = std::abs(playback_rate_) > 1.0e-9;
-  const render::PreviewProfile profile{
-      .scale = (!gpu_can_present && playing) ? render::PreviewScale::Quarter
-                                             : render::PreviewScale::Half,
-      .bypass_expensive_effects = true,
-      .use_proxies = true};
+  const render::PreviewProfile profile = programPreviewProfile();
   const render::RenderCacheKey cache_key{
       .revision = snapshot.revision(),
       .sequence_id = snapshot.sequence().id,
@@ -10592,7 +10669,7 @@ void EditorController::launchPreviewRequest() {
         gpu_fallback_latched_ = true;
         gpu_timeline_renderer_.reset();
         gpu_renderer_.reset();
-        window_.programViewer()->setTitle(tr("Program · CPU fallback"));
+        setProgramViewerBackendLabel(tr("CPU fallback"));
         SessionEventLog::instance().log_backend(
             "gpuPreview", "latched cpu: " + outcome.gpu_diagnostic.toStdString());
         window_.showTransientMessage(
@@ -10602,7 +10679,7 @@ void EditorController::launchPreviewRequest() {
       } else if (outcome.gpu_used) {
         const auto capabilities =
             gpu_renderer_ != nullptr ? gpu_renderer_->capabilities() : render::GpuCapabilities{};
-        window_.programViewer()->setTitle(gpuActiveTitle(capabilities));
+        setProgramViewerBackendLabel(gpuActiveBackendLabel(capabilities));
         if (!gpu_status_announced_) {
           gpu_status_announced_ = true;
           SessionEventLog::instance().log_backend(
@@ -10617,8 +10694,8 @@ void EditorController::launchPreviewRequest() {
         // Unsupported timeline features fall back for this frame only. Keep
         // the ready backend visible without claiming that the displayed image
         // was GPU-rendered.
-        window_.programViewer()->setTitle(
-            tr("Program · CPU frame · %1 GPU ready").arg(outcome.gpu_backend));
+        setProgramViewerBackendLabel(
+            tr("CPU frame · %1 GPU ready").arg(outcome.gpu_backend));
         if (!gpu_frame_fallback_announced_) {
           gpu_frame_fallback_announced_ = true;
           SessionEventLog::instance().log_backend(

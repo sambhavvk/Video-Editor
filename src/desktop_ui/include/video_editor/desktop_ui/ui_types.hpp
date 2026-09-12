@@ -52,6 +52,12 @@ enum class TrackHeightPreset : std::uint8_t {
   Expanded,
 };
 
+enum class PreviewQualityPreset : std::uint8_t {
+  Full,
+  Half,
+  Quarter,
+};
+
 struct MediaItemView {
   QString id;
   QString displayName;
@@ -378,6 +384,7 @@ Q_DECLARE_METATYPE(video_editor::desktop_ui::Workspace)
 Q_DECLARE_METATYPE(video_editor::desktop_ui::TrackKind)
 Q_DECLARE_METATYPE(video_editor::desktop_ui::TrackVisibilityPreset)
 Q_DECLARE_METATYPE(video_editor::desktop_ui::TrackHeightPreset)
+Q_DECLARE_METATYPE(video_editor::desktop_ui::PreviewQualityPreset)
 Q_DECLARE_METATYPE(video_editor::desktop_ui::TimelineSnapKind)
 Q_DECLARE_METATYPE(video_editor::desktop_ui::KeyframeInterpolationView)
 Q_DECLARE_METATYPE(video_editor::desktop_ui::TranscriptionState)

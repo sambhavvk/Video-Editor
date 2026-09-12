@@ -17,6 +17,7 @@
 
 class QAction;
 class QCloseEvent;
+class QComboBox;
 class QDockWidget;
 class QFrame;
 class QLabel;
@@ -132,6 +133,7 @@ public:
   void showTransientMessage(const QString& message, int timeoutMs = 4000);
   void setAudioSyncStatus(const QString& text);
   void setSequenceFormatStatus(const QString& text);
+  void setPreviewQualityPreset(PreviewQualityPreset preset);
   void setJobActivitySummary(const QString& summary);
   void showExportDialog(const QString& presetId = {});
   void setTrimPreviewStatus(const QString& status);
@@ -204,6 +206,7 @@ signals:
   void trackVisibilityPresetRequested(TrackVisibilityPreset preset);
   void trackVisibilityRestoreRequested();
   void trackHeightPresetRequested(TrackHeightPreset preset);
+  void previewQualityPresetRequested(PreviewQualityPreset preset);
   void programClipInfoToggled(bool enabled);
   void sourceTimecodeToggled(bool enabled);
   void gotoTimecodeRequested();
@@ -386,6 +389,7 @@ private:
   QLabel* monitor_focus_label_{nullptr};
   QLabel* sequence_format_label_{nullptr};
   QLabel* job_activity_label_{nullptr};
+  QComboBox* preview_quality_combo_{nullptr};
   QToolBar* workspace_toolbar_{nullptr};
 };
 

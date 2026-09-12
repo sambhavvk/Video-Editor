@@ -231,6 +231,7 @@ private slots:
   void freezeFrameHoldsSourceAtPlayhead();
   void resyncLinkedAvMovesPartnersInOneUndoStep();
   void trackVisibilityPresetIsolatesAndRestores();
+  void previewQualityPersistsAndUpdatesProgramTitle();
 
 private:
   std::unique_ptr<QTemporaryDir> application_data_;
@@ -2215,6 +2216,30 @@ void EditorControllerTest::trackVisibilityPresetIsolatesAndRestores() {
     QVERIFY(track.visible);
   }
   QVERIFY(!restore->isEnabled());
+}
+
+void EditorControllerTest::previewQualityPersistsAndUpdatesProgramTitle() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  QSettings settings(directory.filePath(QStringLiteral("preview-quality.ini")), QSettings::IniFormat);
+  settings.setValue(QStringLiteral("preview/qualityScale"),
+                    static_cast<int>(video_editor::desktop_ui::PreviewQualityPreset::Half));
+  settings.sync();
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+
+  QCOMPARE(controller.previewQuality(), video_editor::desktop_ui::PreviewQualityPreset::Half);
+  QVERIFY(window.programViewer()->title().contains(QStringLiteral("Half")));
+  QVERIFY(window.programViewer()->title().contains(QStringLiteral("proxy")));
+  QVERIFY(window.programViewer()->title().contains(QStringLiteral("reduced effects")));
+
+  controller.setPreviewQuality(video_editor::desktop_ui::PreviewQualityPreset::Quarter);
+  QCOMPARE(controller.previewQuality(), video_editor::desktop_ui::PreviewQualityPreset::Quarter);
+  QVERIFY(window.programViewer()->title().contains(QStringLiteral("Quarter")));
+
+  QSettings reloaded(directory.filePath(QStringLiteral("preview-quality.ini")), QSettings::IniFormat);
+  QCOMPARE(reloaded.value(QStringLiteral("preview/qualityScale")).toInt(),
+           static_cast<int>(video_editor::desktop_ui::PreviewQualityPreset::Quarter));
 }
 
 void EditorControllerTest::otioMenuActionsEmitImportExportSignals() {

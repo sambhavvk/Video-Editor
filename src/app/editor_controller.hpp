@@ -7,6 +7,7 @@
 #include "video_editor/desktop_ui/ui_types.hpp"
 #include "video_editor/edit_model/edit_model.h"
 #include "video_editor/job_service/protocol.h"
+#include "video_editor/render_engine/cpu_renderer.h"
 #include "video_editor/render_engine/gpu_backend.h"
 #include "video_editor/render_engine/scope_analyzer.h"
 
@@ -188,6 +189,9 @@ public:
   [[nodiscard]] bool gpuPreviewActive() const noexcept {
     return gpu_preview_active_;
   }
+  [[nodiscard]] desktop_ui::PreviewQualityPreset previewQuality() const noexcept;
+  void setPreviewQuality(desktop_ui::PreviewQualityPreset preset);
+  [[nodiscard]] render::PreviewProfile programPreviewProfile() const noexcept;
 
   void importPaths(const QStringList& paths);
   [[nodiscard]] bool offerRecoveryOnStartup();
@@ -518,6 +522,8 @@ private:
   void refreshTranscriptionState();
   void refreshJobActivitySummary();
   void refreshProgramViewerChrome();
+  void refreshProgramViewerTitle();
+  void setProgramViewerBackendLabel(const QString& backendLabel);
   [[nodiscard]] bool selectedAudioInput(std::filesystem::path& path, edit::TimeRange& range,
                                         edit::EntityId& clipId) const;
   void handleTranscriptionEvent(const jobs::v1::WorkerEvent& event);
@@ -681,6 +687,8 @@ private:
   std::shared_ptr<const render::CpuFrame> last_preview_frame_;
   bool white_balance_sampling_{false};
   bool gpu_preview_active_{false};
+  render::PreviewScale preview_scale_{render::PreviewScale::Half};
+  QString program_viewer_backend_label_{QStringLiteral("CPU")};
   bool gpu_fallback_latched_{false};
   bool gpu_status_announced_{false};
   bool gpu_frame_fallback_announced_{false};
