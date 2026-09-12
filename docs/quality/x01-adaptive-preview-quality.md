@@ -14,7 +14,7 @@ Indirect evidence still points to one bottleneck for this scope:
 | Signal | Source | Implication |
 | --- | --- | --- |
 | Manual Full/Half/Quarter only; no Auto | [R01](r01-preview-quality.md) residual | Editors must guess quality; sustained playback decode cost is unmanaged |
-| In-memory LRU `RenderCache` (revision/time/dimensions/graph signature) | `beta-feature-status.md`, `render_cache.h` | Reuses **decoded frames** but does not reduce decode cost on cache miss |
+| In-memory LRU `RenderCache` (revision/sequence/time/dimensions/graph signature) | `beta-feature-status.md`, `render_cache.h` | Reuses **decoded frames** but does not reduce decode cost on cache miss |
 | Disk `CacheStore` + proxies | ADR 0012, `media-proxies-and-cache.md` | Off-line transcode path; not a per-sequence in/out preview bake |
 | Audio adaptive decode-ahead buffer | `beta-feature-status.md` mixer row | Audio already adapts to xruns; video preview does not |
 
@@ -37,17 +37,19 @@ resolution during transport stress and restores the user's chosen ceiling when i
 | State | Status bar / viewer | User control |
 | --- | --- | --- |
 | Manual Full/Half/Quarter | Unchanged from R01 | Combo selection; persists in `preview/qualityScale` |
-| Auto (new) | Title shows `Auto → Half` (or Quarter) when downgraded; `Auto (Full)` when at ceiling | Fifth combo entry; ceiling stored as today (last manual preset before Auto, or explicit sub-combo later) |
+| Auto (new) | Title shows `Auto → Half` (or Quarter) when downgraded; `Auto (Full)` when at ceiling | **Fourth** combo entry (R01 has only Full/Half/Quarter today); ceiling stored as today (last manual preset before Auto, or explicit sub-combo later) |
 | Stress | Brief tooltip or HUD line: "Preview quality reduced for playback" | None required; optional "Lock quality" override defers downgrade for one session |
 | GPU path | Same indicators; downgrade applies to decode dimensions before GPU upload | GPU latch-to-CPU rules unchanged |
 
-Auto must **never** change export, proxy jobs, or disk cache contents.
+Auto must **never** change export, proxy jobs, or disk cache contents. Grab Frame already saves
+`ProgramViewer::currentDisplayImage()` (the on-screen preview, including R01 scale), not a
+full-resolution original; Auto may change that image and must not be treated as an export oracle.
 
 ### Cancellation and invalidation
 
 - **Revision change:** clear in-memory `RenderCache` (existing behavior); reset stress counter.
 - **Manual preset change while playing:** apply immediately; cancel pending downgrade timer.
-- **Stop transport:** restore effective quality to ceiling within one frame presentation (no stuck Quarter).
+- **Stop transport:** restore effective quality toward the ceiling; no stuck Quarter after pause.
 - **Scrub end (debounce):** same as R02 admission resume (~existing scrub debounce); quality may step up one level at a time to avoid flicker.
 - **Proxy adoption / qualityScale persist:** no automatic proxy creation; Auto only scales decode/resolution.
 - **Session end:** persist `preview/qualityMode` = `manual` \| `auto` and ceiling preset in QSettings.
@@ -57,8 +59,10 @@ Auto must **never** change export, proxy jobs, or disk cache contents.
 1. With a reference 4K long-GOP clip on CPU preview at Full ceiling, enabling Auto keeps median
    program frame time below a documented threshold (e.g. ≤ 33 ms for 30 fps) by stepping down to Half
    then Quarter within N consecutive slow frames.
-2. Pausing playback restores Half/Full within 500 ms without user action.
-3. Export and grab-frame still use full resolution and originals (regression test on existing export suite).
+2. Pausing playback restores the ceiling preset within 500 ms without user action (stepped upgrades
+   allowed inside that window).
+3. Export still uses full resolution and originals (existing export suite). Grab-frame continues to
+   capture the displayed preview frame, including Auto scale when downgraded.
 4. `EditorControllerTest` + one new test: Auto downgrades under injected slow-render hook and restores on stop.
 5. Physical decode-lab run recorded before beta claims "adaptive preview" as Implemented.
 
@@ -69,6 +73,7 @@ Auto must **never** change export, proxy jobs, or disk cache contents.
 - Adaptive proxy generation or automatic Half proxy creation.
 - Source monitor / trim two-up dimension scaling (R01 residual stays until a follow-up).
 - Implementing Auto and disk range cache together.
+- Changing Grab Frame into a separate full-resolution still export.
 
 ## Follow-up chunks (implementation)
 

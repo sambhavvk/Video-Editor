@@ -21,23 +21,30 @@ stretch as realtime preview.
 
 ### FOSS path
 
+Official FFmpeg in [B02](foss-component-register.md) / `src/media_codec/CMakeLists.txt` pins
+**libavformat, libavcodec, libavutil, libswresample, libswscale** only. The tree does **not** link
+`libavfilter`. Clip speed today resamples on the existing `swresample` path (pitch changes). There
+is no `atempo` (or any avfilter) usage.
+
 | Component | Role | Eligibility |
 | --- | --- | --- |
-| FFmpeg `atempo` chain (existing LGPL build) | Fallback for 0.5×–2× per filter; chain for wider range | Already in official FFmpeg; no new dependency |
-| [SoundTouch](https://www.surina.net/soundtouch/) 2.3.x | Primary pitch-preserving stretch for preview blocks + offline render | **LGPL-2.1** — eligible pending B02 pin; dynamic link like libebur128 |
+| [SoundTouch](https://www.surina.net/soundtouch/) 2.3.x | Primary pitch-preserving stretch for preview blocks + offline render | **LGPL-2.1** — **not selected** until a B02 pin; dynamic link like libebur128 |
+| Current `swresample` rate path | Fallback when SoundTouch is off: same pitched resample as today | Already selected |
+| FFmpeg `libavfilter` / `atempo` | Not in the official library set | **Not selected**; adding it needs a B02 + CMake pin, not a silent extra link |
 | Rubber Band Library | Higher quality | **GPL** — **rejected** for official builds |
 
-Prototype plan: integrate SoundTouch behind `audio_time_stretch` in `timeline_audio_render` with
-`atempo` fallback when SoundTouch is unavailable at build time (same pattern as optional whisper.cpp).
+Prototype plan: optional SoundTouch behind `audio_time_stretch` in `timeline_audio_render` (same
+optional-capability pattern as whisper.cpp). If SoundTouch is unavailable, disable **Preserve pitch**
+and keep today's resample. Do not assume `atempo` is already in the LGPL official build.
 
 ### Latency and state expectations
 
 | Path | Expectation |
 | --- | --- |
 | Realtime playback | Stretch runs on pre-render worker blocks (not audio callback). One block latency increase acceptable; document max rate 4× for preserve-pitch realtime v1 |
-| Scrub / shuttle JKL | Reuse existing rate shuttle; preserve-pitch applies at non-1× shuttle rates |
+| Scrub / shuttle JKL | Unchanged: transport shuttle stays resampled, not pitch-preserved (`user-guide.md`) |
 | Export | Offline render only; deterministic stretch parameters logged in export metadata |
-| Undo | `SetClipPreservePitchCommand` + existing rate command batching |
+| Undo | `SetClipPreservePitchCommand` + existing `SetClipSpeedCommand` batching |
 
 ### Preview / export checks
 
@@ -56,6 +63,8 @@ Prototype plan: integrate SoundTouch behind `audio_time_stretch` in `timeline_au
 - Full DAW, surround pipeline, or opaque "AI enhance" bundles.
 - Pitch-preserving **video** optical flow (frame interpolation).
 - GPL Rubber Band in official packages.
+- Linking `libavfilter` / `atempo` without a B02 selection.
+- Pitch-preserving **JKL shuttle** (clip-rate only in this slice).
 
 ## Follow-up chunks
 

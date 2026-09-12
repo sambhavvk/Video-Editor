@@ -15,15 +15,24 @@ Scoped on branch `beta-1.0-fix` (phase 10 X04). Discovery only; no implementatio
 
 **Before (C06 today):**
 
-- Master `Interview` 16:9; user creates `Interview (Vertical 9:16)`.
-- User ripple-trims 2 s from master at 00:01:00:00.
-- Vertical sequence unchanged → versions diverge silently.
+- Active sequence `Interview` (any format). **Create Aspect-Ratio Copies…** adds two **new**
+  sequences — `Interview (Landscape 16:9)` and `Interview (Vertical 9:16)` — via
+  `duplicateSequenceWithNewIds`. The source sequence is left unchanged.
+- Every track, clip, transition, marker, and caption ID is **reminted**. There is no stable
+  `(track_id, clip_entity_id)` shared across copies.
+- User ripple-trims 2 s on the landscape copy at 00:01:00:00.
+- Vertical sequence unchanged → copies diverge silently (documented: "edits do not sync automatically").
 
 **After (proposed v1):**
 
-- Copies created with C06 gain a `variant_group_id` (shared UUID) and `variant_role` (`landscape` \| `vertical`).
-- User chooses **Propagate trim to variants…** (or enables **Auto-propagate structural edits** in sequence settings).
-- Ripple trim on master generates a **reviewable propagation proposal** listing affected variants with mapped timeline ranges.
+- C06 stores a `variant_group_id` plus an explicit **correspondence table** (source clip/track IDs →
+  landscape IDs → vertical IDs) written in the same command batch. `variant_role` is
+  `landscape` \| `vertical` on the copies. The original source sequence stays **out of the group**
+  unless the user opts in (non-default).
+- User chooses **Propagate trim to variants…** from a copy in the group (or enables
+  **Auto-propagate structural edits** in sequence settings — still reviewable, never silent).
+- Ripple trim on landscape generates a **reviewable propagation proposal** listing the vertical
+  sibling with mapped timeline ranges.
 - User applies → vertical receives equivalent ripple at mapped time; user discards → variants stay independent.
 
 **Protected edits (never auto-applied):**
@@ -38,29 +47,32 @@ Scoped on branch `beta-1.0-fix` (phase 10 X04). Discovery only; no implementatio
 
 ### Source-time mapping
 
-- Variants share the same `asset_id` and source in/out on corresponding clips (C06 guarantees parallel structure at creation).
-- Mapping key: `(track_id, clip_entity_id)` stable across copies created in one C06 command batch.
-- Conflict: if vertical clip was manually retimed, proposal marks item **blocked** with reason; user fixes manually.
+- At creation, copies share `asset_id` and source in/out on corresponding clips (parallel structure),
+  but **not** identity: mapping must use the correspondence table, not live `track_id` / `clip.id`.
+- Conflict: if the sibling clip was manually retimed, deleted, or unlinked, the proposal marks that
+  item **blocked** with reason; user fixes manually.
 
 ### Model / UI / validation follow-ups
 
 | Layer | Follow-up |
 | --- | --- |
-| Model | `VariantGroup` in snapshot; `PropagationProposal` with base revision + per-variant command batches |
+| Model | Schema bump after current snapshot **v7**: `VariantGroup` + correspondence ids; `PropagationProposal` with base revision + per-variant command batches |
 | UI | Sequence header badge "2 variants"; Propagation panel listing pending/last sync; C06 dialog checkbox "Link for propagation" default on |
-| Validation | Tests: trim propagates; reframing change does not; blocked item when structure diverged |
+| Validation | Tests: trim propagates landscape→vertical; reframing change does not; blocked item when structure diverged |
 
 ## Non-goals (leave for later)
 
 - Automatic drift correction for discontinuous multicam or field recordings.
 - Tracked reframing (smart crop) between aspects.
 - Shipping silent auto-propagation without review UI.
+- Assuming C06 clip/track IDs are stable across copies (they are reminted today).
+- Automatically linking the **source** sequence into the variant group.
 - Propagation across sequence versions ([V01](v01-sequence-versions.md)) — versions remain compare-only until specified.
 
 ## Follow-up chunks
 
 | ID | Work |
 | --- | --- |
-| X04a | Schema `variant_group_id`, C06 linkage metadata |
+| X04a | Schema `variant_group_id` + clip/track correspondence table written by C06 |
 | X04b | Proposal builder for trim/split/delete |
 | X04c | Review UI + apply batch + divergence detector |

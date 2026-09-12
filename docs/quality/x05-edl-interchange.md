@@ -18,7 +18,8 @@ AAF and proprietary XML SDKs remain **not selected** per [FOSS component registe
 ### End-to-end first slice
 
 1. **Export:** From active sequence, **File → Export EDL (CMX3600)…** writes a `.edl` with:
-   - `TITLE`, `FCM: NON-DROP FRAME` (or drop-frame when sequence rate is NTSC drop).
+   - `TITLE`, `FCM: NON-DROP FRAME` in v1. The sequence model has **no drop-frame flag** (default
+     rate is often 30000/1001, which is not the same as DF). Do not emit `DROP FRAME` from fps alone.
    - One `EVENT` per video clip on targeted tracks (v1: single video track + optional audio `AX` lines when clip has audio).
    - Source reel name = asset basename; source In/Out from clip handles; record In/Out from timeline.
 2. **Import:** **File → Import EDL…** creates a **new sequence** (non-destructive) with offline clips when media paths in comments are missing; relink via existing asset workflow.
@@ -26,9 +27,11 @@ AAF and proprietary XML SDKs remain **not selected** per [FOSS component registe
 
 ### FOSS requirements
 
-- First-party CMX3600 parser/serializer in `video_editor_interchange` (MPL-2.0), same module boundary as OTIO JSON.
-- No OpenTimelineIO C++ library, no Avid AAF SDK, no closed parsers.
-- Timecode: reuse rational time + NTSC helpers from edit model.
+- First-party CMX3600 parser/serializer in `video_editor_interchange` (MPL-2.0), same module
+  boundary as OTIO JSON. This matches B02: **no** OpenTimelineIO library and **no** AAF/EDL/XML
+  SDKs — first-party text, like first-party OTIO JSON.
+- Timecode: reuse rational time helpers from the edit model; v1 NDF only.
+- Do not add an interchange SDK to the selected component set.
 
 ### Receiving workflow
 
@@ -49,6 +52,8 @@ AAF and proprietary XML SDKs remain **not selected** per [FOSS component registe
 - Complete dailies suite, script sync, continuity notebook.
 - Multiple interchange formats in one implementation pass.
 - Round-trip fidelity with every commercial NLE feature.
+- NTSC drop-frame EDL (`FCM: DROP FRAME`) until a sequence timecode mode exists.
+- Selecting an EDL/AAF/XML SDK in B02.
 
 ## Follow-up chunks
 

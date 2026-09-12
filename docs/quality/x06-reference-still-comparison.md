@@ -18,7 +18,9 @@ Scoped on branch `beta-1.0-fix` (phase 10 X06). Discovery only; no implementatio
 1. User imports a `.png` / `.jpg` reference (color card, brand frame, previous cut).
 2. **View → Reference still…** pins the image to the program viewer as a **comparison layer** (not a timeline clip).
 3. Modes: **Side by side**, **Overlay** (opacity slider), **Difference** (absolute RGB delta, Rec.709 space).
-4. Reference does not export, burn in, or appear in OTIO; optional screenshot obeys grab-frame path only.
+4. Reference does not export, burn in, or appear in OTIO. Grab Frame already writes
+   `currentDisplayImage()` (preview display); with a reference pinned it includes the overlay when
+   visible. That is the v1 screenshot path — not a full-resolution still export.
 
 ### FOSS implementation
 
@@ -43,13 +45,14 @@ Scoped on branch `beta-1.0-fix` (phase 10 X06). Discovery only; no implementatio
 ### Preview / export agreement
 
 - Export ignores reference layer (test: export hash unchanged with reference pinned).
-- Grab-frame includes reference when overlay visible (user expectation for QC notes).
+- Grab-frame includes reference when overlay visible (matches today's display-image grab).
 
 ## Non-goals (leave for later)
 
 - Timeline-based reference clip, tracked match move, stabilization, secondary masks.
 - Simultaneous tracking + compositing + HDR development.
 - ML-based auto-align.
+- Full-resolution grab-frame independent of preview scale.
 
 ## Follow-up chunks
 

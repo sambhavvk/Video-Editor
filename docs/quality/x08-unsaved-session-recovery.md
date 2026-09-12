@@ -12,46 +12,71 @@ Scoped on branch `beta-1.0-fix` (phase 10 X08). Discovery only; no implementatio
 | Professional monitoring | HDMI LUT boxes | Hardware-dependent; **Deferred** |
 | FOSS plugin host | LV2/VST3 FOSS hosts exist; ABI/security heavy | **Deferred** |
 | Light / high-contrast theme | Qt stylesheets only | Smaller; see below as alternate |
-| **Never-saved recovery** | Extends [ADR 0008](../architecture/0008-recovery-catalog.md) | **Selected** |
+| **Never-saved recovery** | Extends [ADR 0008](../architecture/0008-recovery-catalog.md) | **Selected remainder** — catalog already sees untitled working DBs |
 | Self-hosted collaboration | Operational + sync model | **Deferred** — beta: collaboration deferred |
 | Additional OS (macOS/ARM) | Packaging | Separate from feature; **Deferred** |
 
-## Chosen: recover last **unsaved** editing session after crash
+## Current product (do not rebuild the catalog)
+
+Never-saved editing is **not** missing a working database:
+
+- **File → New** writes `{projectUuid}.working.sqlite` under the platform recovery directory
+  immediately (`EditorController::newWorkingPath`). Project display name is `Untitled Project`.
+- Every committed edit appends a snapshot journal entry (`persistSnapshot`). Timed `.veproj`
+  autosave still requires a saved checkpoint path (`beta-feature-status.md`).
+- [ADR 0008](../architecture/0008-recovery-catalog.md) already recommends recovery when
+  `clean_close` is false **or** `head_revision != saved_revision`. Tests cover a clean unsaved
+  candidate. Restore Points lists those as **Unsaved edits** / **Unclean close**.
+- [R03](r03-restore-points.md) residual is only "never-saved projects **without** a working
+  database" — File → New always creates one.
+
+Real gaps:
+
+- Startup copy is generic ("Recover your last project?") and does not say the session was never
+  saved to a `.veproj`.
+- Discard on close (`confirmDiscardChanges`) marks `clean_close` but **does not delete** the
+  untitled working DB, so the next launch can still offer it (`head != saved`).
+- No retention/LRU cleanup (ADR 0008: cleanup is future policy).
+- Switching File → New leaves the previous `{uuid}.working.sqlite` on disk (new UUID).
+
+## Chosen: make never-saved recovery truthful and tidy
 
 ### User demand
 
-- Creators frequently experiment before first **Save As**; today's recovery catalog targets
-  `*.working.sqlite` tied to named projects ([ADR 0008](../architecture/0008-recovery-catalog.md)).
-- Startup recovery ([beta-feature-status.md](../beta-feature-status.md)) handles saved checkpoints, not
-  "never saved" windows.
+Creators experiment before first **Save As**. Journal recovery already preserves those edits after
+a crash; the demand is to **label**, **offer**, and **drop** never-saved candidates correctly
+instead of inventing a second store.
 
 ### Acceptable open implementation
 
-- Reuse working SQLite + snapshot journal: **anonymous session** writes to
-  `recovery/unsaved-<uuid>.working.sqlite` from first edit (import or timeline change).
-- Heartbeat + `clean_close` flag identical to named projects.
-- On crash, next launch offers **Recover unsaved session** when no saved path exists or alongside
-  named recovery (sorted by heartbeat).
-- Accepting recovery opens read-only latest snapshot → dirty new project; user must **Save As**.
-- Declining leaves files for manual inspection; retention policy (7-day LRU) in recovery dir.
+- Keep `{projectUuid}.working.sqlite` (do not rename to `unsaved-<uuid>` in v1; ADR scans
+  `*.working.sqlite` children only).
+- On crash (`clean_close = false`) or dirty untitled (`head != saved`), next launch offers
+  **Recover unsaved session** (or the same dialog with that sentence) sorted by heartbeat as today.
+- Accepting recovery stays read-latest-snapshot → dirty project; user must **Save As** (already
+  `setDirty(true)` in `loadWorkingRecovery`).
+- **Discard** on an untitled project with no `.veproj` path removes that working DB (and WAL/SHM)
+  after `clean_close`, so it does not reappear.
+- Retention: 7-day LRU for **orphan** recovery files that are clean, have no checkpoint, and are
+  not the active working path.
 
 ### UI states
 
 | State | Behavior |
 | --- | --- |
-| Editing unsaved | Title shows `*Untitled`; autosave tick writes anonymous working DB |
-| First Save As | Migrate anonymous DB to chosen `.veproj` path; retire anonymous candidate |
-| Clean exit without save | Prompt: Discard / Save As; discard marks `clean_close` and removes anonymous candidate |
-| Crash | `clean_close = false`; next launch shows recovery dialog entry |
+| Editing unsaved | Title shows dirty `Untitled Project`; each edit already journals the working DB |
+| First Save As | Existing `saveTo` binds `.veproj` and advances `saved_revision`; keep that path |
+| Clean exit without save | Prompt: Discard / Save As / Cancel; Discard deletes the anonymous working candidate |
+| Crash | `clean_close = false`; next launch shows a recovery entry labeled unsaved if no checkpoint path was bound |
 
 ### Sequence of small follow-up chunks
 
 | ID | Work |
 | --- | --- |
-| X08a | Anonymous session ID at first mutating command |
-| X08b | Recovery catalog includes unsaved candidates + sort rules |
-| X08c | Startup dialog + Save As migration |
-| X08d | Fault-injection test (process kill) when protobuf lab available |
+| X08a | Startup/restore copy distinguishes never-saved vs named checkpoint |
+| X08b | Discard of untitled (no `.veproj`) deletes that working DB |
+| X08c | 7-day LRU for orphan recovery files |
+| X08d | Fault-injection test (process kill of untitled session) when protobuf lab available |
 
 ### Alternate quick win (not selected)
 
@@ -71,5 +96,7 @@ Scoped on branch `beta-1.0-fix` (phase 10 X08). Discovery only; no implementatio
 ## Non-goals (leave for later)
 
 - Treating the entire X08 menu as one task.
+- Replacing ADR 0008 with a parallel `unsaved-*.working.sqlite` layout.
 - Closed vendor monitoring SDKs or proprietary sync.
 - macOS/Windows parity in the same chunk as recovery.
+- Timed `.veproj` autosave without a save path (journal already covers crash durability).
