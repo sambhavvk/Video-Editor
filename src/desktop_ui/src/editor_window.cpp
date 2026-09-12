@@ -441,6 +441,7 @@ QString EditorWindow::commandUnavailableReason(const QAction* action) const {
                                                : tr("No clips under the playhead to trim");
   }
   if (id == QStringLiteral("sequenceSettings") || id == QStringLiteral("duplicateSequence") ||
+      id == QStringLiteral("createAspectRatioVariants") ||
       id == QStringLiteral("gotoTimecode") || id == QStringLiteral("playAround") ||
       id == QStringLiteral("defaultTransition") || id == QStringLiteral("selectAtPlayhead") ||
       id == QStringLiteral("seekPreviousEdit") || id == QStringLiteral("seekNextEdit") ||
@@ -1102,6 +1103,8 @@ void EditorWindow::createActions() {
          tr("Edit the active sequence name and format"));
   create(QStringLiteral("duplicateSequence"), tr("Duplicate Sequence"),
          tr("Duplicate the active sequence with new clip IDs"));
+  create(QStringLiteral("createAspectRatioVariants"), tr("Create Aspect-Ratio Copies…"),
+         tr("Create independent landscape and vertical sequence copies"));
   create(QStringLiteral("gotoTimecode"), tr("Go to Timecode"), tr("Seek to a typed timecode"),
          QKeySequence{tr("Ctrl+G")});
   create(QStringLiteral("toggleLoopPlayback"), tr("Toggle Loop Playback"),
@@ -1382,6 +1385,8 @@ void EditorWindow::createActions() {
           &EditorWindow::sequenceSettingsRequested);
   connect(action(QStringLiteral("duplicateSequence")), &QAction::triggered, this,
           &EditorWindow::duplicateSequenceRequested);
+  connect(action(QStringLiteral("createAspectRatioVariants")), &QAction::triggered, this,
+          &EditorWindow::createAspectRatioVariantsRequested);
   connect(action(QStringLiteral("gotoTimecode")), &QAction::triggered, this,
           &EditorWindow::gotoTimecodeRequested);
   connect(action(QStringLiteral("toggleLoopPlayback")), &QAction::triggered, this,
@@ -1579,6 +1584,7 @@ void EditorWindow::createMenus() {
   timelineMenu->addAction(action(QStringLiteral("toggleFollowPlayhead")));
   timelineMenu->addSeparator();
   timelineMenu->addAction(action(QStringLiteral("duplicateSequence")));
+  timelineMenu->addAction(action(QStringLiteral("createAspectRatioVariants")));
   timelineMenu->addAction(action(QStringLiteral("sequenceSettings")));
   timelineMenu->addSeparator();
   for (const auto* id : {"tool.select", "tool.rippleTrim", "tool.overwriteTrim", "tool.roll",

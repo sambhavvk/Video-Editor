@@ -338,6 +338,7 @@ private slots:
   void grabProgramFrame();
   void showSequenceSettings();
   void duplicateActiveSequence();
+  void createAspectRatioVariants();
   void scrubMediaPreview(const QString& mediaId, double normalizedPosition);
   void toggleProgramClipInfo(bool enabled);
   void toggleSourceTimecodeDisplay(bool enabled);

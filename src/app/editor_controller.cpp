@@ -1548,6 +1548,8 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::showSequenceSettings);
   connect(&window_, &desktop_ui::EditorWindow::duplicateSequenceRequested, this,
           &EditorController::duplicateActiveSequence);
+  connect(&window_, &desktop_ui::EditorWindow::createAspectRatioVariantsRequested, this,
+          &EditorController::createAspectRatioVariants);
   connect(&window_, &desktop_ui::EditorWindow::trackNavActivated, this,
           &EditorController::navigateToTrack);
   connect(&window_, &desktop_ui::EditorWindow::trackVisibilityPresetRequested, this,
@@ -8461,6 +8463,52 @@ void EditorController::duplicateActiveSequence() {
             tr("Could not duplicate the sequence"))) {
     setActiveSequence(new_sequence_id);
   }
+}
+
+void EditorController::createAspectRatioVariants() {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    explainUnavailable(window_, "editor_controller.cpp:createAspectRatioVariants",
+                       tr("Open a sequence before creating aspect-ratio copies"));
+    return;
+  }
+  const std::string base_name = sequence->name;
+  edit::Sequence landscape =
+      duplicateSequenceWithNewIds(*sequence, base_name + " (Landscape 16:9)");
+  landscape.width = 1'920;
+  landscape.height = 1'080;
+  edit::Sequence vertical =
+      duplicateSequenceWithNewIds(*sequence, base_name + " (Vertical 9:16)");
+  vertical.width = 1'080;
+  vertical.height = 1'920;
+  for (edit::Caption& caption : vertical.captions) {
+    caption.style.safe_margin = std::max(caption.style.safe_margin, 0.12);
+    caption.style.vertical_position = std::clamp(caption.style.vertical_position, 0.72, 0.92);
+  }
+  edit::Marker landscape_marker;
+  landscape_marker.range = edit::TimeRange(edit::Time{}, edit::Time(1, 1));
+  landscape_marker.label = "Independent vertical copy: " + vertical.name;
+  edit::Marker vertical_marker;
+  vertical_marker.range = edit::TimeRange(edit::Time{}, edit::Time(1, 1));
+  vertical_marker.label = "Independent landscape copy: " + landscape.name;
+  landscape.markers.push_back(landscape_marker);
+  vertical.markers.push_back(vertical_marker);
+  const edit::EntityId landscape_id = landscape.id;
+  const edit::EntityId vertical_id = vertical.id;
+  const std::string gesture = "aspect-variants:" + edit::EntityId::generate().toString();
+  std::vector<edit::EditCommand> commands;
+  commands.push_back({.operation = edit::AddSequenceCommand{.sequence = std::move(landscape)},
+                      .coalescing_key = gesture});
+  commands.push_back({.operation = edit::AddSequenceCommand{.sequence = std::move(vertical)},
+                      .coalescing_key = gesture});
+  if (!applyBatch(std::move(commands), tr("Could not create aspect-ratio copies"))) {
+    return;
+  }
+  setActiveSequence(landscape_id);
+  window_.showTransientMessage(
+      tr("Created \"%1\" and \"%2\" as independent copies; edits do not sync automatically.")
+          .arg(QString::fromStdString(base_name + " (Landscape 16:9)"),
+               QString::fromStdString(base_name + " (Vertical 9:16)")));
 }
 
 void EditorController::scrubMediaPreview(const QString& mediaId, const double normalizedPosition) {

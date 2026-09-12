@@ -210,6 +210,7 @@ signals:
   void revealMediaInFilesRequested();
   void sequenceSettingsRequested();
   void duplicateSequenceRequested();
+  void createAspectRatioVariantsRequested();
   void markerListJumpRequested(const QString& markerId);
   void trackNavActivated(const QString& trackId);
   void trackVisibilityPresetRequested(TrackVisibilityPreset preset);
