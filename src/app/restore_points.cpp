@@ -10,6 +10,7 @@
 #include <QRegularExpression>
 
 #include <fstream>
+#include <stdexcept>
 
 namespace video_editor::app {
 
@@ -105,15 +106,28 @@ void appendNamedRestorePoint(const std::filesystem::path& recovery_directory,
   const std::filesystem::path manifest = manifestPath(recovery_directory);
   const QByteArray payload = QJsonDocument(array).toJson(QJsonDocument::Compact);
   std::ofstream output(manifest, std::ios::binary | std::ios::trunc);
-  output.write(payload.constData(), payload.size());
+  if (!output) {
+    throw std::runtime_error("Could not open the restore-point manifest for writing");
+  }
+  output.write(payload.constData(), static_cast<std::streamsize>(payload.size()));
+  output.flush();
+  if (!output) {
+    throw std::runtime_error("Could not write the restore-point manifest");
+  }
 }
 
 std::filesystem::path makeRestorePointCheckpointPath(
     const std::filesystem::path& restore_points_directory, const QString& name,
-    const std::uint64_t revision) {
-  const QString file_name =
-      slugifyRestorePointName(name) + QStringLiteral("-r") + QString::number(revision) +
-      QStringLiteral(".veproj");
+    const std::uint64_t revision, const QString& unique_id) {
+  QString token = unique_id;
+  token.remove(QLatin1Char('-'));
+  token.remove(QLatin1Char('/'));
+  if (token.isEmpty()) {
+    token = QStringLiteral("id");
+  }
+  const QString file_name = slugifyRestorePointName(name) + QStringLiteral("-r") +
+                            QString::number(revision) + QStringLiteral("-") + token.left(16) +
+                            QStringLiteral(".veproj");
   return restore_points_directory / pathFromQString(file_name);
 }
 

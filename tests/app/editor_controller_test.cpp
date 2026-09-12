@@ -2255,6 +2255,13 @@ void EditorControllerTest::namedRestorePointsPersistManifest() {
   QCOMPARE(loaded.size(), std::size_t{1});
   QCOMPARE(loaded.front().name, entry.name);
   QCOMPARE(loaded.front().revision, entry.revision);
+
+  const auto restore_dir = video_editor::app::restorePointsDirectory(recovery);
+  const auto first = video_editor::app::makeRestorePointCheckpointPath(
+      restore_dir, QStringLiteral("Before export"), 12, QStringLiteral("id-aaaa"));
+  const auto second = video_editor::app::makeRestorePointCheckpointPath(
+      restore_dir, QStringLiteral("Before export"), 12, QStringLiteral("id-bbbb"));
+  QVERIFY(first != second);
 }
 
 void EditorControllerTest::backgroundJobsPauseDuringPlayback() {
@@ -2263,6 +2270,10 @@ void EditorControllerTest::backgroundJobsPauseDuringPlayback() {
   video_editor::app::EditorController controller(window);
   auto* job_label = window.findChild<QLabel*>(QStringLiteral("jobActivityStatus"));
   QVERIFY(job_label != nullptr);
+  window.playbackRateRequested(1.0);
+  QVERIFY(job_label->text().contains(QStringLiteral("paused")));
+  window.addTitleRequested();
+  QVERIFY(!job_label->text().contains(QStringLiteral("paused")));
   window.playbackRateRequested(1.0);
   QVERIFY(job_label->text().contains(QStringLiteral("paused")));
   window.playbackRateRequested(0.0);

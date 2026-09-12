@@ -2420,8 +2420,10 @@ bool EditorController::loadWorkingRecovery(const std::filesystem::path& workingD
   }
 }
 
-bool EditorController::loadCheckpoint(const std::filesystem::path& checkpoint) {
+bool EditorController::loadCheckpoint(const std::filesystem::path& checkpoint,
+                                      const bool bindAsCurrentProject) {
   try {
+    const auto previous_checkpoint = checkpoint_path_;
     auto working_name = checkpoint.stem();
     working_name += "-" + edit::EntityId::generate().toString() + ".working.sqlite";
     const std::filesystem::path working = recoveryDirectory() / working_name;
@@ -2438,10 +2440,17 @@ bool EditorController::loadCheckpoint(const std::filesystem::path& checkpoint) {
     if (!decoded) {
       throw std::runtime_error(decoded.error().message);
     }
-    installProject(std::move(decoded).value(), working, std::move(opened_store), checkpoint);
-    setDirty(media_paths_updated_on_install_);
-    recordRecentProject(checkpoint);
-    window_.showTransientMessage(tr("Project opened"));
+    installProject(std::move(decoded).value(), working, std::move(opened_store),
+                   bindAsCurrentProject ? std::optional<std::filesystem::path>(checkpoint)
+                                        : previous_checkpoint);
+    setDirty(bindAsCurrentProject ? media_paths_updated_on_install_ : true);
+    if (bindAsCurrentProject) {
+      recordRecentProject(checkpoint);
+      window_.showTransientMessage(tr("Project opened"));
+    } else {
+      window_.showTransientMessage(
+          tr("Restore point loaded; save the project to keep this state"));
+    }
     return true;
   } catch (const std::exception& exception) {
     showError(tr("Could not open project"), QString::fromUtf8(exception.what()));
@@ -2457,6 +2466,8 @@ void EditorController::installProject(edit::Project project, std::filesystem::pa
   playback_rate_ = 0.0;
   source_playback_timer_.stop();
   source_playback_rate_ = 0.0;
+  background_admission_resume_timer_.stop();
+  background_admission_scrub_hold_ = false;
   source_asset_id_.reset();
   source_playhead_ = 0;
   source_mark_in_.reset();
@@ -2495,6 +2506,7 @@ void EditorController::installProject(edit::Project project, std::filesystem::pa
     active_sequence_id_ = installed->sequences.front().id;
   }
   clearExportQueueMemory();
+  updateBackgroundJobAdmissionPaused();
   refreshViews();
   loadExportQueueSidecar();
   pumpExportQueue();
@@ -3798,6 +3810,7 @@ void EditorController::loadSourceAsset(const QString& assetId) {
   }
   source_playback_timer_.stop();
   source_playback_rate_ = 0.0;
+  updateBackgroundJobAdmissionPaused();
   source_asset_id_ = asset->id;
   source_playhead_ = 0;
   source_mark_in_.reset();
@@ -4056,6 +4069,7 @@ void EditorController::setSourcePlaybackRate(const double rate) {
     return;
   }
   source_playback_rate_ = rate;
+  updateBackgroundJobAdmissionPaused();
   if (std::abs(source_playback_rate_) < std::numeric_limits<double>::epsilon()) {
     source_playback_timer_.stop();
     return;
@@ -4106,6 +4120,7 @@ void EditorController::advanceSourcePlayback() {
     source_playhead_ = std::clamp<qint64>(source_playhead_, 0, end);
     source_playback_rate_ = 0.0;
     source_playback_timer_.stop();
+    updateBackgroundJobAdmissionPaused();
   }
   updateSourceMonitorChrome();
   requestSourcePreview();
@@ -5666,9 +5681,7 @@ void EditorController::undo() {
     window_.showTransientMessage(QString::fromStdString(result.error().message));
     return;
   }
-  stopAudioPlayback();
-  playback_timer_.stop();
-  playback_rate_ = 0.0;
+  stopProgramTransport();
   try {
     persistSnapshot("history.undo");
     setDirty(true);
@@ -5688,9 +5701,7 @@ void EditorController::redo() {
     window_.showTransientMessage(QString::fromStdString(result.error().message));
     return;
   }
-  stopAudioPlayback();
-  playback_timer_.stop();
-  playback_rate_ = 0.0;
+  stopProgramTransport();
   try {
     persistSnapshot("history.redo");
     setDirty(true);
@@ -5819,8 +5830,7 @@ void EditorController::setPlaybackRate(const double rate) {
 void EditorController::advancePlayback() {
   const edit::Sequence* sequence = currentSequence();
   if (sequence == nullptr) {
-    stopAudioPlayback();
-    playback_timer_.stop();
+    stopProgramTransport();
     return;
   }
   const qint64 end = std::max<qint64>(toUiTime(edit::sequenceDuration(*sequence)), 0);
@@ -6022,15 +6032,11 @@ void EditorController::advancePlayback() {
   window_.timeline()->setPlayhead(timelineValue(playheadTime()));
   requestPreview(PreviewRequestPolicy::Coalesce);
   if ((playback_rate_ > 0.0 && playhead_ >= end) || (playback_rate_ < 0.0 && playhead_ <= 0)) {
-    stopAudioPlayback();
-    playback_timer_.stop();
-    playback_rate_ = 0.0;
+    stopProgramTransport();
     play_around_end_.reset();
   } else if (play_around_end_.has_value() && playback_rate_ > 0.0 &&
              playhead_ >= *play_around_end_) {
-    stopAudioPlayback();
-    playback_timer_.stop();
-    playback_rate_ = 0.0;
+    stopProgramTransport();
     play_around_end_.reset();
   } else if (loop_playback_ && playback_rate_ > 0.0) {
     const qint64 loop_end = program_mark_out_.value_or(end);
@@ -8315,6 +8321,7 @@ void EditorController::recordBackgroundJobFailure(const QString& kind, const QSt
     background_job_failures_.pop_front();
   }
   refreshJobActivitySummary();
+  refreshProjectHealthPanel();
 }
 
 void EditorController::deferBackgroundJobAdmission() {
@@ -8326,6 +8333,7 @@ void EditorController::deferBackgroundJobAdmission() {
 void EditorController::updateBackgroundJobAdmissionPaused() {
   const bool should_pause =
       std::abs(playback_rate_) > std::numeric_limits<double>::epsilon() ||
+      std::abs(source_playback_rate_) > std::numeric_limits<double>::epsilon() ||
       background_admission_scrub_hold_;
   if (background_admission_paused_ == should_pause) {
     refreshJobActivitySummary();
@@ -8337,6 +8345,13 @@ void EditorController::updateBackgroundJobAdmissionPaused() {
     pumpCacheJobs();
   }
   refreshJobActivitySummary();
+}
+
+void EditorController::stopProgramTransport() {
+  stopAudioPlayback();
+  playback_timer_.stop();
+  playback_rate_ = 0.0;
+  updateBackgroundJobAdmissionPaused();
 }
 
 void EditorController::refreshJobActivitySummary() {
@@ -9011,9 +9026,7 @@ bool EditorController::apply(edit::EditCommand command, const QString& failureCo
     window_.showTransientMessage(timelineEditFailureMessage(failureContext, result.error()));
     return false;
   }
-  stopAudioPlayback();
-  playback_timer_.stop();
-  playback_rate_ = 0.0;
+  stopProgramTransport();
   if (persist) {
     try {
       persistSnapshot("edit.command");
@@ -9057,9 +9070,7 @@ bool EditorController::applyBatch(std::vector<edit::EditCommand> commands,
     refreshViews();
     return false;
   }
-  stopAudioPlayback();
-  playback_timer_.stop();
-  playback_rate_ = 0.0;
+  stopProgramTransport();
   try {
     persistSnapshot("edit.batch");
   } catch (const std::exception& exception) {
@@ -11324,6 +11335,8 @@ void EditorController::finishCacheJob(const CacheJobOutcome& outcome) {
     showError(tr("Media cache is full"),
               outcome.error.isEmpty() ? tr("The media cache has no remaining space.")
                                       : outcome.error);
+    refreshJobActivitySummary();
+    refreshProjectHealthPanel();
     return;
   }
   if (outcome.succeeded) {
@@ -12058,16 +12071,18 @@ bool EditorController::createNamedRestorePoint(const QString& name, const bool s
     return false;
   }
   try {
+    if (dirty_) {
+      persistSnapshot("restore.point");
+    }
     const std::filesystem::path directory = restorePointsDirectory(recoveryDirectory());
     std::filesystem::create_directories(directory);
     const auto revision = store_->metadata().head_revision;
-    const std::filesystem::path destination =
-        makeRestorePointCheckpointPath(directory, name, revision);
-    store_->checkpoint_to(destination, revision);
     RestorePointEntry entry;
     entry.id = edit::EntityId::generate().toString();
     entry.name = name.toStdString();
-    entry.checkpoint = destination;
+    entry.checkpoint =
+        makeRestorePointCheckpointPath(directory, name, revision, QString::fromStdString(entry.id));
+    store_->checkpoint_to(entry.checkpoint, revision);
     entry.revision = revision;
     if (const edit::Sequence* sequence = currentSequence()) {
       entry.sequence_name = sequence->name;
@@ -12094,7 +12109,10 @@ void EditorController::refreshProjectHealthPanel() {
   QVector<desktop_ui::ProjectHealthIssueView> issues;
   for (const assets::AssetRecord& record : imported_assets_) {
     const QString asset_id = QString::fromStdString(record.id);
-    const QString name = asset_id;
+    QString name = qStringFromPath(record.uri.filename());
+    if (name.isEmpty()) {
+      name = asset_id;
+    }
     if (record.availability == assets::AssetAvailability::Missing) {
       issues.push_back({QStringLiteral("missing-media:") + asset_id, tr("Missing media"),
                         tr("Media file is offline: %1").arg(name), tr("Relink media")});
@@ -12251,8 +12269,9 @@ bool EditorController::restoreNamedRestorePoint(const QString& id) {
       if (answer == QMessageBox::Cancel) {
         return false;
       }
-      if (answer == QMessageBox::Yes) {
-        (void)createNamedRestorePoint(tr("Before recovery restore"), true);
+      if (answer == QMessageBox::Yes &&
+          !createNamedRestorePoint(tr("Before recovery restore"), false)) {
+        return false;
       }
     }
     return loadWorkingRecovery(working);
@@ -12260,6 +12279,11 @@ bool EditorController::restoreNamedRestorePoint(const QString& id) {
   const std::optional<RestorePointEntry> entry =
       findRestorePoint(recoveryDirectory(), id.toStdString());
   if (!entry.has_value()) {
+    window_.showTransientMessage(tr("That restore point is no longer available"));
+    return false;
+  }
+  std::error_code exists_error;
+  if (!std::filesystem::is_regular_file(entry->checkpoint, exists_error) || exists_error) {
     window_.showTransientMessage(tr("That restore point is no longer available"));
     return false;
   }
@@ -12273,11 +12297,11 @@ bool EditorController::restoreNamedRestorePoint(const QString& id) {
     if (answer == QMessageBox::Cancel) {
       return false;
     }
-    if (answer == QMessageBox::Yes) {
-      (void)createNamedRestorePoint(tr("Before restore"), true);
+    if (answer == QMessageBox::Yes && !createNamedRestorePoint(tr("Before restore"), false)) {
+      return false;
     }
   }
-  return loadCheckpoint(entry->checkpoint);
+  return loadCheckpoint(entry->checkpoint, false);
 }
 
 } // namespace video_editor::app

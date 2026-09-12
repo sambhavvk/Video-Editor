@@ -279,7 +279,15 @@ EditorWindow::EditorWindow(QSettings* settings, QWidget* parent) : QMainWindow(p
 }
 
 EditorWindow::~EditorWindow() {
-  if (initialized_) {
+  const bool was_initialized = initialized_;
+  initialized_ = false;
+  if (project_health_dock_ != nullptr) {
+    disconnect(project_health_dock_, nullptr, this, nullptr);
+  }
+  if (scopes_dock_ != nullptr) {
+    disconnect(scopes_dock_, nullptr, this, nullptr);
+  }
+  if (was_initialized) {
     saveUiState();
   }
 }
@@ -971,6 +979,9 @@ void EditorWindow::connectScopesDock() {
     connect(scopes, &QAction::toggled, scopes_dock_, &QWidget::setVisible);
   }
   connect(scopes_dock_, &QDockWidget::visibilityChanged, this, [this](const bool visible) {
+    if (!initialized_) {
+      return;
+    }
     if (auto* toggle = action(QStringLiteral("scopes"))) {
       const QSignalBlocker blocker(toggle);
       toggle->setChecked(visible);
@@ -981,6 +992,9 @@ void EditorWindow::connectScopesDock() {
       connect(health, &QAction::toggled, project_health_dock_, &QWidget::setVisible);
     }
     connect(project_health_dock_, &QDockWidget::visibilityChanged, this, [this](const bool visible) {
+      if (!initialized_) {
+        return;
+      }
       if (auto* toggle = action(QStringLiteral("projectHealth"))) {
         const QSignalBlocker blocker(toggle);
         toggle->setChecked(visible);

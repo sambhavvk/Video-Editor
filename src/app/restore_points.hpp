@@ -31,6 +31,6 @@ void appendNamedRestorePoint(const std::filesystem::path& recovery_directory,
                              const RestorePointEntry& entry);
 [[nodiscard]] std::filesystem::path makeRestorePointCheckpointPath(
     const std::filesystem::path& restore_points_directory, const QString& name,
-    std::uint64_t revision);
+    std::uint64_t revision, const QString& unique_id);
 
 } // namespace video_editor::app

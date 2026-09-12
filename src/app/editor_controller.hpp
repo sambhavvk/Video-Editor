@@ -464,7 +464,8 @@ private:
   [[nodiscard]] bool saveTo(const std::filesystem::path& destination, bool autosave = false);
   void configureAutosaveTimer();
   void autosaveCheckpoint();
-  [[nodiscard]] bool loadCheckpoint(const std::filesystem::path& checkpoint);
+  [[nodiscard]] bool loadCheckpoint(const std::filesystem::path& checkpoint,
+                                    bool bindAsCurrentProject = true);
   [[nodiscard]] bool loadWorkingRecovery(const std::filesystem::path& workingDatabase);
   void installProject(edit::Project project, std::filesystem::path workingPath,
                       std::unique_ptr<store::ProjectStore> store,
@@ -532,6 +533,7 @@ private:
   void refreshJobActivitySummary();
   void deferBackgroundJobAdmission();
   void updateBackgroundJobAdmissionPaused();
+  void stopProgramTransport();
   void recordBackgroundJobFailure(const QString& kind, const QString& subject,
                                   const QString& message);
   void refreshProgramViewerChrome();
