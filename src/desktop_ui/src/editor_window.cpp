@@ -4,8 +4,8 @@
 
 #include "video_editor/desktop_ui/editor_window.hpp"
 
-#include "video_editor/desktop_ui/export_dialog.hpp"
 #include "video_editor/desktop_ui/command_palette.hpp"
+#include "video_editor/desktop_ui/export_dialog.hpp"
 #include "video_editor/desktop_ui/keyboard_shortcuts_dialog.hpp"
 #include "video_editor/desktop_ui/panel_widgets.hpp"
 #include "video_editor/desktop_ui/program_output_window.hpp"
@@ -19,10 +19,10 @@
 #include <QActionGroup>
 #include <QApplication>
 #include <QCloseEvent>
+#include <QDesktopServices>
 #include <QDialog>
 #include <QDockWidget>
 #include <QFileDialog>
-#include <QDesktopServices>
 #include <QFileInfo>
 #include <QFrame>
 #include <QGroupBox>
@@ -32,13 +32,13 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QResizeEvent>
 #include <QScreen>
 #include <QSettings>
 #include <QShortcut>
 #include <QSignalBlocker>
 #include <QSplitter>
 #include <QStatusBar>
-#include <QSignalBlocker>
 #include <QStyle>
 #include <QTabBar>
 #include <QToolBar>
@@ -54,6 +54,48 @@ namespace {
 constexpr int kUiStateVersion = 1;
 constexpr auto kOrganization = "VideoEditor";
 constexpr auto kApplication = "VideoEditor";
+constexpr int kDefaultViewerHeight = 470;
+constexpr int kDefaultTimelineHeight = 350;
+constexpr int kCompactViewerHeight = 260;
+constexpr int kCompactTimelineHeight = 360;
+constexpr int kComfortableViewerHeight = 420;
+constexpr int kComfortableTimelineHeight = 320;
+
+bool isEditorChrome(const QWidget* widget, const QWidget* root) {
+  for (const QWidget* current = widget; current != nullptr && current != root;
+       current = current->parentWidget()) {
+    if (qobject_cast<const QMenu*>(current) != nullptr ||
+        qobject_cast<const QMenuBar*>(current) != nullptr ||
+        qobject_cast<const QDialog*>(current) != nullptr ||
+        qobject_cast<const QToolBar*>(current) != nullptr ||
+        qobject_cast<const QStatusBar*>(current) != nullptr) {
+      return true;
+    }
+  }
+  return false;
+}
+
+QDockWidget* dockAncestor(QWidget* widget) {
+  while (widget != nullptr) {
+    if (auto* dock = qobject_cast<QDockWidget*>(widget)) {
+      return dock;
+    }
+    if (qobject_cast<QMenu*>(widget) != nullptr || qobject_cast<QMenuBar*>(widget) != nullptr ||
+        qobject_cast<QDialog*>(widget) != nullptr) {
+      return nullptr;
+    }
+    widget = widget->parentWidget();
+  }
+  return nullptr;
+}
+
+void resizeShownDock(QMainWindow* window, QDockWidget* dock, int size,
+                     Qt::Orientation orientation) {
+  if (window == nullptr || dock == nullptr || dock->isHidden() || dock->isFloating()) {
+    return;
+  }
+  window->resizeDocks({dock}, {size}, orientation);
+}
 
 QString strippedActionText(const QAction* action) {
   return action == nullptr ? QString{} : action->text().remove(u'&').trimmed();
@@ -308,8 +350,7 @@ QString EditorWindow::commandUnavailableReason(const QAction* action) const {
     return needsSelection(tr("Select clips before pasting attributes"));
   }
   if (id == QStringLiteral("sourceMarkIn") || id == QStringLiteral("sourceMarkOut") ||
-      id == QStringLiteral("sourceRippleInsert") ||
-      id == QStringLiteral("sourceOverwriteInsert")) {
+      id == QStringLiteral("sourceRippleInsert") || id == QStringLiteral("sourceOverwriteInsert")) {
     return command_context_.hasSource ? QString{} : tr("Load a source clip first");
   }
   if (id == QStringLiteral("trimHeadToPlayhead") || id == QStringLiteral("trimTailToPlayhead") ||
@@ -375,7 +416,7 @@ void EditorWindow::focusInspector() {
 
 void EditorWindow::setWorkspace(Workspace workspace) {
   if (initialized_) {
-    session_layouts_.insert(workspace_, saveState(kUiStateVersion));
+    session_layouts_.insert(workspace_, restorableLayoutState());
   }
   if (workspace_ == workspace && initialized_) {
     updateWorkspaceActions();
@@ -390,9 +431,13 @@ void EditorWindow::setWorkspace(Workspace workspace) {
   } else {
     applyDefaultLayout(workspace_);
   }
+  panel_maximized_ = false;
+  layout_before_maximize_.clear();
+  compact_tier_ = CompactTier::Normal;
   updateWorkspaceActions();
   updateWorkspaceLabel();
   labelInteractiveChrome();
+  applyCompactLayoutForCurrentSize();
   emit workspaceChanged(workspace_);
 }
 
@@ -454,13 +499,16 @@ void EditorWindow::restoreUiState() {
   updateWorkspaceActions();
   updateWorkspaceLabel();
   restoreProgramOutputScreen();
+  compact_tier_ = CompactTier::Normal;
+  compact_height_ = false;
+  applyCompactLayoutForCurrentSize();
 }
 
 void EditorWindow::saveUiState() {
   if (settings_ == nullptr) {
     return;
   }
-  session_layouts_.insert(workspace_, saveState(kUiStateVersion));
+  session_layouts_.insert(workspace_, restorableLayoutState());
   settings_->setValue(QStringLiteral("ui/mainWindowGeometry"), saveGeometry());
   settings_->setValue(QStringLiteral("ui/lastWorkspace"), static_cast<int>(workspace_));
   settings_->setValue(QStringLiteral("ui/sourceMonitorVisible"), !source_container_->isHidden());
@@ -491,7 +539,8 @@ void EditorWindow::createCentralArea() {
   centralLayout->setContentsMargins(0, 0, 0, 0);
   centralLayout->setSpacing(0);
 
-  auto* vertical = new QSplitter(Qt::Vertical, central);
+  viewer_timeline_splitter_ = new QSplitter(Qt::Vertical, central);
+  auto* vertical = viewer_timeline_splitter_;
   vertical->setObjectName(QStringLiteral("viewerTimelineSplitter"));
   vertical->setAccessibleName(tr("Viewer and timeline divider"));
   vertical->setChildrenCollapsible(false);
@@ -549,12 +598,11 @@ void EditorWindow::createCentralArea() {
   monitor_focus_label_ = new QLabel(tr("Commands target: Program"), transport);
   monitor_focus_label_->setObjectName(QStringLiteral("monitorFocusLabel"));
   monitor_focus_label_->setAccessibleName(tr("Focused monitor"));
-  monitor_focus_label_->setAccessibleDescription(
-      tr("Shows whether keyboard transport and mark commands target the source or program monitor"));
+  monitor_focus_label_->setAccessibleDescription(tr(
+      "Shows whether keyboard transport and mark commands target the source or program monitor"));
   monitor_focus_label_->setFocusPolicy(Qt::NoFocus);
-  monitor_focus_label_->setMinimumWidth(monitor_focus_label_->fontMetrics().horizontalAdvance(
-                                           tr("Commands target: Program")) +
-                                       8);
+  monitor_focus_label_->setMinimumWidth(
+      monitor_focus_label_->fontMetrics().horizontalAdvance(tr("Commands target: Program")) + 8);
   transportLayout->addWidget(monitor_focus_label_);
   transportLayout->addSpacing(8);
   for (const auto* id : {"sourceRippleInsert", "sourceOverwriteInsert"}) {
@@ -605,9 +653,9 @@ void EditorWindow::createCentralArea() {
   trimLabel->setFont(trimFont);
   trimLayout->addWidget(trimLabel);
   trimLayout->addSpacing(12);
-  for (const auto* id : {"tool.select", "tool.rippleTrim", "tool.overwriteTrim", "tool.roll",
-                         "tool.slip", "tool.slide", "tool.razor", "tool.pen", "tool.hand",
-                         "tool.zoom"}) {
+  for (const auto* id :
+       {"tool.select", "tool.rippleTrim", "tool.overwriteTrim", "tool.roll", "tool.slip",
+        "tool.slide", "tool.razor", "tool.pen", "tool.hand", "tool.zoom"}) {
     auto* mode = makeActionButton(action(QString::fromLatin1(id)), precision_trim_);
     mode->setObjectName(QStringLiteral("precision.%1").arg(QString::fromLatin1(id)));
     mode->setToolButtonStyle(Qt::ToolButtonIconOnly);
@@ -615,7 +663,7 @@ void EditorWindow::createCentralArea() {
   }
   trimLayout->addSpacing(8);
   const auto addNudgeButton = [trimLayout, this](const char* suffix, const QString& label,
-                                                const QString& accessibleName) {
+                                                 const QString& accessibleName) {
     auto* button = new QToolButton(precision_trim_);
     button->setObjectName(QStringLiteral("precision.nudge.%1").arg(QString::fromLatin1(suffix)));
     button->setText(label);
@@ -634,8 +682,8 @@ void EditorWindow::createCentralArea() {
   split->setToolButtonStyle(Qt::ToolButtonTextOnly);
   trimLayout->addWidget(split);
   trimLayout->addStretch();
-  auto* hint = new QLabel(
-      tr("Alt+←/→ nudge · Shift=10 · Ctrl=ripple · V/C/P/H/Z/R/W/N/Y/U tools"), precision_trim_);
+  auto* hint = new QLabel(tr("Alt+←/→ nudge · Shift=10 · Ctrl=ripple · V/C/P/H/Z/R/W/N/Y/U tools"),
+                          precision_trim_);
   hint->setProperty("muted", true);
   trimLayout->addWidget(hint);
   precision_trim_->hide();
@@ -661,7 +709,7 @@ void EditorWindow::createCentralArea() {
   vertical->addWidget(timelineArea);
   vertical->setStretchFactor(0, 5);
   vertical->setStretchFactor(1, 4);
-  vertical->setSizes({470, 350});
+  vertical->setSizes({kDefaultViewerHeight, kDefaultTimelineHeight});
   centralLayout->addWidget(vertical, 1);
   setCentralWidget(central);
 }
@@ -760,7 +808,8 @@ void EditorWindow::createActions() {
   create(QStringLiteral("splitClip"), tr("Split Clip"), tr("Split selected clips at the playhead"),
          QKeySequence{tr("Ctrl+B")});
   create(QStringLiteral("selectAtPlayhead"), tr("Select at Playhead"),
-         tr("Select clips under the playhead on targeted unlocked tracks"), QKeySequence{Qt::Key_D});
+         tr("Select clips under the playhead on targeted unlocked tracks"),
+         QKeySequence{Qt::Key_D});
   create(QStringLiteral("seekPreviousEdit"), tr("Previous Edit"),
          tr("Seek to the previous edit point"), QKeySequence{Qt::Key_Up});
   create(QStringLiteral("seekNextEdit"), tr("Next Edit"), tr("Seek to the next edit point"),
@@ -781,22 +830,18 @@ void EditorWindow::createActions() {
   create(QStringLiteral("pasteClipsInsert"), tr("Paste Insert"),
          tr("Paste copied clips at the playhead and ripple"), QKeySequence::Paste);
   create(QStringLiteral("pasteClipsOverwrite"), tr("Paste Overwrite"),
-         tr("Paste copied clips at the playhead and overwrite"),
-         QKeySequence{tr("Ctrl+Alt+V")});
+         tr("Paste copied clips at the playhead and overwrite"), QKeySequence{tr("Ctrl+Alt+V")});
   create(QStringLiteral("duplicateClips"), tr("Duplicate"),
          tr("Duplicate the selection at the playhead"), QKeySequence{tr("Ctrl+Shift+D")});
   create(QStringLiteral("defaultTransition"), tr("Apply Default Transition"),
-         tr("Add a cross dissolve at the playhead or selected cuts"),
-         QKeySequence{tr("Ctrl+D")});
+         tr("Add a cross dissolve at the playhead or selected cuts"), QKeySequence{tr("Ctrl+D")});
   create(QStringLiteral("pasteClipAttributes"), tr("Paste Attributes"),
-         tr("Paste copied clip attributes onto the selection"),
-         QKeySequence{tr("Ctrl+Alt+A")});
+         tr("Paste copied clip attributes onto the selection"), QKeySequence{tr("Ctrl+Alt+A")});
   create(QStringLiteral("replaceClipMedia"), tr("Replace Clip Media"),
          tr("Replace the selected clip media from the loaded source"));
-  auto* toggleLinkedSelection = create(QStringLiteral("toggleLinkedSelection"),
-                                       tr("Linked Selection"),
-                                       tr("Expand selections to linked audio/video clips"),
-                                       QKeySequence{tr("Ctrl+L")});
+  auto* toggleLinkedSelection =
+      create(QStringLiteral("toggleLinkedSelection"), tr("Linked Selection"),
+             tr("Expand selections to linked audio/video clips"), QKeySequence{tr("Ctrl+L")});
   toggleLinkedSelection->setCheckable(true);
   toggleLinkedSelection->setChecked(true);
   create(QStringLiteral("unlinkClips"), tr("Unlink Clips"),
@@ -831,8 +876,8 @@ void EditorWindow::createActions() {
          tr("Remove the selection and leave a gap"), QKeySequence{Qt::Key_Delete});
   create(QStringLiteral("rippleDelete"), tr("Ripple Delete / Extract"),
          tr("Remove the selection and close the gap"), QKeySequence{tr("Shift+Delete")});
-  create(QStringLiteral("liftSelection"), tr("Lift"),
-         tr("Remove the selection and leave a gap"), QKeySequence{Qt::Key_Semicolon});
+  create(QStringLiteral("liftSelection"), tr("Lift"), tr("Remove the selection and leave a gap"),
+         QKeySequence{Qt::Key_Semicolon});
   create(QStringLiteral("extractSelection"), tr("Extract"),
          tr("Remove the selection and close the gap"), QKeySequence{Qt::Key_Apostrophe});
   create(QStringLiteral("nestSelectedClips"), tr("Nest Selected Clips"),
@@ -901,10 +946,9 @@ void EditorWindow::createActions() {
                   tr("Change source timing without moving the clip"), QKeySequence{tr("Y")});
   addTimelineTool(QStringLiteral("tool.slide"), tr("Slide"),
                   tr("Move a clip and trim its neighbours"), QKeySequence{tr("U")});
-  auto* trackSelectForward = addTimelineTool(QStringLiteral("tool.trackSelectForward"),
-                                             tr("Track Select Forward"),
-                                             tr("Select this clip and all later clips on the track"),
-                                             QKeySequence{Qt::Key_A});
+  auto* trackSelectForward = addTimelineTool(
+      QStringLiteral("tool.trackSelectForward"), tr("Track Select Forward"),
+      tr("Select this clip and all later clips on the track"), QKeySequence{Qt::Key_A});
   addTimelineTool(QStringLiteral("tool.razor"), tr("Razor"),
                   tr("Split clips by clicking; Shift splits every unlocked track"),
                   QKeySequence{Qt::Key_C});
@@ -934,8 +978,9 @@ void EditorWindow::createActions() {
   auto* precisionTrim = create(QStringLiteral("precisionTrim"), tr("Precision Trim Controls"),
                                tr("Show precision trim controls"), QKeySequence{tr("T")});
   precisionTrim->setCheckable(true);
-  auto* scopes = create(QStringLiteral("scopes"), tr("Scopes"),
-                        tr("Show Rec.709 waveform, vectorscope, and histogram"), QKeySequence{tr("Shift+3")});
+  auto* scopes =
+      create(QStringLiteral("scopes"), tr("Scopes"),
+             tr("Show Rec.709 waveform, vectorscope, and histogram"), QKeySequence{tr("Shift+3")});
   scopes->setCheckable(true);
   auto* safeGuides = create(QStringLiteral("safeGuides"), tr("Safe Guides"),
                             tr("Show title and action safe guides"));
@@ -951,6 +996,12 @@ void EditorWindow::createActions() {
       create(QStringLiteral("programFullscreen"), tr("Program Monitor Fullscreen"),
              tr("Show the program monitor fullscreen on this display"), QKeySequence{Qt::Key_F11});
   programFullscreen->setCheckable(true);
+  create(QStringLiteral("maximizeFocusedPanel"), tr("Maximize Focused Panel"),
+         tr("Expand the focused dock or central workspace; press again to restore"),
+         QKeySequence{QStringLiteral("`")});
+  create(QStringLiteral("resetWorkspaceLayout"), tr("Reset Workspace Layout"),
+         tr("Restore the default dock layout for the current workspace"),
+         QKeySequence{QStringLiteral("Ctrl+Alt+R")});
   create(QStringLiteral("commandPalette"), tr("Command Palette…"), tr("Search and run any command"),
          QKeySequence{tr("Ctrl+Shift+P")});
 
@@ -1127,6 +1178,10 @@ void EditorWindow::createActions() {
   connect(action(QStringLiteral("sourceOverwriteInsert")), &QAction::triggered, this,
           &EditorWindow::overwriteInsertFromSource);
   connect(programFullscreen, &QAction::triggered, this, &EditorWindow::toggleProgramFullscreen);
+  connect(action(QStringLiteral("maximizeFocusedPanel")), &QAction::triggered, this,
+          &EditorWindow::maximizeFocusedPanel);
+  connect(action(QStringLiteral("resetWorkspaceLayout")), &QAction::triggered, this,
+          &EditorWindow::resetWorkspaceLayout);
   applyTimelineToolIcons();
 }
 
@@ -1159,9 +1214,8 @@ void EditorWindow::refreshRecentProjectsMenu(const QStringList& paths,
       auto* recent = recent_projects_menu_->addAction(label);
       recent->setToolTip(path);
       recent->setStatusTip(path);
-      connect(recent, &QAction::triggered, this, [this, path] {
-        emit openRecentProjectRequested(path);
-      });
+      connect(recent, &QAction::triggered, this,
+              [this, path] { emit openRecentProjectRequested(path); });
     }
   }
   if (reopen_last_on_startup_action_ != nullptr) {
@@ -1266,6 +1320,8 @@ void EditorWindow::createMenus() {
   view->addAction(action(QStringLiteral("viewerClipInfo")));
   view->addAction(action(QStringLiteral("viewerSourceTimecode")));
   view->addAction(action(QStringLiteral("programFullscreen")));
+  view->addAction(action(QStringLiteral("maximizeFocusedPanel")));
+  view->addAction(action(QStringLiteral("resetWorkspaceLayout")));
   program_output_menu_ = view->addMenu(tr("Program monitor on display…"));
   program_output_menu_->setObjectName(QStringLiteral("programOutputMenu"));
   program_output_menu_->setAccessibleName(tr("Program monitor on display"));
@@ -1285,8 +1341,7 @@ void EditorWindow::createMenus() {
   keyboardPreferences->setObjectName(QStringLiteral("action.keyboardShortcutsPreferences"));
   connect(keyboardPreferences, &QAction::triggered, this,
           &EditorWindow::showKeyboardShortcutsPreferences);
-  reopen_last_on_startup_action_ =
-      preferences->addAction(tr("Reopen Last Project on Startup"));
+  reopen_last_on_startup_action_ = preferences->addAction(tr("Reopen Last Project on Startup"));
   reopen_last_on_startup_action_->setObjectName(QStringLiteral("action.reopenLastOnStartup"));
   reopen_last_on_startup_action_->setCheckable(true);
   reopen_last_on_startup_action_->setChecked(true);
@@ -1392,8 +1447,11 @@ void EditorWindow::createStatusBar() {
 }
 
 void EditorWindow::connectControllerSurface() {
-  connect(qApp, &QApplication::focusChanged, this, [this](QWidget*, QWidget*) {
+  connect(qApp, &QApplication::focusChanged, this, [this](QWidget*, QWidget* now) {
     updateFocusedMonitorLabel();
+    if (now != nullptr && !isEditorChrome(now, this)) {
+      last_content_focus_ = now;
+    }
   });
   updateFocusedMonitorLabel();
   connect(media_bin_, &MediaBinWidget::importRequested, this, &EditorWindow::importMediaRequested);
@@ -1415,9 +1473,8 @@ void EditorWindow::connectControllerSurface() {
           &EditorWindow::viewerTransformMoved);
   connect(program_viewer_, &ProgramViewer::viewerTransformReleased, this,
           &EditorWindow::viewerTransformReleased);
-  connect(source_viewer_, &ProgramViewer::togglePlaybackRequested, this, [this] {
-    emit sourcePlaybackRateRequested(shuttle_rate_ == 0.0 ? 1.0 : 0.0);
-  });
+  connect(source_viewer_, &ProgramViewer::togglePlaybackRequested, this,
+          [this] { emit sourcePlaybackRateRequested(shuttle_rate_ == 0.0 ? 1.0 : 0.0); });
   connect(source_viewer_, &ProgramViewer::markInRequested, this, &EditorWindow::markSourceIn);
   connect(source_viewer_, &ProgramViewer::markOutRequested, this, &EditorWindow::markSourceOut);
   connect(action(QStringLiteral("nestSelectedClips")), &QAction::triggered, this,
@@ -1477,19 +1534,19 @@ void EditorWindow::connectControllerSurface() {
           &EditorWindow::sourceTimecodeToggled);
   connect(marker_list_, &MarkerListWidget::markerActivated, this,
           &EditorWindow::markerListJumpRequested);
-  connect(media_bin_, &MediaBinWidget::revealInFilesRequested, this,
-          [this](const QString& mediaId) {
-            if (media_bin_ != nullptr) {
-              const auto items = media_bin_->items();
-              const auto found = std::find_if(items.begin(), items.end(),
-                                              [&mediaId](const MediaItemView& item) {
-                                                return item.id == mediaId;
-                                              });
-              if (found != items.end() && !found->filePath.isEmpty()) {
-                QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(found->filePath).absolutePath()));
-              }
-            }
-          });
+  connect(
+      media_bin_, &MediaBinWidget::revealInFilesRequested, this, [this](const QString& mediaId) {
+        if (media_bin_ != nullptr) {
+          const auto items = media_bin_->items();
+          const auto found =
+              std::find_if(items.begin(), items.end(),
+                           [&mediaId](const MediaItemView& item) { return item.id == mediaId; });
+          if (found != items.end() && !found->filePath.isEmpty()) {
+            QDesktopServices::openUrl(
+                QUrl::fromLocalFile(QFileInfo(found->filePath).absolutePath()));
+          }
+        }
+      });
   connect(action(QStringLiteral("zoomInTimeline")), &QAction::triggered, timeline_,
           &TimelineWidget::zoomIn);
   connect(action(QStringLiteral("zoomOutTimeline")), &QAction::triggered, timeline_,
@@ -1512,9 +1569,7 @@ void EditorWindow::connectControllerSurface() {
   bindTool("tool.pen", TimelineWidget::ToolMode::Pen);
   bindTool("tool.hand", TimelineWidget::ToolMode::Hand);
   bindTool("tool.zoom", TimelineWidget::ToolMode::Zoom);
-  connect(timeline_, &TimelineWidget::toolModeChanged, this, [this] {
-    syncTimelineToolActions();
-  });
+  connect(timeline_, &TimelineWidget::toolModeChanged, this, [this] { syncTimelineToolActions(); });
   syncTimelineToolActions();
   const auto bindNudge = [this](const char* objectName, int frames) {
     if (auto* button = precision_trim_->findChild<QToolButton*>(QString::fromLatin1(objectName))) {
@@ -1564,6 +1619,153 @@ void EditorWindow::labelInteractiveChrome() {
     }
     ++tabIndex;
   }
+}
+
+void EditorWindow::resizeEvent(QResizeEvent* event) {
+  QMainWindow::resizeEvent(event);
+  if (initialized_) {
+    applyCompactLayoutForCurrentSize();
+  }
+}
+
+QList<QDockWidget*> EditorWindow::dockWidgets() const {
+  return {media_dock_,    inspector_dock_, effects_dock_, mixer_dock_,
+          captions_dock_, deliver_dock_,   scopes_dock_};
+}
+
+QDockWidget* EditorWindow::focusedDockWidget() const {
+  if (QDockWidget* dock = dockAncestor(QApplication::focusWidget())) {
+    return dock->isHidden() ? nullptr : dock;
+  }
+  QDockWidget* dock = dockAncestor(last_content_focus_);
+  if (dock == nullptr || dock->isHidden()) {
+    return nullptr;
+  }
+  return dock;
+}
+
+QByteArray EditorWindow::restorableLayoutState() const {
+  if (panel_maximized_ && !layout_before_maximize_.isEmpty()) {
+    return layout_before_maximize_;
+  }
+  return saveState(kUiStateVersion);
+}
+
+void EditorWindow::applyCompactLayoutForCurrentSize() {
+  if (panel_maximized_) {
+    return;
+  }
+  const int window_width = width();
+  const int window_height = height();
+  const auto tier = window_width < 1040   ? CompactTier::Compact
+                    : window_width < 1280 ? CompactTier::Medium
+                                          : CompactTier::Normal;
+  if (tier != compact_tier_) {
+    compact_tier_ = tier;
+    switch (workspace_) {
+    case Workspace::Import: {
+      const int media_width =
+          tier == CompactTier::Compact ? 210 : (tier == CompactTier::Medium ? 250 : 320);
+      const int inspector_width =
+          tier == CompactTier::Compact ? 220 : (tier == CompactTier::Medium ? 260 : 290);
+      resizeShownDock(this, media_dock_, media_width, Qt::Horizontal);
+      resizeShownDock(this, inspector_dock_, inspector_width, Qt::Horizontal);
+      break;
+    }
+    case Workspace::Edit: {
+      const int media_width =
+          tier == CompactTier::Compact ? 200 : (tier == CompactTier::Medium ? 235 : 285);
+      const int inspector_width =
+          tier == CompactTier::Compact ? 220 : (tier == CompactTier::Medium ? 250 : 310);
+      resizeShownDock(this, media_dock_, media_width, Qt::Horizontal);
+      QDockWidget* right_dock = nullptr;
+      for (auto* dock : {inspector_dock_, effects_dock_, captions_dock_, deliver_dock_}) {
+        if (dock != nullptr && dock->isVisible()) {
+          right_dock = dock;
+          break;
+        }
+      }
+      if (right_dock == nullptr) {
+        for (auto* dock : {inspector_dock_, effects_dock_, captions_dock_, deliver_dock_}) {
+          if (dock != nullptr && !dock->isHidden()) {
+            right_dock = dock;
+            break;
+          }
+        }
+      }
+      resizeShownDock(this, right_dock, inspector_width, Qt::Horizontal);
+      break;
+    }
+    case Workspace::AudioCaptions: {
+      const int captions_width =
+          tier == CompactTier::Compact ? 300 : (tier == CompactTier::Medium ? 340 : 370);
+      const int mixer_height =
+          tier == CompactTier::Compact ? 210 : (tier == CompactTier::Medium ? 235 : 260);
+      resizeShownDock(this, captions_dock_, captions_width, Qt::Horizontal);
+      resizeShownDock(this, mixer_dock_, mixer_height, Qt::Vertical);
+      break;
+    }
+    case Workspace::Deliver: {
+      const int deliver_width =
+          tier == CompactTier::Compact ? 320 : (tier == CompactTier::Medium ? 350 : 380);
+      resizeShownDock(this, deliver_dock_, deliver_width, Qt::Horizontal);
+      break;
+    }
+    }
+  }
+
+  if (viewer_timeline_splitter_ == nullptr) {
+    return;
+  }
+  const bool compact_height = window_height < 760;
+  if (compact_height != compact_height_) {
+    compact_height_ = compact_height;
+    viewer_timeline_splitter_->setSizes(
+        compact_height ? QList<int>{kCompactViewerHeight, kCompactTimelineHeight}
+                       : QList<int>{kComfortableViewerHeight, kComfortableTimelineHeight});
+  }
+}
+
+void EditorWindow::maximizeFocusedPanel() {
+  if (panel_maximized_) {
+    if (!layout_before_maximize_.isEmpty()) {
+      restoreState(layout_before_maximize_, kUiStateVersion);
+    }
+    layout_before_maximize_.clear();
+    panel_maximized_ = false;
+    compact_tier_ = CompactTier::Normal;
+    compact_height_ = false;
+    applyCompactLayoutForCurrentSize();
+    return;
+  }
+
+  layout_before_maximize_ = saveState(kUiStateVersion);
+  if (QDockWidget* focused_dock = focusedDockWidget()) {
+    for (auto* dock : dockWidgets()) {
+      dock->setVisible(dock == focused_dock);
+    }
+    focused_dock->raise();
+  } else {
+    for (auto* dock : dockWidgets()) {
+      dock->hide();
+    }
+  }
+  panel_maximized_ = true;
+}
+
+void EditorWindow::resetWorkspaceLayout() {
+  panel_maximized_ = false;
+  layout_before_maximize_.clear();
+  session_layouts_.remove(workspace_);
+  applyDefaultLayout(workspace_);
+  compact_tier_ = CompactTier::Normal;
+  compact_height_ = false;
+  if (viewer_timeline_splitter_ != nullptr) {
+    viewer_timeline_splitter_->setSizes({kDefaultViewerHeight, kDefaultTimelineHeight});
+  }
+  applyCompactLayoutForCurrentSize();
+  showTransientMessage(
+      tr("Restored the default %1 workspace layout").arg(workspaceDisplayName(workspace_)));
 }
 
 void EditorWindow::applyDefaultLayout(Workspace workspace) {
@@ -1652,8 +1854,7 @@ bool EditorWindow::sourceMonitorHasFocus() const {
     return false;
   }
   QWidget* focus = QApplication::focusWidget();
-  return focus != nullptr &&
-         (focus == source_viewer_ || source_container_->isAncestorOf(focus));
+  return focus != nullptr && (focus == source_viewer_ || source_container_->isAncestorOf(focus));
 }
 
 void EditorWindow::updateFocusedMonitorLabel() {
@@ -1951,14 +2152,13 @@ void EditorWindow::setProgramOutputScreen(QScreen* screen) {
             &EditorWindow::programOutputPresentationResized);
     connect(program_output_window_.get(), &ProgramOutputWindow::nativePresentationLost, this,
             &EditorWindow::programOutputPresentationLost);
-    connect(program_output_window_.get(), &ProgramOutputWindow::outputClosed, this,
-            [this] {
-              program_output_window_.reset();
-              if (settings_ != nullptr) {
-                settings_->remove(QStringLiteral("display/programOutputScreen"));
-              }
-              emit programOutputClosed();
-            });
+    connect(program_output_window_.get(), &ProgramOutputWindow::outputClosed, this, [this] {
+      program_output_window_.reset();
+      if (settings_ != nullptr) {
+        settings_->remove(QStringLiteral("display/programOutputScreen"));
+      }
+      emit programOutputClosed();
+    });
   }
 
   program_output_window_->showOnScreen(screen);
@@ -1983,13 +2183,11 @@ void EditorWindow::rebuildProgramOutputMenu() {
     if (screen == nullptr) {
       continue;
     }
-    const QString label =
-        tr("Display %1 — %2").arg(index + 1).arg(screen->name());
+    const QString label = tr("Display %1 — %2").arg(index + 1).arg(screen->name());
     auto* screenAction = program_output_menu_->addAction(label);
     screenAction->setObjectName(QStringLiteral("programOutputScreen.%1").arg(index));
-    connect(screenAction, &QAction::triggered, this, [this, screen] {
-      setProgramOutputScreen(screen);
-    });
+    connect(screenAction, &QAction::triggered, this,
+            [this, screen] { setProgramOutputScreen(screen); });
   }
 }
 

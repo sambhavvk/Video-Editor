@@ -16,27 +16,29 @@
 #include <QContextMenuEvent>
 #include <QCoreApplication>
 #include <QDockWidget>
-#include <QGuiApplication>
 #include <QFileInfo>
+#include <QGuiApplication>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMenu>
+#include <QMenuBar>
 #include <QMouseEvent>
-#include <QProgressBar>
 #include <QPointer>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QScrollBar>
 #include <QSettings>
 #include <QSignalSpy>
 #include <QSlider>
+#include <QSplitter>
 #include <QTableWidget>
-#include <QTreeWidget>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
 #include <QToolBar>
 #include <QToolButton>
+#include <QTreeWidget>
 #include <QWheelEvent>
 
 using video_editor::desktop_ui::EditorWindow;
@@ -58,6 +60,7 @@ private slots:
   void exposesTransportControllerSignals();
   void sourceTransportMatchesProgramShuttle();
   void viewerFocusAndInsertControlsAreVisible();
+  void compactLayoutAndWorkspaceReset();
   void markInOutActionsTargetFocusedViewer();
   void remapsAndPersistsShortcutBindings();
   void mediaBinShowsProxyLifecycle();
@@ -176,14 +179,18 @@ void EditorWindowTest::constructsCompleteShell() {
   QCOMPARE(window.action(QStringLiteral("seekPreviousEdit"))->shortcut(), QKeySequence{Qt::Key_Up});
   QCOMPARE(window.action(QStringLiteral("seekNextEdit"))->shortcut(), QKeySequence{Qt::Key_Down});
   QCOMPARE(window.action(QStringLiteral("matchFrame"))->shortcut(), QKeySequence{Qt::Key_F});
-  QCOMPARE(window.action(QStringLiteral("trimHeadToPlayhead"))->shortcut(), QKeySequence{Qt::Key_Q});
-  QCOMPARE(window.action(QStringLiteral("trimTailToPlayhead"))->shortcut(), QKeySequence{Qt::Key_E});
-  QCOMPARE(window.action(QStringLiteral("tool.trackSelectForward"))->shortcut(), QKeySequence{Qt::Key_A});
+  QCOMPARE(window.action(QStringLiteral("trimHeadToPlayhead"))->shortcut(),
+           QKeySequence{Qt::Key_Q});
+  QCOMPARE(window.action(QStringLiteral("trimTailToPlayhead"))->shortcut(),
+           QKeySequence{Qt::Key_E});
+  QCOMPARE(window.action(QStringLiteral("tool.trackSelectForward"))->shortcut(),
+           QKeySequence{Qt::Key_A});
   QCOMPARE(window.action(QStringLiteral("tool.razor"))->shortcut(), QKeySequence{Qt::Key_C});
   QCOMPARE(window.action(QStringLiteral("tool.pen"))->shortcut(), QKeySequence{Qt::Key_P});
   QCOMPARE(window.action(QStringLiteral("tool.hand"))->shortcut(), QKeySequence{Qt::Key_H});
   QCOMPARE(window.action(QStringLiteral("tool.zoom"))->shortcut(), QKeySequence{Qt::Key_Z});
-  QCOMPARE(window.action(QStringLiteral("liftSelection"))->shortcut(), QKeySequence{Qt::Key_Semicolon});
+  QCOMPARE(window.action(QStringLiteral("liftSelection"))->shortcut(),
+           QKeySequence{Qt::Key_Semicolon});
   QCOMPARE(window.action(QStringLiteral("extractSelection"))->shortcut(),
            QKeySequence{Qt::Key_Apostrophe});
   QCOMPARE(window.action(QStringLiteral("workspace.0"))->shortcut(),
@@ -289,8 +296,7 @@ void EditorWindowTest::precisionTrimPanelControlsTimeline() {
   QCOMPARE(window.timeline()->toolMode(), TimelineWidget::ToolMode::OverwriteTrim);
 
   window.setTimelineView(
-      10'000, 1'000,
-      {{QStringLiteral("video-1"), QStringLiteral("Video 1"), TrackKind::Video}},
+      10'000, 1'000, {{QStringLiteral("video-1"), QStringLiteral("Video 1"), TrackKind::Video}},
       {{QStringLiteral("clip-a"), QStringLiteral("Clip A"), 0, 1'000, 2'000, QColor{}, true}});
   QSignalSpy commits(window.timeline(), &TimelineWidget::clipEditCommitted);
   auto* nudgePlusOne = panel->findChild<QToolButton*>(QStringLiteral("precision.nudge.plus1"));
@@ -331,8 +337,7 @@ void EditorWindowTest::sourceTransportMatchesProgramShuttle() {
            QKeySequence{Qt::SHIFT | Qt::Key_Comma});
   QCOMPARE(window.action(QStringLiteral("sourceOverwriteInsert"))->shortcut(),
            QKeySequence{Qt::SHIFT | Qt::Key_Period});
-  QCOMPARE(window.action(QStringLiteral("previousFrame"))->shortcut(),
-           QKeySequence{Qt::Key_Comma});
+  QCOMPARE(window.action(QStringLiteral("previousFrame"))->shortcut(), QKeySequence{Qt::Key_Comma});
   QCOMPARE(window.action(QStringLiteral("nextFrame"))->shortcut(), QKeySequence{Qt::Key_Period});
 
   QSignalSpy source_shuttle(&window, &EditorWindow::sourceStepShuttleRequested);
@@ -424,7 +429,8 @@ void EditorWindowTest::viewerFocusAndInsertControlsAreVisible() {
   QTRY_VERIFY(window.programViewer()->hasFocus());
   QCOMPARE(focus_label->text(), QStringLiteral("Commands target: Program"));
 
-  auto* insert_button = window.findChild<QToolButton*>(QStringLiteral("transport.sourceRippleInsert"));
+  auto* insert_button =
+      window.findChild<QToolButton*>(QStringLiteral("transport.sourceRippleInsert"));
   auto* overwrite_button =
       window.findChild<QToolButton*>(QStringLiteral("transport.sourceOverwriteInsert"));
   QVERIFY(insert_button != nullptr);
@@ -457,6 +463,86 @@ void EditorWindowTest::viewerFocusAndInsertControlsAreVisible() {
   window.setSourceMonitorVisible(false);
   QVERIFY(!window.sourceMonitorHasFocus());
   QCOMPARE(focus_label->text(), QStringLiteral("Commands target: Program"));
+}
+
+void EditorWindowTest::compactLayoutAndWorkspaceReset() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  auto settings = temporarySettings(directory);
+  {
+    EditorWindow window(settings.get());
+    window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+
+    auto* maximize = window.action(QStringLiteral("maximizeFocusedPanel"));
+    auto* reset = window.action(QStringLiteral("resetWorkspaceLayout"));
+    QVERIFY(maximize != nullptr);
+    QVERIFY(reset != nullptr);
+    QCOMPARE(maximize->shortcut(), QKeySequence{QStringLiteral("`")});
+    QCOMPARE(reset->shortcut(), QKeySequence{QStringLiteral("Ctrl+Alt+R")});
+
+    auto* media_dock = requireDock(window, "mediaDock");
+    const int default_width = media_dock->width();
+    window.resize(980, 680);
+    QCoreApplication::processEvents();
+    QVERIFY(window.mediaBin() != nullptr);
+    QVERIFY(window.mediaBin()->isVisible());
+    QVERIFY(media_dock->width() < default_width);
+
+    auto* splitter = window.findChild<QSplitter*>(QStringLiteral("viewerTimelineSplitter"));
+    QVERIFY(splitter != nullptr);
+    const auto compact_sizes = splitter->sizes();
+    QVERIFY(compact_sizes.at(0) < compact_sizes.at(1));
+
+    const int compact_edit_width = media_dock->width();
+    window.setWorkspace(Workspace::Import);
+    QCoreApplication::processEvents();
+    QVERIFY(requireDock(window, "mediaDock")->width() <= compact_edit_width + 40);
+
+    window.setWorkspace(Workspace::Edit);
+    QCoreApplication::processEvents();
+    window.resize(1440, 900);
+    QCoreApplication::processEvents();
+    requireDock(window, "effectsDock")->raise();
+    QCoreApplication::processEvents();
+    const int effects_tab_width = media_dock->width();
+    window.resize(980, 680);
+    QCoreApplication::processEvents();
+    QVERIFY(media_dock->width() < effects_tab_width);
+
+    window.inspector()->setFocus(Qt::OtherFocusReason);
+    QCoreApplication::processEvents();
+    window.menuBar()->setFocus(Qt::OtherFocusReason);
+    QCoreApplication::processEvents();
+    maximize->trigger();
+    QVERIFY(!window.mediaBin()->isVisible());
+    QVERIFY(window.inspector()->isVisible());
+
+    maximize->trigger();
+    QCoreApplication::processEvents();
+    QVERIFY(window.mediaBin()->isVisible());
+
+    splitter->setSizes({520, 80});
+    media_dock->hide();
+    reset->trigger();
+    QCoreApplication::processEvents();
+    QVERIFY(media_dock->isVisible());
+    QVERIFY(window.inspector()->isVisible());
+    const auto reset_sizes = splitter->sizes();
+    QVERIFY(reset_sizes.at(0) < reset_sizes.at(1));
+
+    window.inspector()->setFocus(Qt::OtherFocusReason);
+    QCoreApplication::processEvents();
+    maximize->trigger();
+    QVERIFY(!window.mediaBin()->isVisible());
+    window.saveUiState();
+  }
+
+  EditorWindow restored(settings.get());
+  restored.show();
+  QVERIFY(QTest::qWaitForWindowExposed(&restored));
+  QVERIFY(restored.mediaBin()->isVisible());
+  QVERIFY(restored.inspector()->isVisible());
 }
 
 void EditorWindowTest::markInOutActionsTargetFocusedViewer() {
@@ -514,8 +600,7 @@ void EditorWindowTest::remapsAndPersistsShortcutBindings() {
 
   EditorWindow restored(settings.get());
   QCOMPARE(restored.action(QStringLiteral("splitClip"))->shortcut(), remapped);
-  QVERIFY(!restored
-               .applyShortcutBinding(QStringLiteral("splitClip"), QKeySequence{Qt::Key_J}, true)
+  QVERIFY(!restored.applyShortcutBinding(QStringLiteral("splitClip"), QKeySequence{Qt::Key_J}, true)
                .isEmpty());
   QCOMPARE(restored.action(QStringLiteral("reverse"))->shortcut(), QKeySequence{Qt::Key_J});
 }
@@ -1319,9 +1404,8 @@ void EditorWindowTest::timelineOpacityEnvelopeAndPenTool() {
   clip.envelopeStatic = 1.0;
   clip.envelopeEffectBase = 1.0;
   timeline.resize(900, 260);
-  timeline.setTimeline(10'000, 1'000,
-                       {{QStringLiteral("video-1"), QStringLiteral("V1"), TrackKind::Video}},
-                       {clip});
+  timeline.setTimeline(
+      10'000, 1'000, {{QStringLiteral("video-1"), QStringLiteral("V1"), TrackKind::Video}}, {clip});
   timeline.setPixelsPerSecond(100.0);
   timeline.horizontalScrollBar()->setValue(0);
   timeline.show();
@@ -1461,13 +1545,11 @@ void EditorWindowTest::timelineCanCreateTracksWithoutAnExistingTrack() {
 void EditorWindowTest::timelineGapContextMenuCanAddTracks() {
   TimelineWidget timeline;
   timeline.resize(900, 180);
-  timeline.setTimeline(
-      10'000, 1'000,
-      {{QStringLiteral("video-1"), QStringLiteral("Video 1"), TrackKind::Video},
-       {QStringLiteral("audio-1"), QStringLiteral("Audio 1"), TrackKind::Audio}},
-      {{QStringLiteral("clip-a"), QStringLiteral("Clip A"), 0, 1'000, 2'000}});
-  timeline.setGaps(
-      {{QStringLiteral("gap-a1-full"), QStringLiteral("audio-1"), 1, 0, 10'000}});
+  timeline.setTimeline(10'000, 1'000,
+                       {{QStringLiteral("video-1"), QStringLiteral("Video 1"), TrackKind::Video},
+                        {QStringLiteral("audio-1"), QStringLiteral("Audio 1"), TrackKind::Audio}},
+                       {{QStringLiteral("clip-a"), QStringLiteral("Clip A"), 0, 1'000, 2'000}});
+  timeline.setGaps({{QStringLiteral("gap-a1-full"), QStringLiteral("audio-1"), 1, 0, 10'000}});
   timeline.setPixelsPerSecond(100.0);
   timeline.show();
   QCoreApplication::processEvents();
@@ -1521,7 +1603,8 @@ void EditorWindowTest::mediaBinContextMenuCanInsertAtPlayhead() {
   media_bin.show();
   QCoreApplication::processEvents();
 
-  QSignalSpy insertRequested(&media_bin, &video_editor::desktop_ui::MediaBinWidget::insertRequested);
+  QSignalSpy insertRequested(&media_bin,
+                             &video_editor::desktop_ui::MediaBinWidget::insertRequested);
   const QPoint menuPoint = table->visualRect(table->model()->index(0, 0)).center();
 
   QMenu* menu = nullptr;
@@ -1555,23 +1638,20 @@ void EditorWindowTest::mediaBinTreeFiltersByTags() {
   QVERIFY(table != nullptr);
 
   const QString folder_id = QStringLiteral("folder-1");
-  media_bin.setBins({{.id = folder_id,
-                      .name = QStringLiteral("Camera"),
-                      .isSmart = false},
+  media_bin.setBins({{.id = folder_id, .name = QStringLiteral("Camera"), .isSmart = false},
                      {.id = QStringLiteral("smart-1"),
                       .name = QStringLiteral("Hero shots"),
                       .isSmart = true,
                       .smartTags = {QStringLiteral("hero")}}});
-  media_bin.setItems(
-      {{.id = QStringLiteral("asset-a"),
-        .displayName = QStringLiteral("wide.mov"),
-        .metadataTitle = QStringLiteral("Wide"),
-        .binId = folder_id,
-        .tags = {QStringLiteral("hero")}},
-       {.id = QStringLiteral("asset-b"),
-        .displayName = QStringLiteral("tight.mov"),
-        .metadataTitle = QStringLiteral("Tight"),
-        .tags = {QStringLiteral("b-roll")}}});
+  media_bin.setItems({{.id = QStringLiteral("asset-a"),
+                       .displayName = QStringLiteral("wide.mov"),
+                       .metadataTitle = QStringLiteral("Wide"),
+                       .binId = folder_id,
+                       .tags = {QStringLiteral("hero")}},
+                      {.id = QStringLiteral("asset-b"),
+                       .displayName = QStringLiteral("tight.mov"),
+                       .metadataTitle = QStringLiteral("Tight"),
+                       .tags = {QStringLiteral("b-roll")}}});
 
   for (int row = 0; row < table->rowCount(); ++row) {
     QVERIFY(!table->isRowHidden(row));
@@ -1584,8 +1664,8 @@ void EditorWindowTest::mediaBinTreeFiltersByTags() {
 
   search->clear();
   QCoreApplication::processEvents();
-  const auto smart_items = tree->findItems(QStringLiteral("Hero shots (smart)"),
-                                           Qt::MatchExactly | Qt::MatchRecursive);
+  const auto smart_items =
+      tree->findItems(QStringLiteral("Hero shots (smart)"), Qt::MatchExactly | Qt::MatchRecursive);
   QVERIFY(!smart_items.isEmpty());
   tree->setCurrentItem(smart_items.front());
   QCoreApplication::processEvents();

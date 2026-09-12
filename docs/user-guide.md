@@ -268,6 +268,11 @@ reports a local diagnostic, and disables later GPU attempts until restart. The P
 transient message identify an active backend. The path provides neither zero-copy decode, HDR tone
 mapping, native presentation, nor a full native GPU effects/color graph.
 
+At **980×680** and other compact sizes the shell narrows dock widths and gives the timeline a
+larger share of the height. **View > Maximize Focused Panel** (`) expands the focused dock or the
+central viewer/timeline area; press again to restore. **View > Reset Workspace Layout**
+(`Ctrl+Alt+R`) restores the default arrangement for the active workspace.
+
 The source and program monitors label their role, show the focused monitor with a blue outline,
 and display **Source time** or **Sequence time** under the picture. The transport bar reports
 **Commands target: Source** or **Program** and exposes **Insert from Source** and

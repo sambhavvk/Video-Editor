@@ -12,6 +12,7 @@
 #include <QHash>
 #include <QKeySequence>
 #include <QMainWindow>
+#include <QPointer>
 #include <memory>
 
 class QAction;
@@ -56,8 +57,7 @@ public:
   }
   [[nodiscard]] QAction* action(const QString& id) const;
   [[nodiscard]] QKeySequence shortcutDefault(const QString& commandId) const;
-  [[nodiscard]] QString applyShortcutBinding(const QString& commandId,
-                                             const QKeySequence& shortcut,
+  [[nodiscard]] QString applyShortcutBinding(const QString& commandId, const QKeySequence& shortcut,
                                              bool replaceConflicts = false);
   void resetShortcutBinding(const QString& commandId);
   [[nodiscard]] ProgramViewer* programViewer() const noexcept {
@@ -256,8 +256,10 @@ signals:
 
 protected:
   void closeEvent(QCloseEvent* event) override;
+  void resizeEvent(QResizeEvent* event) override;
 
 private:
+  enum class CompactTier { Normal, Medium, Compact };
   void createCentralArea();
   void createPanels();
   void createActions();
@@ -270,6 +272,12 @@ private:
   void connectScopesDock();
   void labelInteractiveChrome();
   void applyDefaultLayout(Workspace workspace);
+  void applyCompactLayoutForCurrentSize();
+  void maximizeFocusedPanel();
+  void resetWorkspaceLayout();
+  [[nodiscard]] QDockWidget* focusedDockWidget() const;
+  [[nodiscard]] QList<QDockWidget*> dockWidgets() const;
+  [[nodiscard]] QByteArray restorableLayoutState() const;
   void updateWorkspaceActions();
   void updateWorkspaceLabel();
   void syncTimelineToolActions();
@@ -314,6 +322,12 @@ private:
   QWidget* source_container_{nullptr};
   QFrame* precision_trim_{nullptr};
   QTabBar* sequence_tab_bar_{nullptr};
+  QSplitter* viewer_timeline_splitter_{nullptr};
+  CompactTier compact_tier_{CompactTier::Normal};
+  bool compact_height_{false};
+  bool panel_maximized_{false};
+  QByteArray layout_before_maximize_;
+  QPointer<QWidget> last_content_focus_;
 
   MediaBinWidget* media_bin_{nullptr};
   InspectorWidget* inspector_{nullptr};
