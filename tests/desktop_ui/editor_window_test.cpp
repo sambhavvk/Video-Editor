@@ -57,6 +57,7 @@ private slots:
   void precisionTrimPanelControlsTimeline();
   void exposesTransportControllerSignals();
   void sourceTransportMatchesProgramShuttle();
+  void viewerFocusAndInsertControlsAreVisible();
   void markInOutActionsTargetFocusedViewer();
   void remapsAndPersistsShortcutBindings();
   void mediaBinShowsProxyLifecycle();
@@ -383,6 +384,79 @@ void EditorWindowTest::sourceTransportMatchesProgramShuttle() {
   QCOMPARE(source_frame.count(), 2);
   QCOMPARE(playback.count(), 0);
   QCOMPARE(media_search->text(), QStringLiteral("hello"));
+}
+
+void EditorWindowTest::viewerFocusAndInsertControlsAreVisible() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  auto settings = temporarySettings(directory);
+  EditorWindow window(settings.get());
+  window.setSourceMonitorVisible(true);
+  window.show();
+  QVERIFY(QTest::qWaitForWindowExposed(&window));
+
+  QCOMPARE(window.programViewer()->title(), QStringLiteral("Program"));
+  QCOMPARE(window.sourceViewer()->title(), QStringLiteral("Source"));
+  QCOMPARE(window.programViewer()->timecodeCaption(), QStringLiteral("Sequence time"));
+  QCOMPARE(window.sourceViewer()->timecodeCaption(), QStringLiteral("Source time"));
+  QCOMPARE(window.sourceViewer()->accessibleName(), QStringLiteral("Source viewer"));
+  QVERIFY(window.sourceViewer()->accessibleDescription().contains(QStringLiteral("source"),
+                                                                  Qt::CaseInsensitive));
+  QVERIFY(!window.sourceViewer()->accessibleDescription().contains(
+      QStringLiteral("current sequence"), Qt::CaseInsensitive));
+
+  auto* clip_info = window.action(QStringLiteral("viewerClipInfo"));
+  auto* safe_guides = window.action(QStringLiteral("safeGuides"));
+  QVERIFY(clip_info != nullptr);
+  QVERIFY(safe_guides != nullptr);
+  QVERIFY(clip_info->isCheckable());
+  QVERIFY(safe_guides->isCheckable());
+  QVERIFY(clip_info->isChecked());
+  QVERIFY(!window.programViewer()->safeGuidesVisible());
+  safe_guides->setChecked(true);
+  QVERIFY(window.programViewer()->safeGuidesVisible());
+  safe_guides->setChecked(false);
+  QVERIFY(!window.programViewer()->safeGuidesVisible());
+
+  auto* focus_label = window.findChild<QLabel*>(QStringLiteral("monitorFocusLabel"));
+  QVERIFY(focus_label != nullptr);
+  window.programViewer()->setFocus(Qt::OtherFocusReason);
+  QTRY_VERIFY(window.programViewer()->hasFocus());
+  QCOMPARE(focus_label->text(), QStringLiteral("Commands target: Program"));
+
+  auto* insert_button = window.findChild<QToolButton*>(QStringLiteral("transport.sourceRippleInsert"));
+  auto* overwrite_button =
+      window.findChild<QToolButton*>(QStringLiteral("transport.sourceOverwriteInsert"));
+  QVERIFY(insert_button != nullptr);
+  QVERIFY(overwrite_button != nullptr);
+  QVERIFY(!insert_button->text().isEmpty());
+  QVERIFY(!overwrite_button->text().isEmpty());
+  QCOMPARE(insert_button->focusPolicy(), Qt::NoFocus);
+  QCOMPARE(overwrite_button->focusPolicy(), Qt::NoFocus);
+
+  window.sourceViewer()->setFocus(Qt::OtherFocusReason);
+  QTRY_VERIFY(window.sourceMonitorHasFocus());
+  QCOMPARE(focus_label->text(), QStringLiteral("Commands target: Source"));
+
+  QTest::keyClick(window.sourceViewer(), Qt::Key_Tab);
+  QTRY_VERIFY(window.programViewer()->hasFocus());
+  QCOMPARE(focus_label->text(), QStringLiteral("Commands target: Program"));
+
+  window.sourceViewer()->setFocus(Qt::OtherFocusReason);
+  QTRY_VERIFY(window.sourceMonitorHasFocus());
+
+  QSignalSpy ripple_insert(&window, &EditorWindow::sourceRippleInsertRequested);
+  QSignalSpy overwrite_insert(&window, &EditorWindow::sourceOverwriteInsertRequested);
+  QTest::mouseClick(insert_button, Qt::LeftButton);
+  QTest::mouseClick(overwrite_button, Qt::LeftButton);
+  QCOMPARE(ripple_insert.count(), 1);
+  QCOMPARE(overwrite_insert.count(), 1);
+  QVERIFY(window.sourceMonitorHasFocus());
+  QCOMPARE(focus_label->text(), QStringLiteral("Commands target: Source"));
+
+  window.setSourceMonitorVisible(false);
+  QVERIFY(!window.sourceMonitorHasFocus());
+  QCOMPARE(focus_label->text(), QStringLiteral("Commands target: Program"));
 }
 
 void EditorWindowTest::markInOutActionsTargetFocusedViewer() {

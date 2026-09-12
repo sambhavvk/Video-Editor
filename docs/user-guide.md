@@ -268,6 +268,12 @@ reports a local diagnostic, and disables later GPU attempts until restart. The P
 transient message identify an active backend. The path provides neither zero-copy decode, HDR tone
 mapping, native presentation, nor a full native GPU effects/color graph.
 
+The source and program monitors label their role, show the focused monitor with a blue outline,
+and display **Source time** or **Sequence time** under the picture. The transport bar reports
+**Commands target: Source** or **Program** and exposes **Insert from Source** and
+**Overwrite from Source** beside the shuttle controls. Toggle secondary overlays such as **Clip
+Info Overlay** and **Safe Guides** from the View menu.
+
 Current transport supports reverse, stop, forward, play/pause, single-frame movement, ruler seeking,
 and J/K/L shuttle stepping. For forward 1× playback, a miniaudio-enabled build renders exact ranges
 from an immutable timeline snapshot on a worker, prefills a bounded ring, and starts the selected

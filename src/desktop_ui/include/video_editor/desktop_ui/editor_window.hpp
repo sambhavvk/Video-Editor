@@ -278,6 +278,7 @@ private:
   void restoreProgramOutputScreen();
   void setShuttleRate(double rate);
   void stepShuttle(int direction);
+  void updateFocusedMonitorLabel();
   void addAction(const QString& id, QAction* action);
   [[nodiscard]] QString settingsKeyForWorkspace(Workspace workspace) const;
   [[nodiscard]] static QString workspaceDisplayName(Workspace workspace);
@@ -338,6 +339,7 @@ private:
   QLabel* tool_label_{nullptr};
   QLabel* av_sync_label_{nullptr};
   QLabel* transport_label_{nullptr};
+  QLabel* monitor_focus_label_{nullptr};
   QLabel* sequence_format_label_{nullptr};
   QLabel* job_activity_label_{nullptr};
   QToolBar* workspace_toolbar_{nullptr};

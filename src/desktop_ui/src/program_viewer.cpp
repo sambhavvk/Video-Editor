@@ -6,6 +6,8 @@
 
 #include <QDragEnterEvent>
 #include <QFileInfo>
+#include <QFocusEvent>
+#include <QFontMetrics>
 #include <QKeyEvent>
 #include <QMimeData>
 #include <QMouseEvent>
@@ -153,6 +155,14 @@ void ProgramViewer::setTimecode(const QString& timecode) {
     return;
   }
   timecode_ = timecode;
+  update();
+}
+
+void ProgramViewer::setTimecodeCaption(const QString& caption) {
+  if (timecode_caption_ == caption) {
+    return;
+  }
+  timecode_caption_ = caption;
   update();
 }
 
@@ -395,21 +405,39 @@ void ProgramViewer::paintEvent(QPaintEvent* event) {
   painter.setPen(QColor{75, 79, 89});
   painter.drawRect(frameRect.adjusted(0, 0, -1, -1));
 
+  const QColor focusAccent{100, 139, 212};
   QFont labelFont = font();
   labelFont.setWeight(QFont::DemiBold);
   painter.setFont(labelFont);
-  painter.setPen(QColor{184, 190, 202});
-  painter.drawText(QRect{kOuterMargin, 0, width() - 2 * kOuterMargin, kTopBarHeight},
-                   Qt::AlignLeft | Qt::AlignVCenter, title_);
+  const QRect titleRect{kOuterMargin, 0, width() - 2 * kOuterMargin, kTopBarHeight};
+  if (hasFocus()) {
+    painter.fillRect(titleRect.adjusted(-6, 3, 6, -3), QColor{focusAccent.red(), focusAccent.green(),
+                                                               focusAccent.blue(), 48});
+    painter.setPen(focusAccent);
+  } else {
+    painter.setPen(QColor{184, 190, 202});
+  }
+  painter.drawText(titleRect, Qt::AlignLeft | Qt::AlignVCenter,
+                   painter.fontMetrics().elidedText(title_, Qt::ElideRight, titleRect.width()));
 
   QFont timecodeFont{QStringLiteral("monospace")};
   timecodeFont.setStyleHint(QFont::Monospace);
   timecodeFont.setPointSize(std::max(9, font().pointSize()));
   painter.setFont(timecodeFont);
+  const QRect bottomBar{kOuterMargin, height() - kBottomBarHeight, width() - 2 * kOuterMargin,
+                        kBottomBarHeight};
+  const int timecodeWidth = painter.fontMetrics().horizontalAdvance(timecode_);
+  if (!timecode_caption_.isEmpty()) {
+    painter.setFont(labelFont);
+    painter.setPen(QColor{151, 157, 169});
+    const QRect captionRect = bottomBar.adjusted(0, 0, -(timecodeWidth + 10), 0);
+    painter.drawText(captionRect, Qt::AlignLeft | Qt::AlignVCenter,
+                     painter.fontMetrics().elidedText(timecode_caption_, Qt::ElideRight,
+                                                      std::max(0, captionRect.width())));
+  }
+  painter.setFont(timecodeFont);
   painter.setPen(QColor{216, 220, 228});
-  painter.drawText(QRect{kOuterMargin, height() - kBottomBarHeight, width() - 2 * kOuterMargin,
-                         kBottomBarHeight},
-                   Qt::AlignHCenter | Qt::AlignVCenter, timecode_);
+  painter.drawText(bottomBar, Qt::AlignRight | Qt::AlignVCenter, timecode_);
 
   if (clip_info_visible_ && !clip_info_name_.isEmpty()) {
     painter.setFont(labelFont);
@@ -448,9 +476,19 @@ void ProgramViewer::paintEvent(QPaintEvent* event) {
   }
 
   if (hasFocus()) {
-    painter.setPen(QPen{QColor{100, 139, 212}, 2});
+    painter.setPen(QPen{focusAccent, 2});
     painter.drawRect(rect().adjusted(1, 1, -2, -2));
   }
+}
+
+void ProgramViewer::focusInEvent(QFocusEvent* event) {
+  QWidget::focusInEvent(event);
+  update();
+}
+
+void ProgramViewer::focusOutEvent(QFocusEvent* event) {
+  QWidget::focusOutEvent(event);
+  update();
 }
 
 void ProgramViewer::resizeEvent(QResizeEvent* event) {

@@ -402,6 +402,7 @@ void EditorWindow::setSourceMonitorVisible(bool visible) {
     const QSignalBlocker blocker(toggle);
     toggle->setChecked(visible);
   }
+  updateFocusedMonitorLabel();
 }
 
 void EditorWindow::setPrecisionTrimVisible(bool visible) {
@@ -513,12 +514,22 @@ void EditorWindow::createCentralArea() {
   source_viewer_ = new ProgramViewer(source_container_);
   source_viewer_->setObjectName(QStringLiteral("sourceViewer"));
   source_viewer_->setAccessibleName(tr("Source viewer"));
+  source_viewer_->setAccessibleDescription(
+      tr("Preview of the loaded source clip. Shows source time. Keyboard transport and mark "
+         "commands target this monitor while it has focus."));
   source_viewer_->setTitle(tr("Source"));
+  source_viewer_->setTimecodeCaption(tr("Source time"));
   source_viewer_->setSourceEditKeysEnabled(true);
   sourceLayout->addWidget(source_viewer_);
 
   program_viewer_ = new ProgramViewer(viewerSplitter);
   program_viewer_->setObjectName(QStringLiteral("programViewer"));
+  program_viewer_->setAccessibleDescription(
+      tr("Preview of the current sequence. Shows sequence time. Press Space to play or pause. "
+         "Keyboard transport targets this monitor while it has focus. Media files can be dropped "
+         "here."));
+  program_viewer_->setTitle(tr("Program"));
+  program_viewer_->setTimecodeCaption(tr("Sequence time"));
   program_viewer_->setNativePresentationEnabled(true);
   program_viewer_splitter_ = viewerSplitter;
   viewerSplitter->addWidget(source_container_);
@@ -535,9 +546,30 @@ void EditorWindow::createCentralArea() {
   auto* transportLayout = new QHBoxLayout(transport);
   transportLayout->setContentsMargins(8, 3, 8, 3);
   transportLayout->setSpacing(3);
+  monitor_focus_label_ = new QLabel(tr("Commands target: Program"), transport);
+  monitor_focus_label_->setObjectName(QStringLiteral("monitorFocusLabel"));
+  monitor_focus_label_->setAccessibleName(tr("Focused monitor"));
+  monitor_focus_label_->setAccessibleDescription(
+      tr("Shows whether keyboard transport and mark commands target the source or program monitor"));
+  monitor_focus_label_->setFocusPolicy(Qt::NoFocus);
+  monitor_focus_label_->setMinimumWidth(monitor_focus_label_->fontMetrics().horizontalAdvance(
+                                           tr("Commands target: Program")) +
+                                       8);
+  transportLayout->addWidget(monitor_focus_label_);
+  transportLayout->addSpacing(8);
+  for (const auto* id : {"sourceRippleInsert", "sourceOverwriteInsert"}) {
+    auto* button = makeActionButton(action(QString::fromLatin1(id)), transport);
+    button->setObjectName(QStringLiteral("transport.%1").arg(QString::fromLatin1(id)));
+    button->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    button->setFocusPolicy(Qt::NoFocus);
+    transportLayout->addWidget(button);
+  }
+  transportLayout->addSpacing(12);
   transportLayout->addStretch();
   for (const auto* id : {"previousFrame", "reverse", "stop", "playPause", "forward", "nextFrame"}) {
-    transportLayout->addWidget(makeActionButton(action(QString::fromLatin1(id)), transport));
+    auto* button = makeActionButton(action(QString::fromLatin1(id)), transport);
+    button->setFocusPolicy(Qt::NoFocus);
+    transportLayout->addWidget(button);
   }
   transportLayout->addSpacing(8);
   transport_label_ = new QLabel(tr("Stopped"), transport);
@@ -1360,6 +1392,10 @@ void EditorWindow::createStatusBar() {
 }
 
 void EditorWindow::connectControllerSurface() {
+  connect(qApp, &QApplication::focusChanged, this, [this](QWidget*, QWidget*) {
+    updateFocusedMonitorLabel();
+  });
+  updateFocusedMonitorLabel();
   connect(media_bin_, &MediaBinWidget::importRequested, this, &EditorWindow::importMediaRequested);
   connect(media_bin_, &MediaBinWidget::insertRequested, this, &EditorWindow::mediaInsertRequested);
   connect(media_bin_, &MediaBinWidget::mediaActivated, this, &EditorWindow::mediaActivated);
@@ -1618,6 +1654,14 @@ bool EditorWindow::sourceMonitorHasFocus() const {
   QWidget* focus = QApplication::focusWidget();
   return focus != nullptr &&
          (focus == source_viewer_ || source_container_->isAncestorOf(focus));
+}
+
+void EditorWindow::updateFocusedMonitorLabel() {
+  if (monitor_focus_label_ == nullptr) {
+    return;
+  }
+  monitor_focus_label_->setText(sourceMonitorHasFocus() ? tr("Commands target: Source")
+                                                        : tr("Commands target: Program"));
 }
 
 void EditorWindow::setShuttleRate(double rate) {

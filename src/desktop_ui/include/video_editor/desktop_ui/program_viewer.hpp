@@ -46,6 +46,9 @@ public:
   [[nodiscard]] QString title() const {
     return title_;
   }
+  [[nodiscard]] QString timecodeCaption() const {
+    return timecode_caption_;
+  }
   [[nodiscard]] bool safeGuidesVisible() const noexcept {
     return safe_guides_visible_;
   }
@@ -64,6 +67,7 @@ public slots:
   void setTrimCompareFrames(const QImage& outgoing, const QImage& incoming);
   void clearTrimCompareFrames();
   void setTimecode(const QString& timecode);
+  void setTimecodeCaption(const QString& caption);
   void setTitle(const QString& title);
   void setSafeGuidesVisible(bool visible);
   void setSourceEditKeysEnabled(bool enabled);
@@ -101,6 +105,8 @@ protected:
   void mouseReleaseEvent(QMouseEvent* event) override;
   void mouseDoubleClickEvent(QMouseEvent* event) override;
   void keyPressEvent(QKeyEvent* event) override;
+  void focusInEvent(QFocusEvent* event) override;
+  void focusOutEvent(QFocusEvent* event) override;
 
 private:
   [[nodiscard]] QRect targetFrameRect() const;
@@ -119,6 +125,7 @@ private:
   bool trim_compare_active_{false};
   QSize sampling_frame_size_{16, 9};
   QString timecode_{QStringLiteral("00:00:00:00")};
+  QString timecode_caption_;
   QString title_{QStringLiteral("Program")};
   bool safe_guides_visible_{false};
   bool frame_sampling_enabled_{false};
