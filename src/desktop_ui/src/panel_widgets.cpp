@@ -3269,6 +3269,12 @@ DeliverPanelWidget::DeliverPanelWidget(QWidget* parent) : QWidget(parent) {
   destinationForm->addRow(tr("Destination"), destinationWidget);
   layout->addLayout(destinationForm);
 
+  delivery_overview_ = makeMutedLabel(QString(), this);
+  delivery_overview_->setObjectName(QStringLiteral("deliveryOverview"));
+  delivery_overview_->setAccessibleName(tr("Export delivery overview"));
+  delivery_overview_->setWordWrap(true);
+  layout->addWidget(delivery_overview_);
+
   use_export_range_ = new QCheckBox(tr("Use program In/Out range"), this);
   use_export_range_->setObjectName(QStringLiteral("useExportRange"));
   use_export_range_->setAccessibleName(tr("Export only the program monitor in/out range"));
@@ -3490,8 +3496,15 @@ DeliverPanelWidget::DeliverPanelWidget(QWidget* parent) : QWidget(parent) {
       caption_mode_->setCurrentIndex(0);
     }
     refreshExportButtonAffordance();
+    refreshDeliveryOverview();
     emit presetChanged(selectedPresetId());
   });
+  const auto refresh_overview = [this] { refreshDeliveryOverview(); };
+  connect(destination_, &QLineEdit::textChanged, this, refresh_overview);
+  connect(resolution_, &QComboBox::currentIndexChanged, this, refresh_overview);
+  connect(frame_rate_, &QComboBox::currentIndexChanged, this, refresh_overview);
+  connect(caption_mode_, &QComboBox::currentIndexChanged, this, refresh_overview);
+  connect(use_export_range_, &QCheckBox::toggled, this, refresh_overview);
   connect(export_button_, &QToolButton::clicked, this, [this] {
     // #region agent log
     {
@@ -3520,6 +3533,7 @@ DeliverPanelWidget::DeliverPanelWidget(QWidget* parent) : QWidget(parent) {
   loadPlatformPresets();
   sidecar_format_->setEnabled(false);
   refreshExportButtonAffordance();
+  refreshDeliveryOverview();
 }
 
 void DeliverPanelWidget::loadPlatformPresets() {
@@ -3566,6 +3580,48 @@ void DeliverPanelWidget::setEncoderCapabilities(const QString& summary) {
 
 void DeliverPanelWidget::setDestinationPath(const QString& path) {
   destination_->setText(path);
+  refreshDeliveryOverview();
+}
+
+void DeliverPanelWidget::refreshDeliveryOverview() {
+  if (delivery_overview_ != nullptr) {
+    delivery_overview_->setText(deliveryOverviewText());
+  }
+}
+
+QString DeliverPanelWidget::deliveryOverviewText() const {
+  const auto info = export_service::platform_preset_info(
+      static_cast<export_service::PlatformPreset>(preset_->currentData().toInt()));
+  QStringList parts;
+  parts.push_back(tr("Preset: %1").arg(preset_->currentText()));
+  parts.push_back(destination_->text().isEmpty()
+                        ? tr("Destination: not set")
+                        : tr("Destination: %1").arg(destination_->text()));
+  if (!info.audio_only) {
+    const QVariantList resolution = resolution_->currentData().toList();
+    if (resolution.size() >= 2 && resolution.at(0).toInt() > 0) {
+      parts.push_back(tr("Size: %1×%2").arg(resolution.at(0).toInt()).arg(resolution.at(1).toInt()));
+    } else {
+      parts.push_back(tr("Size: sequence"));
+    }
+    const QVariantList rate = frame_rate_->currentData().toList();
+    if (rate.size() >= 2 && rate.at(0).toInt() > 0) {
+      parts.push_back(tr("Frame rate: %1/%2").arg(rate.at(0).toInt()).arg(rate.at(1).toInt()));
+    } else {
+      parts.push_back(tr("Frame rate: sequence"));
+    }
+    parts.push_back(tr("Color: Rec.709 SDR limited"));
+  }
+  parts.push_back(tr("Audio: %1").arg(QString::fromStdString(info.intended_audio_codec)));
+  parts.push_back(tr("Captions: %1").arg(caption_mode_->currentText()));
+  if (use_export_range_->isChecked()) {
+    parts.push_back(tr("Range: program In/Out"));
+  }
+  parts.push_back(tr("Source: originals (full quality)"));
+  if (!selected_preset_available_) {
+    parts.push_back(tr("Encoder unavailable for this preset"));
+  }
+  return parts.join(QStringLiteral(" · "));
 }
 
 QString DeliverPanelWidget::destinationPath() const {

@@ -490,6 +490,7 @@ public:
   void setExportJobs(const QVector<ExportJobView>& jobs);
   void loadPlatformPresets();
   void setEncoderCapabilities(const QString& summary);
+  [[nodiscard]] QString deliveryOverviewText() const;
   void setDestinationPath(const QString& path);
   [[nodiscard]] QString destinationPath() const;
   [[nodiscard]] QString captionModeKey() const;
@@ -515,6 +516,7 @@ signals:
 private:
   void refreshExportJobSelection();
   void refreshExportButtonAffordance();
+  void refreshDeliveryOverview();
   QComboBox* preset_{nullptr};
   QToolButton* export_button_{nullptr};
   QProgressBar* export_progress_{nullptr};
@@ -533,6 +535,7 @@ private:
   QComboBox* sidecar_format_{nullptr};
   QCheckBox* use_export_range_{nullptr};
   QLabel* encoder_summary_{nullptr};
+  QLabel* delivery_overview_{nullptr};
   QLabel* preset_notes_{nullptr};
   bool export_enabled_{false};
   bool selected_preset_available_{true};
