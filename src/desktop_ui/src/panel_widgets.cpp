@@ -1228,6 +1228,16 @@ InspectorWidget::InspectorWidget(QWidget* parent) : QWidget(parent) {
   connect(multicam_resync_clips_, &QPushButton::clicked, this,
           &InspectorWidget::multicamResyncClipsRequested);
   multicamLayout->addWidget(multicam_resync_clips_);
+  multicam_timecode_sync_ = new QPushButton(tr("Propose timecode sync…"), multicam_group_);
+  multicam_timecode_sync_->setObjectName(QStringLiteral("inspectorMulticamTimecodeSync"));
+  connect(multicam_timecode_sync_, &QPushButton::clicked, this,
+          &InspectorWidget::multicamProposeTimecodeSyncRequested);
+  multicamLayout->addWidget(multicam_timecode_sync_);
+  multicam_waveform_sync_ = new QPushButton(tr("Propose waveform sync…"), multicam_group_);
+  multicam_waveform_sync_->setObjectName(QStringLiteral("inspectorMulticamWaveformSync"));
+  connect(multicam_waveform_sync_, &QPushButton::clicked, this,
+          &InspectorWidget::multicamProposeWaveformSyncRequested);
+  multicamLayout->addWidget(multicam_waveform_sync_);
   multicam_remove_ = new QPushButton(tr("Remove multicam group"), multicam_group_);
   multicam_remove_->setObjectName(QStringLiteral("inspectorMulticamRemove"));
   connect(multicam_remove_, &QPushButton::clicked, this,

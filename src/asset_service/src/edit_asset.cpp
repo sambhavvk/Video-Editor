@@ -40,7 +40,15 @@ edit::Asset asset_from_record(const AssetRecord& record) {
               record.descriptor.format_name.find("pipe") != std::string::npos)) {
     model_asset.metadata["media_kind"] = "still";
   }
+  if (record.descriptor.start_time_microseconds.has_value()) {
+    model_asset.metadata["timecode_start_us"] =
+        std::to_string(*record.descriptor.start_time_microseconds);
+  }
   for (const auto& stream : record.descriptor.streams) {
+    if (stream.start_time.has_value() && stream.kind == media::StreamKind::Video &&
+        !model_asset.metadata.contains("stream_timecode_start_us")) {
+      model_asset.metadata["stream_timecode_start_us"] = std::to_string(*stream.start_time);
+    }
     if (stream.video.has_value() && !model_asset.has_video) {
       model_asset.has_video = true;
       model_asset.width = static_cast<std::uint32_t>(std::max(stream.video->width, 0));

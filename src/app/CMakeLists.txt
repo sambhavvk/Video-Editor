@@ -5,6 +5,8 @@ find_package(Qt6 ${VIDEO_EDITOR_QT_VERSION} EXACT REQUIRED COMPONENTS Core Concu
 add_library(video_editor_app_controller
   editor_controller.cpp
   editor_controller.hpp
+  multicam_sync.cpp
+  multicam_sync.hpp
   media_reconstruction.cpp
   media_reconstruction.hpp
   path_utils.hpp

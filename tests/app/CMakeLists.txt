@@ -3,6 +3,11 @@
 find_package(Qt6 ${VIDEO_EDITOR_QT_VERSION} EXACT REQUIRED COMPONENTS Test Widgets)
 find_program(VIDEO_EDITOR_APP_TEST_FFMPEG NAMES ffmpeg REQUIRED)
 
+add_executable(video_editor_multicam_sync_tests multicam_sync_test.cpp)
+target_link_libraries(video_editor_multicam_sync_tests PRIVATE video_editor_app_controller GTest::gtest_main)
+include(GoogleTest)
+gtest_discover_tests(video_editor_multicam_sync_tests)
+
 add_executable(video_editor_app_tests editor_controller_test.cpp)
 target_compile_features(video_editor_app_tests PRIVATE cxx_std_20)
 target_link_libraries(video_editor_app_tests

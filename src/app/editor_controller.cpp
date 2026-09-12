@@ -36,7 +36,9 @@
 #include "video_editor/media_cache/cache_store.h"
 #include "video_editor/media_cache/metadata_service.h"
 #include "video_editor/media_cache/thumbnail_service.h"
+#include "multicam_sync.hpp"
 #include "video_editor/media_cache/waveform_service.h"
+#include "video_editor/audio_render/multicam_waveform_sync.h"
 #include "video_editor/playback/asset_registry.h"
 #include "video_editor/playback/ffmpeg_frame_provider.h"
 #include "video_editor/project_codec/project_codec.h"
@@ -1617,6 +1619,10 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::setMulticamAudioMaster);
   connect(window_.inspector(), &desktop_ui::InspectorWidget::removeMulticamGroupRequested, this,
           &EditorController::removeActiveMulticamGroup);
+  connect(window_.inspector(), &desktop_ui::InspectorWidget::multicamProposeTimecodeSyncRequested,
+          this, &EditorController::proposeMulticamTimecodeSync);
+  connect(window_.inspector(), &desktop_ui::InspectorWidget::multicamProposeWaveformSyncRequested,
+          this, &EditorController::proposeMulticamWaveformSync);
   connect(window_.inspector(), &desktop_ui::InspectorWidget::multicamCutToAngleRequested, this,
           &EditorController::recordMulticamSwitchAtPlayhead);
   connect(&window_, &desktop_ui::EditorWindow::createMulticamGroupRequested, this,
@@ -5294,6 +5300,126 @@ void EditorController::cutToMulticamAngleByIndex(const int index) {
     return;
   }
   recordMulticamSwitchAtPlayhead(QString::fromStdString(group->angles[angle_index].id.toString()));
+}
+
+void EditorController::proposeMulticamTimecodeSync() {
+  const edit::Sequence* sequence = currentSequence();
+  const auto project = editor_->projectAt(editor_->revision());
+  if (sequence == nullptr || project == nullptr || !active_clip_id_.has_value()) {
+    return;
+  }
+  const edit::MulticamGroup* group = edit::findMulticamGroupForClip(*project, *active_clip_id_);
+  if (group == nullptr) {
+    return;
+  }
+  const MulticamTimecodeSyncProposal proposal =
+      video_editor::app::proposeMulticamTimecodeSync(*project, *sequence, *group, playheadTime());
+  QStringList lines;
+  for (const MulticamSyncProposal& angle : proposal.angles) {
+    lines.push_back(tr("Angle %1: %2")
+                        .arg(QString::fromStdString(angle.angle_id.toString()),
+                             QString::fromStdString(angle.note)));
+  }
+  if (proposal.requires_manual_choice) {
+    lines.push_back(tr("Some angles lack timecode; review before applying."));
+  }
+  const int choice = QMessageBox::question(
+      &window_, tr("Apply timecode sync proposal?"), lines.join('\n'),
+      QMessageBox::Apply | QMessageBox::Cancel, QMessageBox::Cancel);
+  if (choice != QMessageBox::Apply) {
+    return;
+  }
+  std::vector<std::pair<edit::EntityId, edit::Time>> offsets;
+  offsets.reserve(proposal.angles.size());
+  for (const MulticamSyncProposal& angle : proposal.angles) {
+    if (angle.has_timecode) {
+      offsets.emplace_back(angle.angle_id, angle.sync_offset);
+    }
+  }
+  if (offsets.empty()) {
+    window_.showTransientMessage(tr("No timecode offsets to apply"));
+    return;
+  }
+  (void)apply({.operation = edit::SetMulticamSyncCommand{.group_id = group->id,
+                                                         .sync_reference = proposal.sync_reference,
+                                                         .angle_offsets = std::move(offsets)}},
+             tr("Could not apply timecode sync"));
+}
+
+void EditorController::proposeMulticamWaveformSync() {
+  const edit::Sequence* sequence = currentSequence();
+  const auto project = editor_->projectAt(editor_->revision());
+  if (sequence == nullptr || project == nullptr || !active_clip_id_.has_value()) {
+    return;
+  }
+  const edit::MulticamGroup* group = edit::findMulticamGroupForClip(*project, *active_clip_id_);
+  if (group == nullptr || group->angles.size() < 2) {
+    return;
+  }
+  const edit::MulticamAngle* reference_angle =
+      edit::findMulticamAngle(*group, group->audio_master_angle_id);
+  if (reference_angle == nullptr) {
+    return;
+  }
+  const edit::Clip* reference_clip = edit::findClip(*sequence, reference_angle->clip_id);
+  if (reference_clip == nullptr) {
+    return;
+  }
+  const auto reference_waveform = media_waveforms_.find(reference_clip->asset_id.toString());
+  if (reference_waveform == media_waveforms_.end() || reference_waveform->second.isEmpty()) {
+    window_.showTransientMessage(tr("Waveform data is not ready for the audio master angle"));
+    return;
+  }
+  const auto peaks_from_buckets = [](const QVector<desktop_ui::WaveformBucketView>& buckets) {
+    std::vector<float> peaks;
+    peaks.reserve(static_cast<std::size_t>(buckets.size()));
+    for (const desktop_ui::WaveformBucketView& bucket : buckets) {
+      peaks.push_back((bucket.minimum + bucket.maximum) * 0.5F);
+    }
+    return peaks;
+  };
+  const std::vector<float> reference_peaks = peaks_from_buckets(reference_waveform->second);
+  std::vector<std::pair<edit::EntityId, edit::Time>> offsets;
+  for (const edit::MulticamAngle& angle : group->angles) {
+    offsets.emplace_back(angle.id, angle.sync_offset);
+  }
+  bool matched = false;
+  for (const edit::MulticamAngle& angle : group->angles) {
+    if (angle.id == group->audio_master_angle_id) {
+      continue;
+    }
+    const edit::Clip* clip = edit::findClip(*sequence, angle.clip_id);
+    if (clip == nullptr) {
+      continue;
+    }
+    const auto candidate_waveform = media_waveforms_.find(clip->asset_id.toString());
+    if (candidate_waveform == media_waveforms_.end() || candidate_waveform->second.isEmpty()) {
+      continue;
+    }
+    const auto match = audio_render::matchWaveformOffset(
+        reference_peaks, peaks_from_buckets(candidate_waveform->second), 48'000);
+    if (!match.has_value()) {
+      continue;
+    }
+    matched = true;
+    for (auto& [angle_id, offset] : offsets) {
+      if (angle_id == angle.id) {
+        offset = offset + match->offset;
+        break;
+      }
+    }
+  }
+  if (!matched) {
+    window_.showTransientMessage(tr("Waveform sync found no confident matches"));
+    return;
+  }
+  if (apply({.operation = edit::SetMulticamSyncCommand{.group_id = group->id,
+                                                       .sync_reference = group->sync_reference,
+                                                       .angle_offsets = std::move(offsets)}},
+            tr("Could not apply waveform sync"))) {
+    window_.showTransientMessage(tr("Applied waveform sync proposals"));
+    refreshViews();
+  }
 }
 
 void EditorController::setClipEnabledFromTimeline(const QString& clipIdText, const bool enabled) {

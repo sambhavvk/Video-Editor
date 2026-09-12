@@ -239,6 +239,8 @@ signals:
   void multicamActiveAngleChanged(const QString& angleId);
   void multicamAudioMasterChanged(const QString& angleId);
   void multicamCutToAngleRequested(const QString& angleId);
+  void multicamProposeTimecodeSyncRequested();
+  void multicamProposeWaveformSyncRequested();
   void removeMulticamGroupRequested();
   void pickWhiteBalanceRequested();
   void effectLutBrowseRequested(const QString& effectId, const QString& parameterId);
@@ -265,6 +267,8 @@ private:
   QWidget* multicam_previews_{nullptr};
   QPushButton* multicam_sync_playhead_{nullptr};
   QPushButton* multicam_resync_clips_{nullptr};
+  QPushButton* multicam_timecode_sync_{nullptr};
+  QPushButton* multicam_waveform_sync_{nullptr};
   QPushButton* multicam_remove_{nullptr};
   QString multicam_group_id_;
   QGroupBox* asset_group_{nullptr};
