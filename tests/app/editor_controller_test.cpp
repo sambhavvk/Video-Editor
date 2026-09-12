@@ -2232,11 +2232,33 @@ void EditorControllerTest::deliveryRecipesPersistInSettings() {
   entry.name = QStringLiteral("YouTube master");
   entry.preset_id = QStringLiteral("1");
   entry.primary_destination = QStringLiteral("/tmp/master.webm");
+  entry.video_codec = QStringLiteral("av1");
+  entry.sidecar_format = QStringLiteral("vtt");
+  entry.resolution_index = 2;
+  entry.caption_mode_index = 2;
+  entry.video_bitrate_index = 3;
+  entry.prefer_hardware = true;
+  entry.extra_destinations = QStringList{QStringLiteral("/tmp/mirror.webm")};
   video_editor::app::appendDeliveryRecipe(settings, entry);
   const auto loaded = video_editor::app::loadDeliveryRecipes(settings);
   QCOMPARE(loaded.size(), std::size_t{1});
   QCOMPARE(loaded.front().name, entry.name);
   QCOMPARE(loaded.front().primary_destination, entry.primary_destination);
+  QCOMPARE(loaded.front().video_codec, entry.video_codec);
+  QCOMPARE(loaded.front().sidecar_format, entry.sidecar_format);
+  QCOMPARE(loaded.front().resolution_index, 2);
+  QCOMPARE(loaded.front().prefer_hardware, true);
+  QCOMPARE(loaded.front().extra_destinations, entry.extra_destinations);
+
+  QSettings as_text(directory.filePath(QStringLiteral("delivery-recipes-text.ini")),
+                    QSettings::IniFormat);
+  as_text.setValue(QStringLiteral("delivery/recipes"),
+                   QStringLiteral("[{\"id\":\"recipe-2\",\"name\":\"Text json\","
+                                  "\"primaryDestination\":\"/tmp/text.webm\"}]"));
+  const auto from_text = video_editor::app::loadDeliveryRecipes(as_text);
+  QCOMPARE(from_text.size(), std::size_t{1});
+  QCOMPARE(from_text.front().name, QStringLiteral("Text json"));
+  QCOMPARE(from_text.front().primary_destination, QStringLiteral("/tmp/text.webm"));
 }
 
 void EditorControllerTest::namedRestorePointsPersistManifest() {

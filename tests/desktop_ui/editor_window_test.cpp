@@ -854,6 +854,8 @@ void EditorWindowTest::mediaBinShowsProxyLifecycle() {
                                                .filePath = QStringLiteral("/media/camera.mov"),
                                                .durationText = QStringLiteral("00:00:05"),
                                                .formatText = QStringLiteral("H.264 3840×2160"),
+                                               .colorInterpretation = QStringLiteral(
+                                                   "Rec.709 SDR · bt709 · limited"),
                                                .offline = false,
                                                .proxyAvailable = false,
                                                .proxyRecommended = true,
@@ -861,6 +863,7 @@ void EditorWindowTest::mediaBinShowsProxyLifecycle() {
   media_bin.setItems({item});
   QCOMPARE(table->item(0, 4)->text(), QStringLiteral("Proxy recommended"));
   QVERIFY(!table->item(0, 4)->toolTip().isEmpty());
+  QCOMPARE(table->item(0, 3)->toolTip(), QStringLiteral("Rec.709 SDR · bt709 · limited"));
 
   item.proxyGenerating = true;
   media_bin.setItems({item});

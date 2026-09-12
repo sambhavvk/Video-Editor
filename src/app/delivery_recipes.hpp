@@ -16,9 +16,14 @@ struct DeliveryRecipeEntry final {
   QString preset_id;
   QString primary_destination;
   QStringList extra_destinations;
+  QString video_codec;
+  QString sidecar_format;
   int resolution_index{0};
   int frame_rate_index{0};
   int caption_mode_index{0};
+  int video_bitrate_index{0};
+  int video_quality_index{0};
+  int audio_bitrate_index{0};
   bool use_export_range{false};
   bool prefer_hardware{false};
 };

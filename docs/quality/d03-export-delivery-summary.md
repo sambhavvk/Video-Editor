@@ -7,6 +7,8 @@ Implemented on branch `beta-1.0-fix` (phase 5 D03).
 - Deliver panel **delivery overview** summarizes preset, destination, size, frame rate, Rec.709
   limited color, audio codec, captions, In/Out range, original-media source, and encoder
   availability in one line.
+- When resolution is left on **Use sequence**, creator presets report the preset target size
+  (matching export `platform.target_width/height`) rather than implying sequence dimensions.
 - Existing export queue, cancellation, and encoder capability summary are unchanged.
 
 ## Residual limitations

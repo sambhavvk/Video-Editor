@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "video_editor/desktop_ui/panel_widgets.hpp"
 
+#include "video_editor/export_service/presets.h"
+
 #include <QApplication>
 #include <QComboBox>
 #include <QLabel>
@@ -24,6 +26,8 @@ private slots:
   void usesCreatorReadyDefaults();
   void exposesRunningStateAndSummaries();
   void setExportJobsPopulatesQueueList();
+  void deliveryOverviewReportsPresetTargetSize();
+  void deliveryRecipeSnapshotRoundTripsAndIgnoresInvalidIndexes();
 };
 
 void DeliverPanelWidgetTest::loadsAllPlatformPresets() {
@@ -117,6 +121,53 @@ void DeliverPanelWidgetTest::setExportJobsPopulatesQueueList() {
   QApplication::processEvents();
   QVERIFY(remove_button->isEnabled());
   QCOMPARE(list->item(1)->data(Qt::UserRole).toString(), QStringLiteral("queued-job"));
+}
+
+void DeliverPanelWidgetTest::deliveryOverviewReportsPresetTargetSize() {
+  DeliverPanelWidget panel;
+  auto* preset = panel.findChild<QComboBox*>(QStringLiteral("exportPreset"));
+  QVERIFY(preset != nullptr);
+
+  QVERIFY(panel.deliveryOverviewText().contains(QStringLiteral("Size: sequence")));
+
+  const int youtube = preset->findData(
+      QString::number(static_cast<int>(video_editor::export_service::PlatformPreset::YouTube1080p)));
+  QVERIFY(youtube >= 0);
+  preset->setCurrentIndex(youtube);
+  const QString overview = panel.deliveryOverviewText();
+  QVERIFY(overview.contains(QStringLiteral("Size: 1920×1080")));
+  QVERIFY(!overview.contains(QStringLiteral("Size: sequence")));
+  QVERIFY(overview.contains(QStringLiteral("Video: VP9")));
+  QVERIFY(overview.contains(QStringLiteral("Color: Rec.709 SDR limited")));
+}
+
+void DeliverPanelWidgetTest::deliveryRecipeSnapshotRoundTripsAndIgnoresInvalidIndexes() {
+  DeliverPanelWidget panel;
+  auto* resolution = panel.findChild<QComboBox*>(QStringLiteral("resolutionCombo"));
+  auto* captions = panel.findChild<QComboBox*>(QStringLiteral("captionModeCombo"));
+  auto* sidecar = panel.findChild<QComboBox*>(QStringLiteral("sidecarFormatCombo"));
+  QVERIFY(resolution != nullptr);
+  QVERIFY(captions != nullptr);
+  QVERIFY(sidecar != nullptr);
+
+  panel.setDestinationPath(QStringLiteral("/tmp/recipe.webm"));
+  resolution->setCurrentIndex(1);
+  captions->setCurrentIndex(captions->findData(QStringLiteral("sidecar")));
+  sidecar->setCurrentIndex(sidecar->findData(QStringLiteral("vtt")));
+
+  video_editor::desktop_ui::DeliveryRecipeSnapshot snapshot = panel.captureRecipeSnapshot();
+  QCOMPARE(snapshot.destination, QStringLiteral("/tmp/recipe.webm"));
+  QCOMPARE(snapshot.resolution_index, 1);
+  QCOMPARE(snapshot.sidecar_format, QStringLiteral("vtt"));
+
+  snapshot.resolution_index = 99;
+  snapshot.caption_mode_index = -1;
+  panel.applyRecipeSnapshot(snapshot);
+  QCOMPARE(panel.overrideWidth(), 1920);
+  QCOMPARE(panel.overrideHeight(), 1080);
+  QCOMPARE(panel.captionModeKey(), QStringLiteral("sidecar"));
+  QCOMPARE(panel.sidecarFormatKey(), QStringLiteral("vtt"));
+  QCOMPARE(panel.destinationPath(), QStringLiteral("/tmp/recipe.webm"));
 }
 
 QTEST_MAIN(DeliverPanelWidgetTest)

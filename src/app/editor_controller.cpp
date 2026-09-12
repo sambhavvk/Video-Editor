@@ -818,21 +818,48 @@ render::PreviewScale previewScaleFromPreset(const desktop_ui::PreviewQualityPres
   return render::PreviewScale::Half;
 }
 
+[[nodiscard]] bool colorTokenUnknown(const QString& value) {
+  return value.isEmpty() || value.compare(QStringLiteral("unknown"), Qt::CaseInsensitive) == 0 ||
+         value.compare(QStringLiteral("unspecified"), Qt::CaseInsensitive) == 0;
+}
+
+QString describeColorRange(const QString& range) {
+  if (range.compare(QStringLiteral("tv"), Qt::CaseInsensitive) == 0 ||
+      range.compare(QStringLiteral("mpeg"), Qt::CaseInsensitive) == 0 ||
+      range.compare(QStringLiteral("limited"), Qt::CaseInsensitive) == 0) {
+    return QObject::tr("limited");
+  }
+  if (range.compare(QStringLiteral("pc"), Qt::CaseInsensitive) == 0 ||
+      range.compare(QStringLiteral("jpeg"), Qt::CaseInsensitive) == 0 ||
+      range.compare(QStringLiteral("full"), Qt::CaseInsensitive) == 0) {
+    return QObject::tr("full");
+  }
+  return range;
+}
+
 QString describeSdrInterpretation(const media::ColorDescription& color) {
   const QString matrix = QString::fromStdString(color.matrix).trimmed();
   const QString range = QString::fromStdString(color.range).trimmed();
-  const bool matrix_unknown =
-      matrix.isEmpty() || matrix.compare(QStringLiteral("unknown"), Qt::CaseInsensitive) == 0 ||
-      matrix.compare(QStringLiteral("unspecified"), Qt::CaseInsensitive) == 0;
-  const bool range_unknown =
-      range.isEmpty() || range.compare(QStringLiteral("unknown"), Qt::CaseInsensitive) == 0 ||
-      range.compare(QStringLiteral("unspecified"), Qt::CaseInsensitive) == 0;
+  const bool matrix_unknown = colorTokenUnknown(matrix);
+  const bool range_unknown = colorTokenUnknown(range);
   if (matrix_unknown && range_unknown) {
     return QObject::tr("Rec.709 SDR · limited range (default when metadata is missing)");
   }
   return QObject::tr("Rec.709 SDR · %1 · %2")
       .arg(matrix_unknown ? QObject::tr("matrix assumed bt709") : matrix,
-           range_unknown ? QObject::tr("range assumed limited") : range);
+           range_unknown ? QObject::tr("range assumed limited") : describeColorRange(range));
+}
+
+const media::VideoDescription* bestVideoDescription(const media::AssetDescriptor& descriptor) {
+  if (descriptor.best_video_stream < 0) {
+    return nullptr;
+  }
+  for (const media::StreamDescriptor& stream : descriptor.streams) {
+    if (stream.index == descriptor.best_video_stream && stream.video.has_value()) {
+      return &*stream.video;
+    }
+  }
+  return nullptr;
 }
 
 desktop_ui::PreviewQualityPreset loadStoredPreviewQuality(const QSettings& settings) {
@@ -9733,13 +9760,10 @@ void EditorController::refreshMediaView() {
     }
     const auto* record = findImported(imported_assets_, asset.id.toString());
     QString color_interpretation;
-    if (record != nullptr && record->descriptor.best_video_stream >= 0 &&
-        record->descriptor.best_video_stream <
-            static_cast<int>(record->descriptor.streams.size())) {
-      const media::StreamDescriptor& stream =
-          record->descriptor.streams.at(static_cast<std::size_t>(record->descriptor.best_video_stream));
-      if (stream.video.has_value()) {
-        color_interpretation = describeSdrInterpretation(stream.video->color);
+    if (record != nullptr) {
+      if (const media::VideoDescription* video = bestVideoDescription(record->descriptor);
+          video != nullptr) {
+        color_interpretation = describeSdrInterpretation(video->color);
       }
     }
     if (color_interpretation.isEmpty() && asset.has_video) {
@@ -12217,9 +12241,14 @@ void EditorController::saveDeliveryRecipe(const QString& name) {
   entry.name = name;
   entry.preset_id = snapshot.preset_id;
   entry.primary_destination = snapshot.destination;
+  entry.video_codec = snapshot.video_codec;
+  entry.sidecar_format = snapshot.sidecar_format;
   entry.resolution_index = snapshot.resolution_index;
   entry.frame_rate_index = snapshot.frame_rate_index;
   entry.caption_mode_index = snapshot.caption_mode_index;
+  entry.video_bitrate_index = snapshot.video_bitrate_index;
+  entry.video_quality_index = snapshot.video_quality_index;
+  entry.audio_bitrate_index = snapshot.audio_bitrate_index;
   entry.use_export_range = snapshot.use_export_range;
   entry.prefer_hardware = snapshot.prefer_hardware;
   appendDeliveryRecipe(windowSettings(window_), entry);
@@ -12237,22 +12266,32 @@ void EditorController::queueDeliveryRecipe(const QString& recipeId) {
   desktop_ui::DeliveryRecipeSnapshot snapshot;
   snapshot.preset_id = recipe->preset_id;
   snapshot.destination = recipe->primary_destination;
+  snapshot.video_codec = recipe->video_codec;
+  snapshot.sidecar_format = recipe->sidecar_format;
   snapshot.resolution_index = recipe->resolution_index;
   snapshot.frame_rate_index = recipe->frame_rate_index;
   snapshot.caption_mode_index = recipe->caption_mode_index;
+  snapshot.video_bitrate_index = recipe->video_bitrate_index;
+  snapshot.video_quality_index = recipe->video_quality_index;
+  snapshot.audio_bitrate_index = recipe->audio_bitrate_index;
   snapshot.use_export_range = recipe->use_export_range;
   snapshot.prefer_hardware = recipe->prefer_hardware;
   window_.deliverPanel()->applyRecipeSnapshot(snapshot);
   QStringList destinations{recipe->primary_destination};
   destinations.append(recipe->extra_destinations);
+  int queued = 0;
   for (const QString& destination : destinations) {
     if (destination.isEmpty()) {
       continue;
     }
-    (void)startVideoExport(pathFromQString(destination), recipe->preset_id, false);
+    if (startVideoExport(pathFromQString(destination), recipe->preset_id, false)) {
+      ++queued;
+    }
   }
-  window_.showTransientMessage(
-      tr("Queued %1 export job(s) from recipe \"%2\"").arg(destinations.size()).arg(recipe->name));
+  if (queued > 0) {
+    window_.showTransientMessage(
+        tr("Queued %1 export job(s) from recipe \"%2\"").arg(queued).arg(recipe->name));
+  }
 }
 
 bool EditorController::restoreNamedRestorePoint(const QString& id) {

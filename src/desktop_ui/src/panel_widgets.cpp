@@ -40,6 +40,7 @@
 #include <QSlider>
 #include <QSpinBox>
 #include <QStackedWidget>
+#include <QStandardItem>
 #include <QStandardItemModel>
 #include <QStyle>
 #include <QSplitter>
@@ -81,6 +82,29 @@ QLabel* makeMutedLabel(const QString& text, QWidget* parent) {
   label->setAlignment(Qt::AlignCenter);
   label->setProperty("muted", true);
   return label;
+}
+
+void setComboIndexInRange(QComboBox* combo, const int index) {
+  if (combo == nullptr || index < 0 || index >= combo->count()) {
+    return;
+  }
+  combo->setCurrentIndex(index);
+}
+
+void setComboByData(QComboBox* combo, const QString& data) {
+  if (combo == nullptr || data.isEmpty()) {
+    return;
+  }
+  const int index = combo->findData(data);
+  if (index < 0) {
+    return;
+  }
+  if (const auto* model = qobject_cast<QStandardItemModel*>(combo->model())) {
+    if (const QStandardItem* item = model->item(index); item != nullptr && !item->isEnabled()) {
+      return;
+    }
+  }
+  combo->setCurrentIndex(index);
 }
 
 QWidget* makeInspectorField(const QString& id, const QString& suffix, double minimum,
@@ -631,7 +655,14 @@ void MediaBinWidget::rebuildIconView() {
     auto* row = new QListWidgetItem(item.metadataTitle.isEmpty() ? item.displayName
                                                                  : item.metadataTitle);
     row->setData(Qt::UserRole, item.id);
-    row->setToolTip(item.filePath);
+    QString tooltip = item.filePath;
+    if (!item.colorInterpretation.isEmpty()) {
+      if (!tooltip.isEmpty()) {
+        tooltip += QLatin1Char('\n');
+      }
+      tooltip += item.colorInterpretation;
+    }
+    row->setToolTip(tooltip);
     if (!item.thumbnail.isNull()) {
       row->setIcon(QIcon{QPixmap::fromImage(item.thumbnail)});
     }
@@ -3537,8 +3568,11 @@ DeliverPanelWidget::DeliverPanelWidget(QWidget* parent) : QWidget(parent) {
   connect(destination_, &QLineEdit::textChanged, this, refresh_overview);
   connect(resolution_, &QComboBox::currentIndexChanged, this, refresh_overview);
   connect(frame_rate_, &QComboBox::currentIndexChanged, this, refresh_overview);
+  connect(video_codec_, &QComboBox::currentIndexChanged, this, refresh_overview);
   connect(caption_mode_, &QComboBox::currentIndexChanged, this, refresh_overview);
+  connect(sidecar_format_, &QComboBox::currentIndexChanged, this, refresh_overview);
   connect(use_export_range_, &QCheckBox::toggled, this, refresh_overview);
+  connect(hardware_encoder_, &QCheckBox::toggled, this, refresh_overview);
   connect(export_button_, &QToolButton::clicked, this, [this] {
     // #region agent log
     {
@@ -3633,8 +3667,12 @@ QString DeliverPanelWidget::deliveryOverviewText() const {
                         : tr("Destination: %1").arg(destination_->text()));
   if (!info.audio_only) {
     const QVariantList resolution = resolution_->currentData().toList();
-    if (resolution.size() >= 2 && resolution.at(0).toInt() > 0) {
-      parts.push_back(tr("Size: %1×%2").arg(resolution.at(0).toInt()).arg(resolution.at(1).toInt()));
+    const int override_width = resolution.size() >= 2 ? resolution.at(0).toInt() : 0;
+    const int override_height = resolution.size() >= 2 ? resolution.at(1).toInt() : 0;
+    if (override_width > 0 && override_height > 0) {
+      parts.push_back(tr("Size: %1×%2").arg(override_width).arg(override_height));
+    } else if (info.target_width > 0 && info.target_height > 0) {
+      parts.push_back(tr("Size: %1×%2").arg(info.target_width).arg(info.target_height));
     } else {
       parts.push_back(tr("Size: sequence"));
     }
@@ -3644,14 +3682,27 @@ QString DeliverPanelWidget::deliveryOverviewText() const {
     } else {
       parts.push_back(tr("Frame rate: sequence"));
     }
+    const bool creator_codec =
+        info.intended_video_codec == "vp9" || info.intended_video_codec == "av1";
+    parts.push_back(tr("Video: %1").arg(
+        creator_codec ? creatorVideoCodecKey().toUpper()
+                      : QString::fromStdString(info.intended_video_codec)));
     parts.push_back(tr("Color: Rec.709 SDR limited"));
   }
   parts.push_back(tr("Audio: %1").arg(QString::fromStdString(info.intended_audio_codec)));
-  parts.push_back(tr("Captions: %1").arg(caption_mode_->currentText()));
+  if (sidecar_format_->isEnabled()) {
+    parts.push_back(tr("Captions: %1 (%2)").arg(caption_mode_->currentText(),
+                                               sidecar_format_->currentText()));
+  } else {
+    parts.push_back(tr("Captions: %1").arg(caption_mode_->currentText()));
+  }
   if (use_export_range_->isChecked()) {
     parts.push_back(tr("Range: program In/Out"));
   }
   parts.push_back(tr("Source: originals (full quality)"));
+  if (hardware_encoder_->isChecked() && hardware_encoder_->isEnabled()) {
+    parts.push_back(tr("Hardware encoder preferred"));
+  }
   if (!selected_preset_available_) {
     parts.push_back(tr("Encoder unavailable for this preset"));
   }
@@ -3832,22 +3883,29 @@ bool DeliverPanelWidget::useExportRange() const {
 DeliveryRecipeSnapshot DeliverPanelWidget::captureRecipeSnapshot() const {
   return {.preset_id = selectedPresetId(),
           .destination = destinationPath(),
+          .video_codec = creatorVideoCodecKey(),
+          .sidecar_format = sidecarFormatKey(),
           .resolution_index = resolution_->currentIndex(),
           .frame_rate_index = frame_rate_->currentIndex(),
           .caption_mode_index = caption_mode_->currentIndex(),
+          .video_bitrate_index = video_bitrate_->currentIndex(),
+          .video_quality_index = video_quality_->currentIndex(),
+          .audio_bitrate_index = audio_bitrate_->currentIndex(),
           .use_export_range = useExportRange(),
           .prefer_hardware = preferHardwareEncoder()};
 }
 
 void DeliverPanelWidget::applyRecipeSnapshot(const DeliveryRecipeSnapshot& snapshot) {
-  const int preset_index = preset_->findData(snapshot.preset_id);
-  if (preset_index >= 0) {
-    preset_->setCurrentIndex(preset_index);
-  }
+  setComboByData(preset_, snapshot.preset_id);
   setDestinationPath(snapshot.destination);
-  resolution_->setCurrentIndex(snapshot.resolution_index);
-  frame_rate_->setCurrentIndex(snapshot.frame_rate_index);
-  caption_mode_->setCurrentIndex(snapshot.caption_mode_index);
+  setComboIndexInRange(resolution_, snapshot.resolution_index);
+  setComboIndexInRange(frame_rate_, snapshot.frame_rate_index);
+  setComboIndexInRange(caption_mode_, snapshot.caption_mode_index);
+  setComboIndexInRange(video_bitrate_, snapshot.video_bitrate_index);
+  setComboIndexInRange(video_quality_, snapshot.video_quality_index);
+  setComboIndexInRange(audio_bitrate_, snapshot.audio_bitrate_index);
+  setComboByData(video_codec_, snapshot.video_codec);
+  setComboByData(sidecar_format_, snapshot.sidecar_format);
   use_export_range_->setChecked(snapshot.use_export_range);
   hardware_encoder_->setChecked(snapshot.prefer_hardware);
   refreshDeliveryOverview();

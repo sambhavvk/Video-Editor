@@ -3,9 +3,12 @@
 #include "delivery_recipes.hpp"
 
 #include <QJsonArray>
-#include <QSettings>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QMetaType>
+#include <QSettings>
+#include <QString>
+#include <QVariant>
 
 namespace video_editor::app {
 
@@ -28,9 +31,14 @@ std::vector<DeliveryRecipeEntry> parseRecipes(const QJsonArray& array) {
     for (const QJsonValue& dest : object.value(QStringLiteral("extraDestinations")).toArray()) {
       entry.extra_destinations.push_back(dest.toString());
     }
+    entry.video_codec = object.value(QStringLiteral("videoCodec")).toString();
+    entry.sidecar_format = object.value(QStringLiteral("sidecarFormat")).toString();
     entry.resolution_index = object.value(QStringLiteral("resolutionIndex")).toInt(0);
     entry.frame_rate_index = object.value(QStringLiteral("frameRateIndex")).toInt(0);
     entry.caption_mode_index = object.value(QStringLiteral("captionModeIndex")).toInt(0);
+    entry.video_bitrate_index = object.value(QStringLiteral("videoBitrateIndex")).toInt(0);
+    entry.video_quality_index = object.value(QStringLiteral("videoQualityIndex")).toInt(0);
+    entry.audio_bitrate_index = object.value(QStringLiteral("audioBitrateIndex")).toInt(0);
     entry.use_export_range = object.value(QStringLiteral("useExportRange")).toBool(false);
     entry.prefer_hardware = object.value(QStringLiteral("preferHardware")).toBool(false);
     if (!entry.id.isEmpty() && !entry.name.isEmpty()) {
@@ -53,9 +61,14 @@ QJsonArray serializeRecipes(const std::vector<DeliveryRecipeEntry>& recipes) {
       extras.push_back(dest);
     }
     object.insert(QStringLiteral("extraDestinations"), extras);
+    object.insert(QStringLiteral("videoCodec"), entry.video_codec);
+    object.insert(QStringLiteral("sidecarFormat"), entry.sidecar_format);
     object.insert(QStringLiteral("resolutionIndex"), entry.resolution_index);
     object.insert(QStringLiteral("frameRateIndex"), entry.frame_rate_index);
     object.insert(QStringLiteral("captionModeIndex"), entry.caption_mode_index);
+    object.insert(QStringLiteral("videoBitrateIndex"), entry.video_bitrate_index);
+    object.insert(QStringLiteral("videoQualityIndex"), entry.video_quality_index);
+    object.insert(QStringLiteral("audioBitrateIndex"), entry.audio_bitrate_index);
     object.insert(QStringLiteral("useExportRange"), entry.use_export_range);
     object.insert(QStringLiteral("preferHardware"), entry.prefer_hardware);
     array.push_back(object);
@@ -63,14 +76,22 @@ QJsonArray serializeRecipes(const std::vector<DeliveryRecipeEntry>& recipes) {
   return array;
 }
 
+QByteArray recipesJsonBytes(const QVariant& value) {
+  if (value.metaType().id() == QMetaType::QByteArray) {
+    return value.toByteArray();
+  }
+  return value.toString().toUtf8();
+}
+
 } // namespace
 
 std::vector<DeliveryRecipeEntry> loadDeliveryRecipes(const QSettings& settings) {
-  return parseRecipes(QJsonDocument::fromJson(settings.value(kRecipesKey).toByteArray()).array());
+  return parseRecipes(QJsonDocument::fromJson(recipesJsonBytes(settings.value(kRecipesKey))).array());
 }
 
 void saveDeliveryRecipes(QSettings& settings, const std::vector<DeliveryRecipeEntry>& recipes) {
   settings.setValue(kRecipesKey, QJsonDocument(serializeRecipes(recipes)).toJson(QJsonDocument::Compact));
+  settings.sync();
 }
 
 void appendDeliveryRecipe(QSettings& settings, const DeliveryRecipeEntry& recipe) {
