@@ -412,7 +412,9 @@ Use **Timeline → Create Aspect-Ratio Copies…** to add independent landscape 
 Select exactly two video clips and choose **Timeline → Create Multicam Group…** to define a
 manually synchronized two-angle set. The inspector shows each angle’s offset, the active angle, and
 the audio master. **Set sync point to playhead** stores offsets against the current playhead;
-**Apply clip alignment** moves clips to those offsets. Groups persist in the project and undo as
+**Apply clip alignment** moves clips to those offsets. Use the inspector angle previews and
+**Cut to …** buttons (or cut while parked on the timeline) to record picture switches at the
+playhead; the audio master stays on the chosen angle. Groups persist in the project and undo as
 ordinary edits.
 
 ## Create an editing proxy

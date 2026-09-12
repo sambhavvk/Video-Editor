@@ -280,11 +280,19 @@ struct MulticamAngle final {
   friend bool operator==(const MulticamAngle&, const MulticamAngle&) = default;
 };
 
+struct MulticamSwitch final {
+  EntityId id{EntityId::generate()};
+  Time time{};
+  EntityId angle_id{};
+  friend bool operator==(const MulticamSwitch&, const MulticamSwitch&) = default;
+};
+
 struct MulticamGroup final {
   EntityId id{EntityId::generate()};
   EntityId sequence_id{};
   std::string name;
   std::vector<MulticamAngle> angles;
+  std::vector<MulticamSwitch> switches;
   EntityId active_angle_id{};
   EntityId audio_master_angle_id{};
   Time sync_reference{};
@@ -308,6 +316,13 @@ struct Project final {
                                                        EntityId id) noexcept;
 [[nodiscard]] const MulticamGroup* findMulticamGroupForClip(const Project& project,
                                                             EntityId clip_id) noexcept;
+[[nodiscard]] const MulticamAngle* findMulticamAngle(const MulticamGroup& group,
+                                                       EntityId angle_id) noexcept;
+[[nodiscard]] EntityId activeMulticamAngleId(const MulticamGroup& group, Time time) noexcept;
+[[nodiscard]] bool multicamVideoClipVisible(const Project& project, EntityId sequence_id,
+                                            const Clip& clip, Time time) noexcept;
+[[nodiscard]] bool multicamAudioClipAudible(const Project& project, const Sequence& sequence,
+                                            const Clip& clip) noexcept;
 [[nodiscard]] const Sequence* findSequence(const Project& project, EntityId id) noexcept;
 [[nodiscard]] const Track* findTrack(const Sequence& sequence, EntityId id) noexcept;
 [[nodiscard]] const Clip* findClip(const Sequence& sequence, EntityId id) noexcept;

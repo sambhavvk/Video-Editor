@@ -651,6 +651,9 @@ AudioRenderResult TimelineAudioRenderer::Impl::mix_sequence_audio(
       if (!clip.enabled || clip.kind != edit::ClipKind::Audio) {
         continue;
       }
+      if (!edit::multicamAudioClipAudible(project, sequence, clip)) {
+        continue;
+      }
       const auto [begin, end] = clip_output_bounds(clip, request);
       if (begin >= end) {
         continue;

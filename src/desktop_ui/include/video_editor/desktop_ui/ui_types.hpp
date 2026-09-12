@@ -288,6 +288,7 @@ struct MulticamAngleView {
   QString label;
   QString clipName;
   qint64 syncOffsetFrames{0};
+  bool activeAtPlayhead{false};
 };
 
 struct MulticamGroupView {

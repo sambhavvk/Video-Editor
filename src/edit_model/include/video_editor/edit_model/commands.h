@@ -357,6 +357,15 @@ struct SetMulticamAudioMasterCommand final {
   EntityId group_id;
   EntityId angle_id;
 };
+struct RecordMulticamSwitchCommand final {
+  EntityId group_id;
+  Time time{};
+  EntityId angle_id;
+};
+struct RemoveMulticamSwitchCommand final {
+  EntityId group_id;
+  EntityId switch_id;
+};
 
 using EditOperation = std::variant<
     AddAssetCommand, RemoveAssetCommand, AddSequenceCommand, RemoveSequenceCommand, AddTrackCommand,
@@ -375,7 +384,8 @@ using EditOperation = std::variant<
     SetAssetMetadataCommand, SetSmartQueryCommand, ReplaceClipMediaCommand, SetClipNameCommand,
     SetClipLinkedGroupCommand, SetClipEnabledCommand, SetSequenceNameCommand,
     SetSequenceStartTimeCommand, CreateMulticamGroupCommand, RemoveMulticamGroupCommand,
-    SetMulticamSyncCommand, SetMulticamActiveAngleCommand, SetMulticamAudioMasterCommand>;
+    SetMulticamSyncCommand, SetMulticamActiveAngleCommand, SetMulticamAudioMasterCommand,
+    RecordMulticamSwitchCommand, RemoveMulticamSwitchCommand>;
 
 struct EditCommand final {
   EditOperation operation;

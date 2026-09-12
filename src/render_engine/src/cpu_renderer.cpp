@@ -657,6 +657,9 @@ render_sequence_frame(const edit::Project& project, const edit::Sequence& sequen
       if (!clip.enabled || !clip.timeline_range.contains(time)) {
         continue;
       }
+      if (!edit::multicamVideoClipVisible(project, sequence.id, clip, time)) {
+        continue;
+      }
       auto source = render_clip_source(project, clip, sequence, time, depth, profile,
                                        request_epoch, provider, renderer);
       if (!source) {

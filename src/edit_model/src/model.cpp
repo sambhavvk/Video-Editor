@@ -36,6 +36,86 @@ const MulticamGroup* findMulticamGroupForClip(const Project& project,
   return nullptr;
 }
 
+const MulticamAngle* findMulticamAngle(const MulticamGroup& group, EntityId angle_id) noexcept {
+  const auto found =
+      std::find_if(group.angles.begin(), group.angles.end(),
+                   [angle_id](const MulticamAngle& angle) { return angle.id == angle_id; });
+  return found == group.angles.end() ? nullptr : &*found;
+}
+
+EntityId activeMulticamAngleId(const MulticamGroup& group, Time time) noexcept {
+  const MulticamSwitch* selected = nullptr;
+  for (const MulticamSwitch& entry : group.switches) {
+    if (entry.time > time) {
+      continue;
+    }
+    if (selected == nullptr || entry.time >= selected->time) {
+      selected = &entry;
+    }
+  }
+  if (selected != nullptr) {
+    return selected->angle_id;
+  }
+  return group.active_angle_id;
+}
+
+const MulticamGroup* findMulticamGroupForSequenceClip(const Project& project,
+                                                      EntityId sequence_id,
+                                                      EntityId clip_id) noexcept {
+  const MulticamGroup* group = findMulticamGroupForClip(project, clip_id);
+  if (group == nullptr || group->sequence_id != sequence_id) {
+    return nullptr;
+  }
+  return group;
+}
+
+bool multicamVideoClipVisible(const Project& project, EntityId sequence_id, const Clip& clip,
+                              Time time) noexcept {
+  const MulticamGroup* group = findMulticamGroupForSequenceClip(project, sequence_id, clip.id);
+  if (group == nullptr) {
+    return true;
+  }
+  const MulticamAngle* active =
+      findMulticamAngle(*group, activeMulticamAngleId(*group, time));
+  return active != nullptr && active->clip_id == clip.id;
+}
+
+bool multicamAudioClipAudible(const Project& project, const Sequence& sequence,
+                              const Clip& clip) noexcept {
+  for (const MulticamGroup& group : project.multicam_groups) {
+    if (group.sequence_id != sequence.id) {
+      continue;
+    }
+    const MulticamAngle* master = findMulticamAngle(group, group.audio_master_angle_id);
+    if (master == nullptr) {
+      continue;
+    }
+    const auto clip_in_angle = [&](const MulticamAngle& angle) -> bool {
+      const Clip* angle_clip = findClip(sequence, angle.clip_id);
+      if (angle_clip == nullptr) {
+        return false;
+      }
+      if (clip.id == angle_clip->id) {
+        return true;
+      }
+      return angle_clip->linked_group.has_value() &&
+             clip.linked_group == angle_clip->linked_group;
+    };
+    if (clip_in_angle(*master)) {
+      return true;
+    }
+    for (const MulticamAngle& angle : group.angles) {
+      if (angle.id == group.audio_master_angle_id) {
+        continue;
+      }
+      if (clip_in_angle(angle)) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 const Sequence* findSequence(const Project& project, EntityId id) noexcept {
   const auto found = std::find_if(project.sequences.begin(), project.sequences.end(),
                                   [id](const Sequence& sequence) { return sequence.id == id; });

@@ -337,6 +337,9 @@ render_transition_track(GpuRenderer& renderer, FrameProvider& provider,
       if (!clip.enabled || !clip.timeline_range.contains(time)) {
         continue;
       }
+      if (!edit::multicamVideoClipVisible(project, sequence.id, clip, time)) {
+        continue;
+      }
       if (clip_has_unsupported_gpu_effects(clip.effects)) {
         return unsupported_timeline(
             "GPU timeline preview does not yet support enabled clip effects of this type");
@@ -429,6 +432,7 @@ RenderResult<GpuImage> GpuTimelineRenderer::request_frame(const edit::TimelineSn
   bool skipped_cpu_lut_curves = false;
   const edit::Project& project = snapshot.project();
 
+  const edit::EntityId sequence_id = sequence->id;
   std::optional<GpuImage> accumulator;
   for (const edit::Track& track : sequence->tracks) {
     if (track.kind != edit::TrackKind::Video || track.muted || !track.visible) {
@@ -455,6 +459,9 @@ RenderResult<GpuImage> GpuTimelineRenderer::request_frame(const edit::TimelineSn
     std::vector<GpuLayer> track_layers;
     for (const edit::Clip& clip : track.clips) {
       if (!clip.enabled || !clip.timeline_range.contains(time)) {
+        continue;
+      }
+      if (!edit::multicamVideoClipVisible(project, sequence_id, clip, time)) {
         continue;
       }
       if (clip_has_unsupported_gpu_effects(clip.effects)) {

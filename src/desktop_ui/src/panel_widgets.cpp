@@ -14,6 +14,7 @@
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
+#include <QFrame>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QInputDialog>
@@ -1212,6 +1213,11 @@ InspectorWidget::InspectorWidget(QWidget* parent) : QWidget(parent) {
   multicam_audio_master_->setAccessibleName(tr("Multicam audio master"));
   multicamForm->addRow(tr("Audio master"), multicam_audio_master_);
   multicamLayout->addLayout(multicamForm);
+  multicam_previews_ = new QWidget(multicam_group_);
+  multicam_previews_->setObjectName(QStringLiteral("inspectorMulticamPreviews"));
+  auto* previewLayout = new QHBoxLayout(multicam_previews_);
+  previewLayout->setContentsMargins(0, 0, 0, 0);
+  multicamLayout->addWidget(multicam_previews_);
   multicam_sync_playhead_ = new QPushButton(tr("Set sync point to playhead"), multicam_group_);
   multicam_sync_playhead_->setObjectName(QStringLiteral("inspectorMulticamSyncPlayhead"));
   connect(multicam_sync_playhead_, &QPushButton::clicked, this,
@@ -1961,11 +1967,43 @@ void InspectorWidget::setMulticamGroup(const MulticamGroupView& group) {
     QStringList lines;
     lines.push_back(group.name);
     for (const MulticamAngleView& angle : group.angles) {
-      lines.push_back(tr("%1 (%2): offset %3 frames")
+      lines.push_back(tr("%1 (%2): offset %3 frames%4")
                           .arg(angle.label, angle.clipName)
-                          .arg(angle.syncOffsetFrames));
+                          .arg(angle.syncOffsetFrames)
+                          .arg(angle.activeAtPlayhead ? tr(" • active") : QString{}));
     }
     multicam_status_->setText(lines.join('\n'));
+  }
+  if (multicam_previews_ != nullptr) {
+    if (QLayout* existing = multicam_previews_->layout()) {
+      while (QLayoutItem* item = existing->takeAt(0)) {
+        if (item->widget() != nullptr) {
+          item->widget()->deleteLater();
+        }
+        delete item;
+      }
+    }
+    auto* previewLayout = qobject_cast<QHBoxLayout*>(multicam_previews_->layout());
+    for (const MulticamAngleView& angle : group.angles) {
+      auto* column = new QVBoxLayout();
+      auto* preview = new QLabel(angle.clipName, multicam_previews_);
+      preview->setObjectName(QStringLiteral("inspectorMulticamPreview_%1").arg(angle.id));
+      preview->setAlignment(Qt::AlignCenter);
+      preview->setMinimumHeight(56);
+      preview->setWordWrap(true);
+      preview->setFrameShape(QFrame::StyledPanel);
+      if (angle.activeAtPlayhead) {
+        preview->setStyleSheet(QStringLiteral("font-weight: 600;"));
+      }
+      column->addWidget(preview);
+      auto* cut = new QPushButton(tr("Cut to %1").arg(angle.label), multicam_previews_);
+      cut->setObjectName(QStringLiteral("inspectorMulticamCut_%1").arg(angle.id));
+      connect(cut, &QPushButton::clicked, this, [this, angle]() {
+        emit multicamCutToAngleRequested(angle.id);
+      });
+      column->addWidget(cut);
+      previewLayout->addLayout(column);
+    }
   }
   const auto populate = [](QComboBox* combo, const MulticamGroupView& value,
                            const QString& selectedId) {

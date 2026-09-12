@@ -344,14 +344,6 @@ constexpr int kMaximumAssetRating = 5;
   return std::nullopt;
 }
 
-[[nodiscard]] const MulticamAngle* findMulticamAngle(const MulticamGroup& group,
-                                                     EntityId angle_id) noexcept {
-  const auto found =
-      std::find_if(group.angles.begin(), group.angles.end(),
-                   [angle_id](const MulticamAngle& angle) { return angle.id == angle_id; });
-  return found == group.angles.end() ? nullptr : &*found;
-}
-
 [[nodiscard]] std::optional<EditError> validateMulticamGroup(const Project& project,
                                                              const MulticamGroup& group) {
   if (group.id.isNil()) {
@@ -412,6 +404,22 @@ constexpr int kMaximumAssetRating = 5;
   if (findMulticamAngle(group, group.audio_master_angle_id) == nullptr) {
     return error(EditErrorCode::InvalidArgument,
                  "multicam audio master angle id must reference an angle in the group");
+  }
+  std::unordered_set<EntityId> switch_ids;
+  for (const auto& entry : group.switches) {
+    if (entry.id.isNil()) {
+      return error(EditErrorCode::InvalidArgument, "multicam switch id cannot be nil");
+    }
+    if (!switch_ids.insert(entry.id).second) {
+      return error(EditErrorCode::DuplicateId, "multicam group contains duplicate switch ids");
+    }
+    if (entry.time.isNegative()) {
+      return error(EditErrorCode::InvalidArgument, "multicam switch time cannot be negative");
+    }
+    if (findMulticamAngle(group, entry.angle_id) == nullptr) {
+      return error(EditErrorCode::InvalidArgument,
+                   "multicam switch references an angle that is not in the group");
+    }
   }
   return std::nullopt;
 }
@@ -879,6 +887,12 @@ validateTransition(const Project& project, const Sequence& sequence, const Trans
       if (!addId(angle.id)) {
         return error(EditErrorCode::DuplicateId,
                      "project contains a duplicate or nil multicam angle id");
+      }
+    }
+    for (const auto& entry : group.switches) {
+      if (!addId(entry.id)) {
+        return error(EditErrorCode::DuplicateId,
+                     "project contains a duplicate or nil multicam switch id");
       }
     }
     if (const auto issue = validateMulticamGroup(project, group)) {
@@ -2907,6 +2921,65 @@ struct PlannedClip final {
             found->audio_master_angle_id = command.angle_id;
             return std::nullopt;
           },
+          [&](const RecordMulticamSwitchCommand& command) -> std::optional<EditError> {
+            if (command.group_id.isNil() || command.angle_id.isNil()) {
+              return error(EditErrorCode::InvalidArgument,
+                           "multicam group and angle ids cannot be nil");
+            }
+            if (command.time.isNegative()) {
+              return error(EditErrorCode::InvalidArgument, "multicam switch time cannot be negative");
+            }
+            const auto found = std::find_if(
+                project.multicam_groups.begin(), project.multicam_groups.end(),
+                [&](const MulticamGroup& group) { return group.id == command.group_id; });
+            if (found == project.multicam_groups.end()) {
+              return error(EditErrorCode::EntityNotFound, "multicam group was not found");
+            }
+            MulticamGroup candidate = *found;
+            const auto existing = std::find_if(
+                candidate.switches.begin(), candidate.switches.end(),
+                [&](const MulticamSwitch& entry) { return entry.time == command.time; });
+            if (existing != candidate.switches.end()) {
+              existing->angle_id = command.angle_id;
+            } else {
+              MulticamSwitch entry;
+              entry.time = command.time;
+              entry.angle_id = command.angle_id;
+              candidate.switches.push_back(entry);
+              std::stable_sort(candidate.switches.begin(), candidate.switches.end(),
+                               [](const MulticamSwitch& lhs, const MulticamSwitch& rhs) {
+                                 if (lhs.time == rhs.time) {
+                                   return lhs.id < rhs.id;
+                                 }
+                                 return lhs.time < rhs.time;
+                               });
+            }
+            if (const auto issue = validateMulticamGroup(project, candidate)) {
+              return issue;
+            }
+            *found = std::move(candidate);
+            return std::nullopt;
+          },
+          [&](const RemoveMulticamSwitchCommand& command) -> std::optional<EditError> {
+            if (command.group_id.isNil() || command.switch_id.isNil()) {
+              return error(EditErrorCode::InvalidArgument,
+                           "multicam group and switch ids cannot be nil");
+            }
+            const auto found = std::find_if(
+                project.multicam_groups.begin(), project.multicam_groups.end(),
+                [&](const MulticamGroup& group) { return group.id == command.group_id; });
+            if (found == project.multicam_groups.end()) {
+              return error(EditErrorCode::EntityNotFound, "multicam group was not found");
+            }
+            const auto switch_found = std::find_if(
+                found->switches.begin(), found->switches.end(),
+                [&](const MulticamSwitch& entry) { return entry.id == command.switch_id; });
+            if (switch_found == found->switches.end()) {
+              return error(EditErrorCode::EntityNotFound, "multicam switch was not found");
+            }
+            found->switches.erase(switch_found);
+            return std::nullopt;
+          },
           [&](const SetClipEnabledCommand& command) -> std::optional<EditError> {
             auto* sequence = mutableSequence(project, command.sequence_id);
             if (sequence == nullptr) {
@@ -3061,6 +3134,10 @@ std::string commandName(const EditCommand& command) {
           return "Set multicam active angle";
         if constexpr (std::is_same_v<T, SetMulticamAudioMasterCommand>)
           return "Set multicam audio master";
+        if constexpr (std::is_same_v<T, RecordMulticamSwitchCommand>)
+          return "Record multicam switch";
+        if constexpr (std::is_same_v<T, RemoveMulticamSwitchCommand>)
+          return "Remove multicam switch";
         return "Edit";
       },
       command.operation);
@@ -3198,6 +3275,10 @@ std::string commandType(const EditCommand& command) {
           return "set_multicam_active_angle";
         if constexpr (std::is_same_v<T, SetMulticamAudioMasterCommand>)
           return "set_multicam_audio_master";
+        if constexpr (std::is_same_v<T, RecordMulticamSwitchCommand>)
+          return "record_multicam_switch";
+        if constexpr (std::is_same_v<T, RemoveMulticamSwitchCommand>)
+          return "remove_multicam_switch";
         return "unknown";
       },
       command.operation);

@@ -270,6 +270,7 @@ private slots:
   void resyncMulticamClips();
   void setMulticamActiveAngle(const QString& angleId);
   void setMulticamAudioMaster(const QString& angleId);
+  void recordMulticamSwitchAtPlayhead(const QString& angleId);
   void toggleLinkedSelection();
   void unlinkSelectedClips();
   void setClipEnabledFromTimeline(const QString& clipId, bool enabled);

@@ -1617,8 +1617,8 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::setMulticamAudioMaster);
   connect(window_.inspector(), &desktop_ui::InspectorWidget::removeMulticamGroupRequested, this,
           &EditorController::removeActiveMulticamGroup);
-  connect(&window_, &desktop_ui::EditorWindow::createMulticamGroupRequested, this,
-          &EditorController::createMulticamGroupFromSelection);
+  connect(window_.inspector(), &desktop_ui::InspectorWidget::multicamCutToAngleRequested, this,
+          &EditorController::recordMulticamSwitchAtPlayhead);
   connect(&window_, &desktop_ui::EditorWindow::setClipEnabledRequested, this,
           [this](const bool enabled) {
             if (!active_clip_id_.has_value()) {
@@ -5249,6 +5249,27 @@ void EditorController::setMulticamAudioMaster(const QString& angleIdText) {
   (void)apply({.operation = edit::SetMulticamAudioMasterCommand{.group_id = group->id,
                                                                  .angle_id = *angle_id}},
              tr("Could not set the multicam audio master"));
+}
+
+void EditorController::recordMulticamSwitchAtPlayhead(const QString& angleIdText) {
+  const edit::Sequence* sequence = currentSequence();
+  const auto project = editor_->projectAt(editor_->revision());
+  const auto angle_id = parseId(angleIdText);
+  if (sequence == nullptr || project == nullptr || !active_clip_id_.has_value() ||
+      !angle_id.has_value()) {
+    return;
+  }
+  const edit::MulticamGroup* group = edit::findMulticamGroupForClip(*project, *active_clip_id_);
+  if (group == nullptr) {
+    return;
+  }
+  if (apply({.operation = edit::RecordMulticamSwitchCommand{.group_id = group->id,
+                                                            .time = playheadTime(),
+                                                            .angle_id = *angle_id}},
+            tr("Could not record multicam angle switch"))) {
+    window_.showTransientMessage(tr("Multicam switch recorded at the playhead"));
+    refreshViews();
+  }
 }
 
 void EditorController::setClipEnabledFromTimeline(const QString& clipIdText, const bool enabled) {
@@ -10679,6 +10700,8 @@ void EditorController::refreshInspectorView() {
       view.name = QString::fromStdString(group->name);
       view.activeAngleId = QString::fromStdString(group->active_angle_id.toString());
       view.audioMasterAngleId = QString::fromStdString(group->audio_master_angle_id.toString());
+      const edit::EntityId active_at_playhead =
+          edit::activeMulticamAngleId(*group, playheadTime());
       for (const edit::MulticamAngle& angle : group->angles) {
         desktop_ui::MulticamAngleView angle_view;
         angle_view.id = QString::fromStdString(angle.id.toString());
@@ -10688,6 +10711,7 @@ void EditorController::refreshInspectorView() {
             angle_clip == nullptr ? QString{} : QString::fromStdString(angle_clip->name);
         angle_view.syncOffsetFrames = sequence->frame_rate.framesAt(
             angle.sync_offset, edit::RoundingMode::NearestTiesEven);
+        angle_view.activeAtPlayhead = angle.id == active_at_playhead;
         view.angles.push_back(angle_view);
       }
       window_.inspector()->setMulticamGroup(view);

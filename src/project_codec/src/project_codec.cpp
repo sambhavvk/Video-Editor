@@ -739,6 +739,13 @@ void encodeMulticamAngle(const edit::MulticamAngle& value, wire::MulticamAngle* 
   output->set_label(value.label);
 }
 
+void encodeMulticamSwitch(const edit::MulticamSwitch& value, wire::MulticamSwitch* output,
+                          std::string_view path, IdRegistry& ids) {
+  encodeId(value.id, output->mutable_id(), childPath(path, "id"), &ids);
+  encodeTime(value.time, output->mutable_time());
+  encodeId(value.angle_id, output->mutable_angle_id(), childPath(path, "angle_id"));
+}
+
 void encodeMulticamGroup(const edit::MulticamGroup& value, wire::MulticamGroup* output,
                          std::string_view path, IdRegistry& ids) {
   encodeId(value.id, output->mutable_id(), childPath(path, "id"), &ids);
@@ -747,6 +754,10 @@ void encodeMulticamGroup(const edit::MulticamGroup& value, wire::MulticamGroup* 
   for (std::size_t index = 0; index < value.angles.size(); ++index) {
     encodeMulticamAngle(value.angles[index], output->add_angles(),
                         indexedPath(path, "angles", index), ids);
+  }
+  for (std::size_t index = 0; index < value.switches.size(); ++index) {
+    encodeMulticamSwitch(value.switches[index], output->add_switches(),
+                         indexedPath(path, "switches", index), ids);
   }
   encodeId(value.active_angle_id, output->mutable_active_angle_id(),
            childPath(path, "active_angle_id"));
@@ -1780,6 +1791,18 @@ decodeMetadata(const google::protobuf::RepeatedPtrField<wire::StringEntry>& entr
   return result;
 }
 
+[[nodiscard]] edit::MulticamSwitch decodeMulticamSwitch(const wire::MulticamSwitch& value,
+                                                        std::string_view path, IdRegistry& ids) {
+  requirePresent(value.has_id(), childPath(path, "id"));
+  requirePresent(value.has_time(), childPath(path, "time"));
+  requirePresent(value.has_angle_id(), childPath(path, "angle_id"));
+  edit::MulticamSwitch result;
+  result.id = decodeId(value.id(), childPath(path, "id"), &ids);
+  result.time = decodeTime(value.time(), childPath(path, "time"));
+  result.angle_id = decodeId(value.angle_id(), childPath(path, "angle_id"));
+  return result;
+}
+
 [[nodiscard]] edit::MulticamAngle decodeMulticamAngle(const wire::MulticamAngle& value,
                                                       std::string_view path, IdRegistry& ids) {
   requirePresent(value.has_id(), childPath(path, "id"));
@@ -1808,6 +1831,11 @@ decodeMetadata(const google::protobuf::RepeatedPtrField<wire::StringEntry>& entr
   for (const auto& angle : value.angles()) {
     result.angles.push_back(
         decodeMulticamAngle(angle, indexedPath(path, "angles", index++), ids));
+  }
+  index = 0;
+  for (const auto& entry : value.switches()) {
+    result.switches.push_back(
+        decodeMulticamSwitch(entry, indexedPath(path, "switches", index++), ids));
   }
   result.active_angle_id =
       decodeId(value.active_angle_id(), childPath(path, "active_angle_id"));
