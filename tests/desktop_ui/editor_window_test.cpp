@@ -48,7 +48,10 @@ using video_editor::desktop_ui::EditorWindow;
 using video_editor::desktop_ui::TimelineClipView;
 using video_editor::desktop_ui::TimelineTrackView;
 using video_editor::desktop_ui::TimelineWidget;
+using video_editor::desktop_ui::TrackHeightPreset;
 using video_editor::desktop_ui::TrackKind;
+using video_editor::desktop_ui::TrackNavWidget;
+using video_editor::desktop_ui::TrackVisibilityPreset;
 using video_editor::desktop_ui::Workspace;
 
 class EditorWindowTest final : public QObject {
@@ -96,6 +99,8 @@ private slots:
   void timelineShowsLinkedCompanionSelection();
   void timelineEmitsTrimPreviewStatusDuringGestures();
   void inspectorShowsLinkedAvSyncControls();
+  void trackNavFiltersAndFocusesTracks();
+  void trackNavAppliesHeightPresets();
   void programViewerRestoresProgramFrameAfterTrimCompare();
   void timelineMarkerSnappingExcludesTheDraggedMarker();
   void timelineRefreshCancelsMarkerGesturesAndUsesAuthoritativeSelection();
@@ -2112,6 +2117,105 @@ void EditorWindowTest::timelineEmitsTrimPreviewStatusDuringGestures() {
   sendPointer(timeline, QEvent::MouseMove, {400, 60}, Qt::NoButton, Qt::LeftButton);
   QVERIFY(status.last().at(0).toString().contains(QStringLiteral("Slip")));
   sendPointer(timeline, QEvent::MouseButtonRelease, {400, 60}, Qt::LeftButton, Qt::NoButton);
+}
+
+void EditorWindowTest::trackNavFiltersAndFocusesTracks() {
+  TrackNavWidget panel;
+  panel.resize(640, 120);
+  panel.show();
+  QCoreApplication::processEvents();
+
+  QVector<TimelineTrackView> tracks{
+      {QStringLiteral("video-1"), QStringLiteral("V1 · Primary"), TrackKind::Video},
+      {QStringLiteral("audio-1"), QStringLiteral("A1 · Dialogue"), TrackKind::Audio},
+      {QStringLiteral("audio-2"), QStringLiteral("A2 · Music"), TrackKind::Audio},
+      {QStringLiteral("audio-3"), QStringLiteral("A3 · Effects"), TrackKind::Audio},
+  };
+  panel.setTracks(tracks);
+
+  auto* search = panel.findChild<QLineEdit*>(QStringLiteral("trackNavSearch"));
+  auto* list = panel.findChild<QListWidget*>(QStringLiteral("trackNavList"));
+  QVERIFY(search != nullptr);
+  QVERIFY(list != nullptr);
+  QCOMPARE(list->count(), 4);
+
+  search->setText(QStringLiteral("music"));
+  QCOMPARE(list->count(), 1);
+  QCOMPARE(list->item(0)->data(Qt::UserRole).toString(), QStringLiteral("audio-2"));
+
+  search->setText(QStringLiteral("vid"));
+  QCOMPARE(list->count(), 1);
+  QCOMPARE(list->item(0)->data(Qt::UserRole).toString(), QStringLiteral("video-1"));
+
+  panel.setTracks({{QStringLiteral("video-1"), QStringLiteral("V1"), TrackKind::Video},
+                   {QStringLiteral("audio-1"), QStringLiteral("A1"), TrackKind::Audio}});
+  search->setText(QStringLiteral("i"));
+  QCOMPARE(list->count(), 0);
+  search->setText(QStringLiteral("aud"));
+  QCOMPARE(list->count(), 1);
+  QCOMPARE(list->item(0)->data(Qt::UserRole).toString(), QStringLiteral("audio-1"));
+
+  search->clear();
+  panel.setTracks(tracks);
+  QCOMPARE(list->count(), 4);
+
+  panel.setActiveTrackId(QStringLiteral("audio-2"));
+  QVERIFY(list->item(2)->isSelected());
+  panel.setTracks(tracks);
+  QVERIFY(list->item(2)->isSelected());
+
+  TimelineWidget timeline;
+  timeline.resize(900, 160);
+  QVector<TimelineTrackView> stacked;
+  stacked.reserve(16);
+  for (int index = 0; index < 16; ++index) {
+    stacked.push_back({QStringLiteral("stack-%1").arg(index), QStringLiteral("T%1").arg(index),
+                       TrackKind::Video});
+  }
+  timeline.setTimeline(10'000, 1'000, stacked, {});
+  timeline.show();
+  QCoreApplication::processEvents();
+  QCOMPARE(timeline.verticalScrollBar()->value(), 0);
+
+  QSignalSpy activated(&panel, &TrackNavWidget::trackActivated);
+  list->item(0)->setSelected(true);
+  emit list->itemActivated(list->item(0));
+  QCOMPARE(activated.count(), 1);
+  QCOMPARE(activated.takeFirst().at(0).toString(), QStringLiteral("video-1"));
+
+  timeline.focusTrack(QStringLiteral("stack-15"));
+  QVERIFY(timeline.verticalScrollBar()->value() > 0);
+  timeline.focusTrack(QStringLiteral("stack-0"));
+  QCOMPARE(timeline.verticalScrollBar()->value(), 0);
+
+  QSignalSpy preset(&panel, &TrackNavWidget::visibilityPresetRequested);
+  auto* visibility = panel.findChild<QComboBox*>(QStringLiteral("trackVisibilityPreset"));
+  QVERIFY(visibility != nullptr);
+  visibility->setCurrentIndex(visibility->findData(static_cast<int>(TrackVisibilityPreset::Music)));
+  emit visibility->activated(visibility->currentIndex());
+  QCOMPARE(preset.count(), 1);
+  QCOMPARE(preset.takeFirst().at(0).value<TrackVisibilityPreset>(), TrackVisibilityPreset::Music);
+
+  panel.setRestoreAvailable(true);
+  auto* restore = panel.findChild<QPushButton*>(QStringLiteral("trackVisibilityRestore"));
+  QVERIFY(restore != nullptr);
+  QVERIFY(restore->isEnabled());
+  QSignalSpy restoreSpy(&panel, &TrackNavWidget::visibilityRestoreRequested);
+  restore->click();
+  QCOMPARE(restoreSpy.count(), 1);
+}
+
+void EditorWindowTest::trackNavAppliesHeightPresets() {
+  TimelineWidget timeline;
+  timeline.resize(900, 260);
+  timeline.setTimeline(10'000, 1'000,
+                      {{QStringLiteral("video-1"), QStringLiteral("V1"), TrackKind::Video}}, {});
+  timeline.applyTrackHeightPreset(TrackHeightPreset::Compact);
+  QCOMPARE(timeline.trackHeight(), 40);
+  timeline.applyTrackHeightPreset(TrackHeightPreset::Expanded);
+  QCOMPARE(timeline.trackHeight(), 96);
+  timeline.applyTrackHeightPreset(TrackHeightPreset::Normal);
+  QCOMPARE(timeline.trackHeight(), 58);
 }
 
 void EditorWindowTest::inspectorShowsLinkedAvSyncControls() {

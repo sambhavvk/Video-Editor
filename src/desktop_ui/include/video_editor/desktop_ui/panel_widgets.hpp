@@ -113,6 +113,35 @@ private:
   QListWidget* list_{nullptr};
 };
 
+class TrackNavWidget final : public QWidget {
+  Q_OBJECT
+
+public:
+  explicit TrackNavWidget(QWidget* parent = nullptr);
+
+  void setTracks(const QVector<TimelineTrackView>& tracks);
+  void setActiveTrackId(const QString& trackId);
+  void setRestoreAvailable(bool available);
+
+signals:
+  void trackActivated(const QString& trackId);
+  void visibilityPresetRequested(TrackVisibilityPreset preset);
+  void visibilityRestoreRequested();
+  void trackHeightPresetRequested(TrackHeightPreset preset);
+
+private:
+  void applyFilter(const QString& query);
+  [[nodiscard]] bool trackMatchesQuery(const TimelineTrackView& track, const QString& query) const;
+
+  QLineEdit* search_{nullptr};
+  QComboBox* visibility_preset_{nullptr};
+  QPushButton* restore_visibility_{nullptr};
+  QComboBox* height_preset_{nullptr};
+  QListWidget* list_{nullptr};
+  QVector<TimelineTrackView> tracks_;
+  QString active_track_id_;
+};
+
 class ColorWheelWidget final : public QWidget {
   Q_OBJECT
 

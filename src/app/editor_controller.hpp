@@ -13,6 +13,7 @@
 #include <QElapsedTimer>
 #include <QFuture>
 #include <QFutureWatcher>
+#include <QHash>
 #include <QImage>
 #include <QObject>
 #include <QString>
@@ -550,6 +551,11 @@ private:
   void setTrackVisible(const QString& trackId, bool visible);
   void setTrackTargeted(const QString& trackId, bool targeted);
   void removeTrack(const QString& trackId);
+  void applyTrackVisibilityPreset(desktop_ui::TrackVisibilityPreset preset);
+  void restoreTrackVisibility();
+  void navigateToTrack(const QString& trackId);
+  void clearTrackVisibilitySnapshot();
+  void syncTrackNavRestoreAvailability();
   void addMarker(qint64 start);
   void moveMarker(const QString& markerId, qint64 start);
   void setMarkerDuration(const QString& markerId, qint64 duration);
@@ -764,6 +770,8 @@ private:
   bool media_paths_updated_on_install_{false};
   bool dirty_{false};
   bool linked_selection_enabled_{true};
+  std::optional<QHash<QString, bool>> track_visibility_snapshot_;
+  std::optional<edit::EntityId> track_visibility_snapshot_sequence_id_;
   bool closing_after_confirmation_{false};
   double playback_rate_{0.0};
   double audio_transport_rate_{1.0};

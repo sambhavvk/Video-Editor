@@ -232,6 +232,30 @@ struct LinkedAvEnds final {
                                       edit::RoundingMode::NearestTiesEven);
 }
 
+[[nodiscard]] bool trackMatchesVisibilityPreset(const edit::Track& track,
+                                                const desktop_ui::TrackVisibilityPreset preset) {
+  const QString name = QString::fromStdString(track.name).toLower();
+  switch (preset) {
+  case desktop_ui::TrackVisibilityPreset::AllTracks:
+    return true;
+  case desktop_ui::TrackVisibilityPreset::VideoOnly:
+    return track.kind == edit::TrackKind::Video;
+  case desktop_ui::TrackVisibilityPreset::Dialogue:
+    return track.kind == edit::TrackKind::Audio &&
+           (name.contains(QStringLiteral("dialogue")) || name.contains(QStringLiteral("dialog")) ||
+            name.contains(QStringLiteral(" dx")) || name.startsWith(QStringLiteral("dx")) ||
+            name.contains(QStringLiteral("vo")));
+  case desktop_ui::TrackVisibilityPreset::Music:
+    return track.kind == edit::TrackKind::Audio && name.contains(QStringLiteral("music"));
+  case desktop_ui::TrackVisibilityPreset::Effects:
+    return track.kind == edit::TrackKind::Audio &&
+           (name.contains(QStringLiteral("effect")) || name.contains(QStringLiteral("sfx")) ||
+            name.contains(QStringLiteral("ambience")) || name.contains(QStringLiteral("foley")) ||
+            name.contains(QStringLiteral(" fx")));
+  }
+  return false;
+}
+
 } // namespace
 
 AudioDevicePollDecision
@@ -1398,6 +1422,12 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::showSequenceSettings);
   connect(&window_, &desktop_ui::EditorWindow::duplicateSequenceRequested, this,
           &EditorController::duplicateActiveSequence);
+  connect(&window_, &desktop_ui::EditorWindow::trackNavActivated, this,
+          &EditorController::navigateToTrack);
+  connect(&window_, &desktop_ui::EditorWindow::trackVisibilityPresetRequested, this,
+          &EditorController::applyTrackVisibilityPreset);
+  connect(&window_, &desktop_ui::EditorWindow::trackVisibilityRestoreRequested, this,
+          &EditorController::restoreTrackVisibility);
   connect(&window_, &desktop_ui::EditorWindow::markerListJumpRequested, this,
           [this](const QString& markerId) {
             const edit::Sequence* sequence = currentSequence();
@@ -2355,6 +2385,7 @@ void EditorController::installProject(edit::Project project, std::filesystem::pa
   active_sequence_id_ = {};
   selected_marker_id_.reset();
   selected_gap_key_.clear();
+  clearTrackVisibilitySnapshot();
   timeline_time_scale_ = static_cast<std::uint32_t>(kUiTimescale);
   playhead_ = 0;
   media_paths_updated_on_install_ = reconstructMediaState();
@@ -9162,6 +9193,121 @@ void EditorController::setTrackTargeted(const QString& trackId, const bool targe
                           tr("Could not change track targeting"));
 }
 
+void EditorController::clearTrackVisibilitySnapshot() {
+  track_visibility_snapshot_.reset();
+  track_visibility_snapshot_sequence_id_.reset();
+}
+
+void EditorController::syncTrackNavRestoreAvailability() {
+  if (window_.trackNav() == nullptr) {
+    return;
+  }
+  const edit::Sequence* sequence = currentSequence();
+  const bool available = sequence != nullptr && track_visibility_snapshot_.has_value() &&
+                         track_visibility_snapshot_sequence_id_ == sequence->id;
+  window_.trackNav()->setRestoreAvailable(available);
+}
+
+void EditorController::applyTrackVisibilityPreset(const desktop_ui::TrackVisibilityPreset preset) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    return;
+  }
+  const edit::EntityId sequence_id = sequence->id;
+  const bool snapshot_for_sequence = track_visibility_snapshot_.has_value() &&
+                                     track_visibility_snapshot_sequence_id_ == sequence_id;
+  if (preset == desktop_ui::TrackVisibilityPreset::AllTracks) {
+    std::vector<edit::EditCommand> commands;
+    for (const edit::Track& track : sequence->tracks) {
+      if (track.visible) {
+        continue;
+      }
+      commands.push_back({.operation = edit::SetTrackVisibilityCommand{.sequence_id = sequence_id,
+                                                                       .track_id = track.id,
+                                                                       .visible = true},
+                          .coalescing_key = {}});
+    }
+    if (!commands.empty() &&
+        !applyBatch(std::move(commands), tr("Could not show all tracks"))) {
+      syncTrackNavRestoreAvailability();
+      return;
+    }
+    if (snapshot_for_sequence) {
+      clearTrackVisibilitySnapshot();
+    }
+    syncTrackNavRestoreAvailability();
+    return;
+  }
+  QHash<QString, bool> pending;
+  if (!snapshot_for_sequence) {
+    for (const edit::Track& track : sequence->tracks) {
+      pending.insert(QString::fromStdString(track.id.toString()), track.visible);
+    }
+  }
+  std::vector<edit::EditCommand> commands;
+  for (const edit::Track& track : sequence->tracks) {
+    const bool shouldShow = trackMatchesVisibilityPreset(track, preset);
+    if (track.visible == shouldShow) {
+      continue;
+    }
+    commands.push_back({.operation = edit::SetTrackVisibilityCommand{.sequence_id = sequence_id,
+                                                                     .track_id = track.id,
+                                                                     .visible = shouldShow},
+                        .coalescing_key = {}});
+  }
+  if (commands.empty()) {
+    syncTrackNavRestoreAvailability();
+    return;
+  }
+  if (!applyBatch(std::move(commands), tr("Could not apply the track visibility preset"))) {
+    syncTrackNavRestoreAvailability();
+    return;
+  }
+  if (!snapshot_for_sequence) {
+    track_visibility_snapshot_ = std::move(pending);
+    track_visibility_snapshot_sequence_id_ = sequence_id;
+  }
+  syncTrackNavRestoreAvailability();
+}
+
+void EditorController::restoreTrackVisibility() {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || !track_visibility_snapshot_.has_value() ||
+      track_visibility_snapshot_sequence_id_ != sequence->id) {
+    return;
+  }
+  const edit::EntityId sequence_id = sequence->id;
+  std::vector<edit::EditCommand> commands;
+  for (const edit::Track& track : sequence->tracks) {
+    const QString track_id = QString::fromStdString(track.id.toString());
+    const bool target = track_visibility_snapshot_->value(track_id, track.visible);
+    if (track.visible == target) {
+      continue;
+    }
+    commands.push_back({.operation = edit::SetTrackVisibilityCommand{.sequence_id = sequence_id,
+                                                                     .track_id = track.id,
+                                                                     .visible = target},
+                        .coalescing_key = {}});
+  }
+  if (!commands.empty() &&
+      !applyBatch(std::move(commands), tr("Could not restore track visibility"))) {
+    syncTrackNavRestoreAvailability();
+    return;
+  }
+  clearTrackVisibilitySnapshot();
+  syncTrackNavRestoreAvailability();
+}
+
+void EditorController::navigateToTrack(const QString& trackId) {
+  if (window_.timeline() == nullptr) {
+    return;
+  }
+  window_.timeline()->focusTrack(trackId);
+  if (window_.trackNav() != nullptr) {
+    window_.trackNav()->setActiveTrackId(trackId);
+  }
+}
+
 void EditorController::removeTrack(const QString& trackId) {
   const edit::Sequence* sequence = currentSequence();
   const auto id = parseId(trackId);
@@ -9423,6 +9569,10 @@ void EditorController::refreshTimelineView() {
   const auto project = editor_->projectAt(editor_->revision());
   const edit::Sequence* sequence = currentSequence();
   if (sequence == nullptr) {
+    if (window_.trackNav() != nullptr) {
+      window_.trackNav()->setTracks({});
+    }
+    syncTrackNavRestoreAvailability();
     window_.setTimelineView(kUiTimescale * 10, kUiTimescale, {}, {});
     return;
   }
@@ -9609,6 +9759,10 @@ void EditorController::refreshTimelineView() {
   }
   const qint64 duration = std::max<qint64>(timelineValue(edit::sequenceDuration(*sequence)),
                                            static_cast<qint64>(timeline_time_scale_) * 10);
+  if (window_.trackNav() != nullptr) {
+    window_.trackNav()->setTracks(tracks);
+  }
+  syncTrackNavRestoreAvailability();
   window_.setTimelineView(duration, timeline_time_scale_, std::move(tracks), std::move(clips),
                           std::move(markers), std::move(gaps));
   window_.timeline()->setLinkedSelectionEnabled(linked_selection_enabled_);

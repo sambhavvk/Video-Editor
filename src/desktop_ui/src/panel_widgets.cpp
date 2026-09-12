@@ -675,6 +675,154 @@ void MarkerListWidget::setMarkers(const QVector<TimelineMarkerView>& markers) {
   }
 }
 
+TrackNavWidget::TrackNavWidget(QWidget* parent) : QWidget(parent) {
+  setObjectName(QStringLiteral("trackNavPanel"));
+  setAccessibleName(tr("Track navigation"));
+  auto* layout = new QVBoxLayout(this);
+  layout->setContentsMargins(8, 4, 8, 4);
+  layout->setSpacing(4);
+
+  auto* controls = new QHBoxLayout();
+  controls->setSpacing(6);
+  search_ = new QLineEdit(this);
+  search_->setObjectName(QStringLiteral("trackNavSearch"));
+  search_->setAccessibleName(tr("Search tracks"));
+  search_->setPlaceholderText(tr("Search tracks…"));
+  search_->setClearButtonEnabled(true);
+  controls->addWidget(search_, 1);
+
+  visibility_preset_ = new QComboBox(this);
+  visibility_preset_->setObjectName(QStringLiteral("trackVisibilityPreset"));
+  visibility_preset_->setAccessibleName(tr("Track visibility preset"));
+  visibility_preset_->addItem(tr("All tracks"), static_cast<int>(TrackVisibilityPreset::AllTracks));
+  visibility_preset_->addItem(tr("Dialogue"), static_cast<int>(TrackVisibilityPreset::Dialogue));
+  visibility_preset_->addItem(tr("Music"), static_cast<int>(TrackVisibilityPreset::Music));
+  visibility_preset_->addItem(tr("Effects"), static_cast<int>(TrackVisibilityPreset::Effects));
+  visibility_preset_->addItem(tr("Video only"), static_cast<int>(TrackVisibilityPreset::VideoOnly));
+  controls->addWidget(visibility_preset_);
+
+  restore_visibility_ = new QPushButton(tr("Restore"), this);
+  restore_visibility_->setObjectName(QStringLiteral("trackVisibilityRestore"));
+  restore_visibility_->setAccessibleName(tr("Restore track visibility"));
+  restore_visibility_->setEnabled(false);
+  controls->addWidget(restore_visibility_);
+
+  height_preset_ = new QComboBox(this);
+  height_preset_->setObjectName(QStringLiteral("trackHeightPreset"));
+  height_preset_->setAccessibleName(tr("Track height preset"));
+  height_preset_->addItem(tr("Compact"), static_cast<int>(TrackHeightPreset::Compact));
+  height_preset_->addItem(tr("Normal"), static_cast<int>(TrackHeightPreset::Normal));
+  height_preset_->addItem(tr("Expanded"), static_cast<int>(TrackHeightPreset::Expanded));
+  height_preset_->setCurrentIndex(1);
+  controls->addWidget(height_preset_);
+  layout->addLayout(controls);
+
+  list_ = new QListWidget(this);
+  list_->setObjectName(QStringLiteral("trackNavList"));
+  list_->setAccessibleName(tr("Matching tracks"));
+  list_->setMaximumHeight(72);
+  layout->addWidget(list_, 1);
+
+  connect(search_, &QLineEdit::textChanged, this, &TrackNavWidget::applyFilter);
+  connect(list_, &QListWidget::itemActivated, this, [this](QListWidgetItem* item) {
+    if (item != nullptr) {
+      emit trackActivated(item->data(Qt::UserRole).toString());
+    }
+  });
+  connect(visibility_preset_, &QComboBox::activated, this, [this](const int index) {
+    emit visibilityPresetRequested(
+        static_cast<TrackVisibilityPreset>(visibility_preset_->itemData(index).toInt()));
+  });
+  connect(restore_visibility_, &QPushButton::clicked, this,
+          &TrackNavWidget::visibilityRestoreRequested);
+  connect(height_preset_, &QComboBox::activated, this, [this](const int index) {
+    emit trackHeightPresetRequested(
+        static_cast<TrackHeightPreset>(height_preset_->itemData(index).toInt()));
+  });
+}
+
+void TrackNavWidget::setTracks(const QVector<TimelineTrackView>& tracks) {
+  tracks_ = tracks;
+  applyFilter(search_ == nullptr ? QString{} : search_->text());
+}
+
+void TrackNavWidget::setActiveTrackId(const QString& trackId) {
+  active_track_id_ = trackId;
+  if (list_ == nullptr) {
+    return;
+  }
+  for (int index = 0; index < list_->count(); ++index) {
+    auto* item = list_->item(index);
+    if (item == nullptr) {
+      continue;
+    }
+    const bool active = item->data(Qt::UserRole).toString() == active_track_id_;
+    item->setSelected(active);
+    if (active) {
+      list_->scrollToItem(item, QAbstractItemView::PositionAtCenter);
+    }
+  }
+}
+
+void TrackNavWidget::setRestoreAvailable(const bool available) {
+  if (restore_visibility_ != nullptr) {
+    restore_visibility_->setEnabled(available);
+  }
+}
+
+bool TrackNavWidget::trackMatchesQuery(const TimelineTrackView& track,
+                                       const QString& query) const {
+  const QString lowered = query.trimmed().toLower();
+  if (lowered.isEmpty()) {
+    return true;
+  }
+  if (track.displayName.toLower().contains(lowered)) {
+    return true;
+  }
+  switch (track.kind) {
+  case TrackKind::Video:
+    return QStringLiteral("video").startsWith(lowered);
+  case TrackKind::Audio:
+    return QStringLiteral("audio").startsWith(lowered);
+  case TrackKind::Caption:
+    return QStringLiteral("caption").startsWith(lowered);
+  }
+  return false;
+}
+
+void TrackNavWidget::applyFilter(const QString& query) {
+  if (list_ == nullptr) {
+    return;
+  }
+  list_->clear();
+  for (const auto& track : tracks_) {
+    if (!trackMatchesQuery(track, query)) {
+      continue;
+    }
+    QString kind;
+    switch (track.kind) {
+    case TrackKind::Video:
+      kind = tr("Video");
+      break;
+    case TrackKind::Audio:
+      kind = tr("Audio");
+      break;
+    case TrackKind::Caption:
+      kind = tr("Caption");
+      break;
+    }
+    auto* item = new QListWidgetItem(QStringLiteral("%1 · %2").arg(track.displayName, kind));
+    item->setData(Qt::UserRole, track.id);
+    if (!track.visible) {
+      item->setForeground(palette().color(QPalette::Disabled, QPalette::Text));
+    }
+    list_->addItem(item);
+  }
+  if (!active_track_id_.isEmpty()) {
+    setActiveTrackId(active_track_id_);
+  }
+}
+
 ColorWheelWidget::ColorWheelWidget(const Role role, QWidget* parent)
     : QWidget(parent), role_(role) {
   setObjectName(role == Role::Lift ? QStringLiteral("colorWheelLift")

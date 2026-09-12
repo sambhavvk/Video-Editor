@@ -201,6 +201,14 @@ visibility, and targeting. Locked tracks reject structural edits with a direct s
 Hidden video tracks do not contribute to preview or export. Targeted, unlocked compatible tracks
 receive media insertion.
 
+Above the marker list, the **Track navigation** bar helps on larger timelines. **Search tracks**
+filters the list by name or kind; double-click a row to scroll that track into view without moving
+the playhead or changing clip selection. **Visibility presets** isolate Dialogue, Music, Effects, or
+Video-only lanes using track names (for example `A1 · Dialogue`); **Restore** returns to the
+visibility captured before the first isolate preset (one undo step per preset). **Compact**, **Normal**,
+and **Expanded** height presets set row size for waveform inspection; the header wheel still adjusts
+height continuously.
+
 Double-click the ruler or press **M** to add a color-coded marker. Drag a ranged marker's right
 edge to set duration. The marker list below the timeline shows all markers in time order;
 double-click a row to jump the playhead. Click/drag markers to select and move them through

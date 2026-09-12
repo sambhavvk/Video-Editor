@@ -14,6 +14,7 @@
 #include <QVector>
 
 #include <array>
+#include <cstdint>
 
 namespace video_editor::desktop_ui {
 
@@ -35,6 +36,20 @@ enum class TrackKind {
   Video,
   Audio,
   Caption,
+};
+
+enum class TrackVisibilityPreset : std::uint8_t {
+  AllTracks,
+  Dialogue,
+  Music,
+  Effects,
+  VideoOnly,
+};
+
+enum class TrackHeightPreset : std::uint8_t {
+  Compact,
+  Normal,
+  Expanded,
 };
 
 struct MediaItemView {
@@ -361,6 +376,8 @@ struct ExportJobView final {
 
 Q_DECLARE_METATYPE(video_editor::desktop_ui::Workspace)
 Q_DECLARE_METATYPE(video_editor::desktop_ui::TrackKind)
+Q_DECLARE_METATYPE(video_editor::desktop_ui::TrackVisibilityPreset)
+Q_DECLARE_METATYPE(video_editor::desktop_ui::TrackHeightPreset)
 Q_DECLARE_METATYPE(video_editor::desktop_ui::TimelineSnapKind)
 Q_DECLARE_METATYPE(video_editor::desktop_ui::KeyframeInterpolationView)
 Q_DECLARE_METATYPE(video_editor::desktop_ui::TranscriptionState)

@@ -13,6 +13,7 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QComboBox>
 #include <QDataStream>
 #include <QDir>
 #include <QElapsedTimer>
@@ -229,6 +230,7 @@ private slots:
   void opacityEnvelopeUpsertsVideoOpacityKeyframe();
   void freezeFrameHoldsSourceAtPlayhead();
   void resyncLinkedAvMovesPartnersInOneUndoStep();
+  void trackVisibilityPresetIsolatesAndRestores();
 
 private:
   std::unique_ptr<QTemporaryDir> application_data_;
@@ -2105,6 +2107,114 @@ void EditorControllerTest::resyncLinkedAvMovesPartnersInOneUndoStep() {
   QVERIFY(undone_video != nullptr);
   QCOMPARE(undone_audio->timeline_range.start, offset_audio_start);
   QCOMPARE(undone_video->timeline_range.start, offset_video_start);
+}
+
+void EditorControllerTest::trackVisibilityPresetIsolatesAndRestores() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString media_path = directory.filePath(QStringLiteral("tracks.mkv"));
+  QVERIFY(writeMuxedAv(media_path));
+
+  QSettings settings(directory.filePath(QStringLiteral("tracks.ini")), QSettings::IniFormat);
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+  controller.importPaths({media_path});
+  QTRY_COMPARE_WITH_TIMEOUT(
+      controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
+  window.mediaActivated(window.mediaBin()->items().front().id);
+  window.rippleInsertFromSource();
+
+  auto project = controller.editor().projectAt(controller.editor().revision());
+  QStringList audio_ids;
+  for (const auto& track : project->sequences.front().tracks) {
+    if (track.kind == video_editor::edit::TrackKind::Audio) {
+      audio_ids.push_back(QString::fromStdString(track.id.toString()));
+    }
+  }
+  while (audio_ids.size() < 3) {
+    window.timeline()->trackAddRequested(video_editor::desktop_ui::TrackKind::Audio);
+    project = controller.editor().projectAt(controller.editor().revision());
+    for (const auto& track : project->sequences.front().tracks) {
+      if (track.kind == video_editor::edit::TrackKind::Audio) {
+        const QString id = QString::fromStdString(track.id.toString());
+        if (!audio_ids.contains(id)) {
+          audio_ids.push_back(id);
+        }
+      }
+    }
+  }
+  audio_ids = audio_ids.mid(0, 3);
+  const QStringList names{QStringLiteral("Dialogue"), QStringLiteral("Music"),
+                          QStringLiteral("Effects")};
+  for (int index = 0; index < audio_ids.size(); ++index) {
+    window.timeline()->trackRenameRequested(audio_ids.at(index), names.at(index));
+  }
+  const QString music_id = audio_ids.at(1);
+
+  auto* nav = window.trackNav();
+  auto* visibility = nav->findChild<QComboBox*>(QStringLiteral("trackVisibilityPreset"));
+  auto* restore = nav->findChild<QPushButton*>(QStringLiteral("trackVisibilityRestore"));
+  QVERIFY(nav != nullptr);
+  QVERIFY(visibility != nullptr);
+  QVERIFY(restore != nullptr);
+
+  const int music_index =
+      visibility->findData(static_cast<int>(video_editor::desktop_ui::TrackVisibilityPreset::Music));
+  QVERIFY(music_index >= 0);
+  visibility->setCurrentIndex(music_index);
+  emit visibility->activated(music_index);
+  project = controller.editor().projectAt(controller.editor().revision());
+  for (const auto& track : project->sequences.front().tracks) {
+    const QString id = QString::fromStdString(track.id.toString());
+    if (id == music_id) {
+      QVERIFY(track.visible);
+    } else if (track.kind == video_editor::edit::TrackKind::Audio ||
+               track.kind == video_editor::edit::TrackKind::Video) {
+      QVERIFY(!track.visible);
+    }
+  }
+  QVERIFY(restore->isEnabled());
+
+  const QString original_sequence_id =
+      QString::fromStdString(project->sequences.front().id.toString());
+  QString clip_id;
+  for (const auto& track : project->sequences.front().tracks) {
+    if (!track.clips.empty()) {
+      clip_id = QString::fromStdString(track.clips.front().id.toString());
+      break;
+    }
+  }
+  QVERIFY(!clip_id.isEmpty());
+  window.timeline()->clipSelectionChanged(QStringList{clip_id}, clip_id);
+  window.action(QStringLiteral("nestSelectedClips"))->trigger();
+  QVERIFY(!restore->isEnabled());
+  auto* tabs = window.findChild<QTabBar*>(QStringLiteral("sequenceTabBar"));
+  QVERIFY(tabs != nullptr);
+  int original_tab = -1;
+  for (int index = 0; index < tabs->count(); ++index) {
+    if (tabs->tabData(index).toString() == original_sequence_id) {
+      original_tab = index;
+      break;
+    }
+  }
+  QVERIFY(original_tab >= 0);
+  tabs->setCurrentIndex(original_tab);
+  QVERIFY(restore->isEnabled());
+
+  restore->click();
+  project = controller.editor().projectAt(controller.editor().revision());
+  const video_editor::edit::Sequence* original = nullptr;
+  for (const auto& sequence : project->sequences) {
+    if (QString::fromStdString(sequence.id.toString()) == original_sequence_id) {
+      original = &sequence;
+      break;
+    }
+  }
+  QVERIFY(original != nullptr);
+  for (const auto& track : original->tracks) {
+    QVERIFY(track.visible);
+  }
+  QVERIFY(!restore->isEnabled());
 }
 
 void EditorControllerTest::otioMenuActionsEmitImportExportSignals() {

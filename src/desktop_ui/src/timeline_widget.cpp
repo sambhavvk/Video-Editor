@@ -597,6 +597,47 @@ void TimelineWidget::setTrackHeight(int height) {
   viewport()->update();
 }
 
+void TimelineWidget::applyTrackHeightPreset(const TrackHeightPreset preset) {
+  switch (preset) {
+  case TrackHeightPreset::Compact:
+    setTrackHeight(40);
+    break;
+  case TrackHeightPreset::Normal:
+    setTrackHeight(58);
+    break;
+  case TrackHeightPreset::Expanded:
+    setTrackHeight(96);
+    break;
+  }
+}
+
+void TimelineWidget::revealTrack(const int trackIndex) {
+  if (trackIndex < 0 || trackIndex >= tracks_.size()) {
+    return;
+  }
+  const int trackTop = trackIndex * track_height_;
+  const int viewportHeight = viewport()->height();
+  const int scrollY = verticalScrollBar()->value();
+  const int visibleBody = std::max(0, viewportHeight - ruler_height_);
+  if (trackTop < scrollY) {
+    verticalScrollBar()->setValue(trackTop);
+  } else if (trackTop + track_height_ > scrollY + visibleBody) {
+    verticalScrollBar()->setValue(std::max(0, trackTop + track_height_ - visibleBody));
+  }
+}
+
+void TimelineWidget::focusTrack(const QString& trackId) {
+  for (int index = 0; index < tracks_.size(); ++index) {
+    if (tracks_.at(index).id != trackId) {
+      continue;
+    }
+    active_track_id_ = trackId;
+    revealTrack(index);
+    viewport()->update();
+    return;
+  }
+}
+
 void TimelineWidget::setLinkedSelectionEnabled(const bool enabled) {
   if (linked_selection_enabled_ == enabled) {
     return;

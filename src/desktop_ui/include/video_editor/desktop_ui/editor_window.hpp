@@ -37,6 +37,7 @@ class EffectsPanelWidget;
 class InspectorWidget;
 class MediaBinWidget;
 class MarkerListWidget;
+class TrackNavWidget;
 class ProgramOutputWindow;
 class ProgramViewer;
 class ScopeWidget;
@@ -75,6 +76,9 @@ public:
   }
   [[nodiscard]] MarkerListWidget* markerList() const noexcept {
     return marker_list_;
+  }
+  [[nodiscard]] TrackNavWidget* trackNav() const noexcept {
+    return track_nav_;
   }
   [[nodiscard]] MediaBinWidget* mediaBin() const noexcept {
     return media_bin_;
@@ -196,6 +200,10 @@ signals:
   void sequenceSettingsRequested();
   void duplicateSequenceRequested();
   void markerListJumpRequested(const QString& markerId);
+  void trackNavActivated(const QString& trackId);
+  void trackVisibilityPresetRequested(TrackVisibilityPreset preset);
+  void trackVisibilityRestoreRequested();
+  void trackHeightPresetRequested(TrackHeightPreset preset);
   void programClipInfoToggled(bool enabled);
   void sourceTimecodeToggled(bool enabled);
   void gotoTimecodeRequested();
@@ -339,6 +347,7 @@ private:
   QAction* reopen_last_on_startup_action_{nullptr};
   TimelineWidget* timeline_{nullptr};
   MarkerListWidget* marker_list_{nullptr};
+  TrackNavWidget* track_nav_{nullptr};
   QWidget* source_container_{nullptr};
   QFrame* precision_trim_{nullptr};
   QLabel* precision_tool_status_{nullptr};

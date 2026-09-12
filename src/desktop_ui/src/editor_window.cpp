@@ -893,6 +893,8 @@ void EditorWindow::createCentralArea() {
                              {QStringLiteral("audio-4"), tr("A4 · Ambience"), TrackKind::Audio},
                          },
                          {});
+  track_nav_ = new TrackNavWidget(timelineArea);
+  timelineLayout->addWidget(track_nav_);
   marker_list_ = new MarkerListWidget(timelineArea);
   marker_list_->setMaximumHeight(110);
   timelineLayout->addWidget(marker_list_);
@@ -1782,6 +1784,17 @@ void EditorWindow::connectControllerSurface() {
           &EditorWindow::sourceTimecodeToggled);
   connect(marker_list_, &MarkerListWidget::markerActivated, this,
           &EditorWindow::markerListJumpRequested);
+  connect(track_nav_, &TrackNavWidget::trackActivated, this, &EditorWindow::trackNavActivated);
+  connect(track_nav_, &TrackNavWidget::visibilityPresetRequested, this,
+          &EditorWindow::trackVisibilityPresetRequested);
+  connect(track_nav_, &TrackNavWidget::visibilityRestoreRequested, this,
+          &EditorWindow::trackVisibilityRestoreRequested);
+  connect(track_nav_, &TrackNavWidget::trackHeightPresetRequested, this,
+          [this](const TrackHeightPreset preset) {
+            if (timeline_ != nullptr) {
+              timeline_->applyTrackHeightPreset(preset);
+            }
+          });
   connect(
       media_bin_, &MediaBinWidget::revealInFilesRequested, this, [this](const QString& mediaId) {
         if (media_bin_ != nullptr) {

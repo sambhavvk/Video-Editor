@@ -174,6 +174,9 @@ public slots:
   [[nodiscard]] int trackHeight() const noexcept {
     return track_height_;
   }
+  void applyTrackHeightPreset(TrackHeightPreset preset);
+  void focusTrack(const QString& trackId);
+  void revealTrack(int trackIndex);
   void setLinkedSelectionEnabled(bool enabled);
   [[nodiscard]] bool linkedSelectionEnabled() const noexcept {
     return linked_selection_enabled_;
