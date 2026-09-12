@@ -268,6 +268,10 @@ with analyzing or stale state when a valid result is unavailable. Choose a named
 **System default**. Background polling detects loss within one second, pauses audio safely, and
 reopens a returned endpoint only while the previous playback intent is still active.
 
+**Music ducking** (Audio & Captions) generates editable `audio.volume` keyframes on a selected music
+track from dialogue on another track. Set threshold, depth, attack, and release, preview the
+envelope, then apply as one undoable revision.
+
 **Analyze loudness** renders the immutable current revision on a worker through libebur128. The
 result previews the measured loudness and proposed gain for the selected −24 through −9 LUFS target.
 **Apply** is enabled only while that revision is current and every contributing track can accept the
@@ -365,10 +369,15 @@ Open **Audio & Captions** to:
 - edit caption text directly in the table;
 - delete the selected caption;
 - search caption or timed-word text and double-click a result to seek to its exact timeline time;
+- click a timed word to seek while keeping the current selection; uncertain words show a confidence column;
+- assemble selected transcript passages into the timeline in one undo step;
+- apply reusable channel style kits (lower third, chapter card, caption defaults) and save your own kit;
 - edit alignment, vertical position, safe margin, text/background colors, emphasis, and outline;
 - download the optional model, transcribe a selected media clip locally, cancel it, and review the
   proposed timed captions;
 - review measured-silence cuts and conservative filler-word cuts before applying them;
+- adjust breathing room, protect the In/Out range, and audition before/after when reviewing cuts;
+- generate reviewable music ducking on a selected dialogue track (threshold, depth, attack/release);
 - export the sequence captions as SRT or WebVTT.
 
 Import validates timing, order, overlap, cue text, and UTF-8. All cues from one import form a single
@@ -396,6 +405,9 @@ items come from bounded, incremental analysis of exact 48 kHz timeline audio, us
 `um`, `uh`, and `erm` transcript fillers are labelled separately and start unselected. Toggle any
 item, then apply or discard the set. Applying accepted captions and cuts creates one atomic revision
 and one undo step; edits made after analysis make the review stale and require regeneration.
+
+Use **Timeline → Create Aspect-Ratio Copies…** to add independent landscape (16:9) and vertical
+(9:16) sequence copies with labeled start markers. Edits in one copy do not propagate to the other.
 
 ## Create an editing proxy
 

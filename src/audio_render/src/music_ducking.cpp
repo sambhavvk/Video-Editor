@@ -27,9 +27,7 @@ std::vector<MusicDuckingKeyframe> generateMusicDuckingEnvelope(
   for (std::size_t index = 0; index < dialogue_peaks_dbfs.size(); ++index) {
     const double target_db =
         dialogue_peaks_dbfs[index] >= options.threshold_dbfs ? options.depth_db : 0.0;
-    const std::size_t smoothing =
-        std::abs(target_db - envelope_db) > std::abs(options.depth_db) * 0.5 ? attack_blocks
-                                                                               : release_blocks;
+    const std::size_t smoothing = target_db < envelope_db ? attack_blocks : release_blocks;
     const double step = (target_db - envelope_db) / static_cast<double>(smoothing);
     envelope_db += step;
     const edit::Time time = block_time.scaled(static_cast<std::int64_t>(index + 1), 1,

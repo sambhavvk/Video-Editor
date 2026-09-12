@@ -2742,10 +2742,19 @@ void AudioMixerWidget::setMusicDuckingTracks(const QStringList& trackNames) {
   if (ducking_dialogue_track_ == nullptr) {
     return;
   }
+  const QString selected = ducking_dialogue_track_->currentData().toString();
   const QSignalBlocker blocker(ducking_dialogue_track_);
   ducking_dialogue_track_->clear();
   for (int index = 0; index < trackNames.size(); ++index) {
-    ducking_dialogue_track_->addItem(trackNames.at(index), index);
+    QVariant data = index;
+    if (index < tracks_.size() && !tracks_.at(index).id.isEmpty()) {
+      data = tracks_.at(index).id;
+    }
+    ducking_dialogue_track_->addItem(trackNames.at(index), data);
+  }
+  const int restored = ducking_dialogue_track_->findData(selected);
+  if (restored >= 0) {
+    ducking_dialogue_track_->setCurrentIndex(restored);
   }
 }
 
@@ -2767,8 +2776,13 @@ int AudioMixerWidget::musicDuckingReleaseMs() const {
 
 int AudioMixerWidget::musicDuckingDialogueTrackIndex() const {
   return ducking_dialogue_track_ != nullptr && ducking_dialogue_track_->currentIndex() >= 0
-             ? ducking_dialogue_track_->currentData().toInt()
+             ? ducking_dialogue_track_->currentIndex()
              : 0;
+}
+
+QString AudioMixerWidget::musicDuckingDialogueTrackId() const {
+  return ducking_dialogue_track_ != nullptr ? ducking_dialogue_track_->currentData().toString()
+                                            : QString{};
 }
 
 namespace {
@@ -3208,6 +3222,11 @@ CaptionsPanelWidget::CaptionsPanelWidget(QWidget* parent) : QWidget(parent) {
       emit wordActivated(item->data(Qt::UserRole).toString(),
                          item->data(Qt::UserRole + 1).toLongLong());
   });
+  connect(words_, &QListWidget::itemClicked, this, [this](QListWidgetItem* item) {
+    if (item != nullptr)
+      emit wordActivated(item->data(Qt::UserRole).toString(),
+                         item->data(Qt::UserRole + 1).toLongLong());
+  });
   connect(words_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem* item) {
     if (item != nullptr)
       emit wordActivated(item->data(Qt::UserRole).toString(),
@@ -3352,11 +3371,12 @@ void CaptionsPanelWidget::setCaptionRows(const QVector<CaptionRowView>& rows) {
 }
 
 void CaptionsPanelWidget::setTranscriptPlayhead(const qint64 position) {
-  if (transcript_playhead_ == position && !rows_.isEmpty()) {
-    return;
-  }
+  const bool same_position = transcript_playhead_ == position;
   transcript_playhead_ = position;
+  bool chrome_changed = !same_position || rows_.isEmpty();
   for (auto& row : rows_) {
+    const bool was_active = row.playheadActive;
+    const QString previous_word = row.activeWordId;
     row.playheadActive = position >= row.start && position < row.end;
     row.activeWordId.clear();
     if (row.playheadActive) {
@@ -3367,8 +3387,14 @@ void CaptionsPanelWidget::setTranscriptPlayhead(const qint64 position) {
         }
       }
     }
+    if (was_active != row.playheadActive || previous_word != row.activeWordId) {
+      chrome_changed = true;
+    }
   }
-  refreshTranscriptTable();
+  if (!chrome_changed) {
+    return;
+  }
+  applyPlayheadChrome();
   scrollToActiveRow();
   const int currentRow = table_->currentRow();
   if (currentRow >= 0) {
@@ -3409,8 +3435,9 @@ void CaptionsPanelWidget::refreshTranscriptTable() {
 
     const QString confidenceText =
         view.suggested ? tr("Suggested · %1%").arg(view.confidence * 100.0, 0, 'f', 0)
-        : view.searchHighlights.isEmpty() ? tr("Edited")
-                                          : tr("%1 match(es)").arg(view.searchHighlights.size());
+        : view.searchHighlights.isEmpty()
+            ? tr("%1%").arg(view.confidence * 100.0, 0, 'f', 0)
+            : tr("%1 match(es)").arg(view.searchHighlights.size());
     auto* confidence = new QTableWidgetItem(confidenceText);
     confidence->setFlags(confidence->flags() & ~Qt::ItemIsEditable);
     if (view.playheadActive) {
@@ -3419,6 +3446,21 @@ void CaptionsPanelWidget::refreshTranscriptTable() {
     table_->setItem(row, 3, confidence);
   }
   table_->resizeRowsToContents();
+}
+
+void CaptionsPanelWidget::applyPlayheadChrome() {
+  if (table_ == nullptr) {
+    return;
+  }
+  const QSignalBlocker blocker(table_);
+  for (int row = 0; row < rows_.size() && row < table_->rowCount(); ++row) {
+    const QBrush brush = rows_.at(row).playheadActive ? QBrush(QColor(48, 96, 160, 64)) : QBrush();
+    for (int column = 0; column < table_->columnCount(); ++column) {
+      if (auto* item = table_->item(row, column); item != nullptr) {
+        item->setBackground(brush);
+      }
+    }
+  }
 }
 
 void CaptionsPanelWidget::scrollToActiveRow() {
@@ -3612,6 +3654,7 @@ int CaptionsPanelWidget::currentCaptionRow() const {
 void CaptionsPanelWidget::updateWordList(const int row) {
   if (words_ == nullptr)
     return;
+  const QStringList selected = selectedWordIds();
   const QSignalBlocker blocker(words_);
   words_->clear();
   if (row < 0 || row >= rows_.size())
@@ -3632,7 +3675,9 @@ void CaptionsPanelWidget::updateWordList(const int row) {
     }
     if (!rowView.activeWordId.isEmpty() && word.id == rowView.activeWordId) {
       item->setBackground(QBrush(QColor(48, 96, 160, 96)));
-      words_->setCurrentItem(item);
+    }
+    if (selected.contains(word.id)) {
+      item->setSelected(true);
     }
   }
 }

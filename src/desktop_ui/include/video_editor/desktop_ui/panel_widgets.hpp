@@ -339,6 +339,7 @@ public:
   [[nodiscard]] int musicDuckingAttackMs() const;
   [[nodiscard]] int musicDuckingReleaseMs() const;
   [[nodiscard]] int musicDuckingDialogueTrackIndex() const;
+  [[nodiscard]] QString musicDuckingDialogueTrackId() const;
 
 signals:
   void gainEdited(int trackIndex, double decibels);
@@ -446,6 +447,7 @@ signals:
 private:
   void updateWordList(int row);
   void refreshTranscriptTable();
+  void applyPlayheadChrome();
   void scrollToActiveRow();
   [[nodiscard]] static QString captionHtml(const CaptionRowView& row);
   [[nodiscard]] static QString uncertainWordLabel(const CaptionWordView& word);

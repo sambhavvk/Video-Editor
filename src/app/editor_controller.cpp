@@ -160,7 +160,7 @@ constexpr double kUncertainWordProbability = 0.75;
   if (ms <= 0) {
     return edit::Time{};
   }
-  return edit::Time(static_cast<std::int64_t>(ms) * 48, 1'000)
+  return edit::Time(static_cast<std::int64_t>(ms), 1'000)
       .rescaledTo(timescale, edit::RoundingMode::NearestTiesEven);
 }
 
@@ -195,15 +195,19 @@ edit::ColorRgba markerColorForIndex(const std::size_t index) {
   return palette[index % palette.size()];
 }
 
+void remintEffectIds(edit::Effect& effect) {
+  effect.id = edit::EntityId::generate();
+  for (auto& [_, parameter] : effect.parameters) {
+    for (auto& keyframe : parameter.keyframes) {
+      keyframe.id = edit::EntityId::generate();
+    }
+  }
+}
+
 void remintClipIds(edit::Clip& clip) {
   clip.id = edit::EntityId::generate();
   for (auto& effect : clip.effects) {
-    effect.id = edit::EntityId::generate();
-    for (auto& [_, parameter] : effect.parameters) {
-      for (auto& keyframe : parameter.keyframes) {
-        keyframe.id = edit::EntityId::generate();
-      }
-    }
+    remintEffectIds(effect);
   }
 }
 
@@ -213,6 +217,10 @@ edit::Sequence duplicateSequenceWithNewIds(const edit::Sequence& source, const s
   copy.name = name;
   std::unordered_map<edit::EntityId, edit::EntityId> clip_ids;
   for (auto& track : copy.tracks) {
+    track.id = edit::EntityId::generate();
+    for (auto& effect : track.effects) {
+      remintEffectIds(effect);
+    }
     for (auto& clip : track.clips) {
       const edit::EntityId old_id = clip.id;
       remintClipIds(clip);
@@ -235,6 +243,9 @@ edit::Sequence duplicateSequenceWithNewIds(const edit::Sequence& source, const s
   }
   for (auto& caption : copy.captions) {
     caption.id = edit::EntityId::generate();
+    for (auto& word : caption.words) {
+      word.id = edit::EntityId::generate();
+    }
   }
   return copy;
 }
@@ -9127,15 +9138,11 @@ void EditorController::generateMusicDucking() {
     window_.showTransientMessage(tr("Select an audio clip to duck under dialogue"));
     return;
   }
-  const int dialogue_index = window_.audioMixer()->musicDuckingDialogueTrackIndex();
-  if (dialogue_index < 0 ||
-      static_cast<std::size_t>(dialogue_index) >= sequence->tracks.size()) {
+  const auto dialogue_id = parseId(window_.audioMixer()->musicDuckingDialogueTrackId());
+  const edit::Track* dialogue_track =
+      dialogue_id.has_value() ? edit::findTrack(*sequence, *dialogue_id) : nullptr;
+  if (dialogue_track == nullptr || dialogue_track->kind != edit::TrackKind::Audio) {
     window_.showTransientMessage(tr("Choose a dialogue track for ducking"));
-    return;
-  }
-  const edit::Track& dialogue_track = sequence->tracks.at(static_cast<std::size_t>(dialogue_index));
-  if (dialogue_track.kind != edit::TrackKind::Audio) {
-    window_.showTransientMessage(tr("The selected ducking source must be an audio track"));
     return;
   }
   const auto snapshot_result = editor_->snapshot(sequence->id, editor_->revision());
@@ -9171,7 +9178,7 @@ void EditorController::generateMusicDucking() {
     const auto meters = renderer->trackMetersAt(sample + static_cast<std::int64_t>(count) - 1);
     float peak = -120.0F;
     for (const auto& track_meter : meters.tracks) {
-      if (track_meter.track_id != dialogue_track.id) {
+      if (track_meter.track_id != dialogue_track->id) {
         continue;
       }
       peak = std::max(peak, std::max(track_meter.peak[0], track_meter.peak[1]));
@@ -10704,6 +10711,7 @@ void EditorController::refreshCaptionView() {
     row.end = toUiTime(caption.range.end());
     row.searchHighlights = highlights_by_cue[index];
     row.playheadActive = playhead_ >= row.start && playhead_ < row.end;
+    row.confidence = caption.words.empty() ? 1.0 : 0.0;
     row.style.fontFamily = QString::fromStdString(caption.style.font_family);
     row.style.fontSize = caption.style.font_size;
     row.style.textColor = QColor::fromRgbF(static_cast<float>(caption.style.text_color.red),
@@ -10741,7 +10749,11 @@ void EditorController::refreshCaptionView() {
       if (row.playheadActive && playhead_ >= wordView.start && playhead_ < wordView.end) {
         row.activeWordId = wordView.id;
       }
+      row.confidence += word.probability;
       row.words.push_back(std::move(wordView));
+    }
+    if (!caption.words.empty()) {
+      row.confidence /= static_cast<double>(caption.words.size());
     }
     rows.push_back(std::move(row));
   }
@@ -10918,10 +10930,11 @@ void EditorController::insertAssembledPassages() {
         return;
       }
       edit::Clip clip = *source_clip;
-      clip.id = edit::EntityId::generate();
+      remintClipIds(clip);
       clip.kind = kind;
       clip.timeline_range = edit::TimeRange(insert_at, duration);
       clip.source_range = passage.source_range;
+      clip.linked_group.reset();
       if (asset->has_video && asset->has_audio) {
         clip.linked_group = linked;
       }
@@ -12939,7 +12952,7 @@ void EditorController::applyStyleKit(const QString& kitId) {
   }
   if (applyBatch(std::move(commands), tr("Could not apply the style kit"))) {
     refreshCaptionView();
-    window_.captionsPanel()->setStyleKits({}, kit->fontAttribution);
+    refreshStyleKits();
     window_.showTransientMessage(tr("Applied style kit \"%1\"").arg(kit->name));
   }
 }

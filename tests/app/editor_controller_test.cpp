@@ -31,6 +31,7 @@
 #include <QProcess>
 #include <QPushButton>
 #include <QTimer>
+#include <QSet>
 #include <QSettings>
 #include <QSignalSpy>
 #include <QStandardPaths>
@@ -199,6 +200,8 @@ private slots:
   void loadsSourceMonitorAndRippleInsertsMarkedRange();
   void inOutActionMarksProgramWhenSourceIsHidden();
   void importsSearchesAndExportsCaptions();
+  void createsIndependentAspectRatioCopies();
+  void applyingStyleKitKeepsSavedKitsVisible();
   void beginnerFifteenMinutePathWithoutFullEncode();
   void normalizationOnlyAdjustsAudibleContributingTracks();
   void realAudioDeviceUsesTheSampleCounterAsMasterClock();
@@ -1053,6 +1056,12 @@ void EditorControllerTest::importsSearchesAndExportsCaptions() {
                    .captions.at(1)
                    .text,
                std::string("Make every cut count"));
+  QCOMPARE(controller.editor()
+               .projectAt(controller.editor().revision())
+               ->sequences.front()
+               .captions.at(1)
+               .provenance.source,
+           video_editor::edit::CaptionWordSource::UserEdited);
   window.undoRequested();
   QCOMPARE(controller.editor()
                .projectAt(controller.editor().revision())
@@ -1095,6 +1104,113 @@ void EditorControllerTest::importsSearchesAndExportsCaptions() {
                ->sequences.front()
                .captions.size(),
            0U);
+}
+
+void EditorControllerTest::createsIndependentAspectRatioCopies() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString srt_path = directory.filePath(QStringLiteral("captions.srt"));
+  QFile source(srt_path);
+  QVERIFY(source.open(QIODevice::WriteOnly));
+  QVERIFY(source.write("1\n00:00:00,000 --> 00:00:01,000\nHello there\n\n") > 0);
+  source.close();
+
+  QSettings settings(directory.filePath(QStringLiteral("aspect-copies.ini")), QSettings::IniFormat);
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+  QVERIFY(controller.importCaptionFile(video_editor::app::pathFromQString(srt_path)));
+
+  const auto original = controller.editor().projectAt(controller.editor().revision());
+  QCOMPARE(original->sequences.size(), 1U);
+  const auto original_id = original->sequences.front().id;
+  const auto original_width = original->sequences.front().width;
+  const auto original_height = original->sequences.front().height;
+  QCOMPARE(original->sequences.front().captions.size(), 1U);
+
+  window.action(QStringLiteral("createAspectRatioVariants"))->trigger();
+
+  const auto project = controller.editor().projectAt(controller.editor().revision());
+  QCOMPARE(project->sequences.size(), 3U);
+  QSet<QString> ids;
+  const auto rememberId = [&ids](const std::string& id) {
+    const QString key = QString::fromStdString(id);
+    if (ids.contains(key)) {
+      return false;
+    }
+    ids.insert(key);
+    return true;
+  };
+  const video_editor::edit::Sequence* landscape = nullptr;
+  const video_editor::edit::Sequence* vertical = nullptr;
+  for (const auto& sequence : project->sequences) {
+    QVERIFY(rememberId(sequence.id.toString()));
+    for (const auto& track : sequence.tracks) {
+      QVERIFY(rememberId(track.id.toString()));
+    }
+    for (const auto& caption : sequence.captions) {
+      QVERIFY(rememberId(caption.id.toString()));
+      for (const auto& word : caption.words) {
+        QVERIFY(rememberId(word.id.toString()));
+      }
+    }
+    if (sequence.id == original_id) {
+      QCOMPARE(sequence.width, original_width);
+      QCOMPARE(sequence.height, original_height);
+    } else if (sequence.name.find("(Landscape 16:9)") != std::string::npos) {
+      landscape = &sequence;
+    } else if (sequence.name.find("(Vertical 9:16)") != std::string::npos) {
+      vertical = &sequence;
+    }
+  }
+  QVERIFY(landscape != nullptr);
+  QVERIFY(vertical != nullptr);
+  QCOMPARE(landscape->width, 1'920U);
+  QCOMPARE(landscape->height, 1'080U);
+  QCOMPARE(vertical->width, 1'080U);
+  QCOMPARE(vertical->height, 1'920U);
+  QVERIFY(!vertical->captions.empty());
+  QVERIFY(vertical->captions.front().style.safe_margin >= 0.12);
+  QVERIFY(vertical->captions.front().style.vertical_position >= 0.72);
+
+  window.undoRequested();
+  QCOMPARE(controller.editor().projectAt(controller.editor().revision())->sequences.size(), 1U);
+}
+
+void EditorControllerTest::applyingStyleKitKeepsSavedKitsVisible() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString srt_path = directory.filePath(QStringLiteral("captions.srt"));
+  QFile source(srt_path);
+  QVERIFY(source.open(QIODevice::WriteOnly));
+  QVERIFY(source.write("1\n00:00:00,000 --> 00:00:01,000\nHello there\n\n") > 0);
+  source.close();
+
+  QSettings settings(directory.filePath(QStringLiteral("style-kits.ini")), QSettings::IniFormat);
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+  QVERIFY(controller.importCaptionFile(video_editor::app::pathFromQString(srt_path)));
+
+  auto* styleGroup = window.findChild<QGroupBox*>(QStringLiteral("captionStyleGroup"));
+  QVERIFY(styleGroup != nullptr);
+  styleGroup->setChecked(true);
+  auto* kits = window.findChild<QComboBox*>(QStringLiteral("captionStyleKits"));
+  QVERIFY(kits != nullptr);
+  QVERIFY(kits->count() >= 3);
+  const int before = kits->count();
+  const int kitIndex = kits->findData(QStringLiteral("builtin-caption-style"));
+  QVERIFY(kitIndex >= 0);
+  kits->setCurrentIndex(kitIndex);
+  auto* apply = window.findChild<QPushButton*>(QStringLiteral("applyStyleKitButton"));
+  QVERIFY(apply != nullptr);
+  QVERIFY(apply->isEnabled());
+  apply->click();
+  QCOMPARE(kits->count(), before);
+  QCOMPARE(controller.editor()
+               .projectAt(controller.editor().revision())
+               ->sequences.front()
+               .captions.front()
+               .style.font_family,
+           std::string("Noto Sans"));
 }
 
 void EditorControllerTest::beginnerFifteenMinutePathWithoutFullEncode() {

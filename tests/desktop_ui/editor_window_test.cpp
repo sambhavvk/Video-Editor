@@ -1048,6 +1048,12 @@ void EditorWindowTest::audioMixerSetTracksKeepsStripsAliveForSameIds() {
   QCOMPARE(muteToggled.count(), 0);
   QCOMPARE(soloToggled.count(), 0);
 
+  auto* ducking = mixer.findChild<QComboBox*>(QStringLiteral("musicDuckingDialogueTrack"));
+  QVERIFY(ducking != nullptr);
+  QCOMPARE(ducking->count(), 2);
+  ducking->setCurrentIndex(1);
+  QCOMPARE(mixer.musicDuckingDialogueTrackId(), QStringLiteral("track-b"));
+
   const QPointF localPos(faderPtr->width() / 2.0, faderPtr->height() / 2.0);
   const QPointF globalPos = faderPtr->mapToGlobal(localPos.toPoint());
   QWheelEvent wheel(localPos, globalPos, QPoint(0, 0), QPoint(0, 120), Qt::NoButton, Qt::NoModifier,
@@ -1072,6 +1078,7 @@ void EditorWindowTest::audioMixerSetTracksKeepsStripsAliveForSameIds() {
   QCOMPARE(panEdited.count(), 0);
   QCOMPARE(muteToggled.count(), 0);
   QCOMPARE(soloToggled.count(), 0);
+  QCOMPARE(mixer.musicDuckingDialogueTrackId(), QStringLiteral("track-b"));
 }
 
 void EditorWindowTest::audioMixerShowsSystemDefaultAndAuthoritativeLufsStates() {
@@ -1145,10 +1152,20 @@ void EditorWindowTest::captionsPanelExposesTranscriptionAndWordNavigation() {
       .id = QStringLiteral("caption-id"),
       .timecode = QStringLiteral("00:00:00:00 → 00:00:01:00"),
       .text = QStringLiteral("Hello"),
+      .language = {},
+      .speakerLabel = QStringLiteral("Alex"),
       .start = 0,
       .end = 48'000,
-      .words = {{QStringLiteral("word-id"), QStringLiteral("Hello"), 240, 720, 0.91}}};
+      .words = {{QStringLiteral("word-id"), QStringLiteral("Hello"), 240, 720, 0.91}},
+      .searchHighlights = {},
+      .style = {},
+      .confidence = 0.91};
   captions.setCaptionRows({row});
+  auto* table = captions.findChild<QTableWidget*>(QStringLiteral("captionsTable"));
+  QVERIFY(table != nullptr);
+  QCOMPARE(table->item(0, 1)->text(), QStringLiteral("Alex"));
+  QVERIFY(!table->item(0, 3)->text().contains(QStringLiteral("Edited")));
+  QVERIFY(table->item(0, 3)->text().contains(QStringLiteral("91")));
   auto* languages = captions.findChild<QComboBox*>(QStringLiteral("transcriptionLanguage"));
   QVERIFY(languages != nullptr);
   QCOMPARE(languages->findData(QStringLiteral("en")) >= 0, true);
@@ -1166,6 +1183,26 @@ void EditorWindowTest::captionsPanelExposesTranscriptionAndWordNavigation() {
   QCOMPARE(wordActivated.size(), 1);
   QCOMPARE(wordActivated.at(0).at(0).toString(), QStringLiteral("word-id"));
   QCOMPARE(wordActivated.at(0).at(1).toLongLong(), 240LL);
+
+  auto highlighted = row;
+  highlighted.searchHighlights.push_back({.byteOffset = 0, .byteLength = 5});
+  captions.setCaptionRows({highlighted});
+  QVERIFY(!table->item(0, 2)->data(Qt::UserRole + 2).toString().isEmpty());
+  QCOMPARE(table->item(0, 3)->text(), QStringLiteral("1 match(es)"));
+
+  captions.setTranscriptPlayhead(480);
+  QVERIFY(table->item(0, 0)->background().color().isValid());
+  QCOMPARE(words->count(), 1);
+  QVERIFY(words->item(0)->isSelected() || words->item(0)->background().color().isValid());
+
+  captions.setStyleKits({{QStringLiteral("kit-1"), QStringLiteral("Lower third")}},
+                        QStringLiteral("Noto Sans (SIL Open Font License 1.1)"));
+  auto* kits = captions.findChild<QComboBox*>(QStringLiteral("captionStyleKits"));
+  auto* attribution = captions.findChild<QLabel*>(QStringLiteral("captionStyleAttribution"));
+  QVERIFY(kits != nullptr);
+  QVERIFY(attribution != nullptr);
+  QCOMPARE(kits->count(), 1);
+  QVERIFY(attribution->text().contains(QStringLiteral("Noto Sans")));
 
   captions.setTranscriptionState(video_editor::desktop_ui::TranscriptionState::Downloading,
                                  QStringLiteral("Downloading"), 30);
