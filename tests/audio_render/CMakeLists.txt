@@ -7,7 +7,8 @@ add_executable(video_editor_audio_render_tests
   loudness_normalize_test.cpp
   track_dsp_chain_test.cpp
   silence_detector_test.cpp
-  music_ducking_test.cpp)
+  music_ducking_test.cpp
+  multicam_waveform_sync_test.cpp)
 
 target_compile_definitions(
   video_editor_audio_render_tests

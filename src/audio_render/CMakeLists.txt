@@ -17,6 +17,7 @@ add_library(video_editor_audio_render
   src/timeline_audio_renderer.cpp
   src/loudness_normalize.cpp
   src/music_ducking.cpp
+  src/multicam_waveform_sync.cpp
   src/track_dsp_chain.cpp)
 
 add_library(video_editor::audio_render ALIAS video_editor_audio_render)
