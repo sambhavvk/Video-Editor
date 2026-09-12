@@ -1,0 +1,4 @@
+{
+  "name": "Video-Editor core engine (Linux)",
+  "install": "bash .cursor/install.sh"
+}

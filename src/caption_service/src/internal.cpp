@@ -260,4 +260,35 @@ bool hasErrors(std::span<const Diagnostic> diagnostics) noexcept {
   return false;
 }
 
+edit::EntityId fragmentId(const edit::EntityId source, const std::size_t fragment) noexcept {
+  auto bytes = source.bytes();
+  const std::uint64_t value = static_cast<std::uint64_t>(fragment) + 1U;
+  for (std::size_t index = 0; index < sizeof(value); ++index) {
+    bytes[8U + index] ^= static_cast<std::uint8_t>(value >> (index * 8U));
+  }
+  bytes[6] = static_cast<std::uint8_t>((bytes[6] & 0x0FU) | 0x70U);
+  bytes[8] = static_cast<std::uint8_t>((bytes[8] & 0x3FU) | 0x80U);
+  return edit::EntityId(bytes);
+}
+
+edit::Time sourceDelta(const edit::Clip& clip, const edit::Time timeline_delta) {
+  return timeline_delta
+      .scaled(clip.playback_rate.numerator(), clip.playback_rate.denominator(),
+              edit::RoundingMode::NearestTiesEven)
+      .rescaledTo(clip.source_range.duration.timescale(), edit::RoundingMode::NearestTiesEven);
+}
+
+edit::TimeRange sourceRangeForSubClip(const edit::Clip& clip, const edit::Time timeline_in,
+                                      const edit::Time timeline_out) {
+  const auto head = timeline_in - clip.timeline_range.start;
+  const auto duration = timeline_out - timeline_in;
+  const auto source_head = sourceDelta(clip, head);
+  const auto source_duration = sourceDelta(clip, duration);
+  if (clip.reversed) {
+    return edit::TimeRange(clip.source_range.end() - source_head - source_duration,
+                           source_duration);
+  }
+  return edit::TimeRange(clip.source_range.start + source_head, source_duration);
+}
+
 } // namespace video_editor::caption_service::detail
