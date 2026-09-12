@@ -31,8 +31,9 @@ often and keep the original media files available.
   worker and explicitly shows analyzing/stale state. Normalization independently analyzes one
   immutable revision against an editable −24 through −9 LUFS target.
 - The Inspector and Effects panel author the supported title, transition, speed, effect, and
-  keyframe controls described below. The source monitor loads media on double-click; **I**/**O**
-  set in/out, **L** ripple-inserts, and **Comma** overwrites when the source viewer has focus.
+  keyframe controls described below. The source monitor loads media on double-click. **I**/**O**
+  mark the focused viewer (source range, or program In/Out for loop and export range). **L**
+  ripple-inserts and **Comma** overwrites when the source viewer has focus.
 - Local transcription requires an explicitly downloaded, checksummed multilingual base model and a
   build with the pinned optional `whisper.cpp` backend. Builds without that backend keep manual
   captions available and report transcription as unavailable.
@@ -402,7 +403,7 @@ Qt maps standard shortcuts to the platform convention; the table uses Linux spel
 | Reverse / Stop / Forward | `J` / `K` / `L` |
 | Play or pause | `Space` |
 | Previous / next frame | `,` / `.` (program; `,` overwrites when source has focus) |
-| Source mark in / out | `I` / `O` (source monitor focused) |
+| Source / program mark in / out | `I` / `O` (focused viewer) |
 | Ripple insert / overwrite from source | `L` / `,` (source monitor focused) |
 | Move playhead one frame | `Left` / `Right` |
 | Move playhead ten frames | `Shift+Left` / `Shift+Right` |

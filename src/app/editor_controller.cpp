@@ -1209,8 +1209,12 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
   connect(&window_, &desktop_ui::EditorWindow::sourceOverwriteInsertRequested, this,
           [this] { insertLoadedSource(edit::InsertMode::Overwrite); });
   connect(&window_, &desktop_ui::EditorWindow::sourceMarkInRequested, this,
-          &EditorController::markProgramIn);
+          &EditorController::markSourceIn);
   connect(&window_, &desktop_ui::EditorWindow::sourceMarkOutRequested, this,
+          &EditorController::markSourceOut);
+  connect(&window_, &desktop_ui::EditorWindow::programMarkInRequested, this,
+          &EditorController::markProgramIn);
+  connect(&window_, &desktop_ui::EditorWindow::programMarkOutRequested, this,
           &EditorController::markProgramOut);
   connect(&window_, &desktop_ui::EditorWindow::sourceSeekRequested, this,
           &EditorController::seekSource);
@@ -3619,7 +3623,8 @@ edit::TimeRange EditorController::markedSourceRange() const {
     start_ui = 0;
     end_ui = duration_ui;
   }
-  return {timelineTime(start_ui), timelineTime(end_ui - start_ui)};
+  return {edit::Time(start_ui, static_cast<std::uint32_t>(kUiTimescale)),
+          edit::Time(end_ui - start_ui, static_cast<std::uint32_t>(kUiTimescale))};
 }
 
 void EditorController::updateSourceMonitorChrome() {
@@ -5116,10 +5121,6 @@ void EditorController::gotoTimecode() {
 }
 
 void EditorController::markProgramIn() {
-  if (window_.sourceViewer() != nullptr && window_.sourceViewer()->hasFocus()) {
-    markSourceIn();
-    return;
-  }
   program_mark_in_ = playhead_;
   if (program_mark_out_.has_value() && *program_mark_out_ <= *program_mark_in_) {
     program_mark_out_.reset();
@@ -5128,10 +5129,6 @@ void EditorController::markProgramIn() {
 }
 
 void EditorController::markProgramOut() {
-  if (window_.sourceViewer() != nullptr && window_.sourceViewer()->hasFocus()) {
-    markSourceOut();
-    return;
-  }
   program_mark_out_ = playhead_;
   if (program_mark_in_.has_value() && *program_mark_out_ <= *program_mark_in_) {
     program_mark_in_.reset();

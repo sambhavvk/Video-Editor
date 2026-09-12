@@ -56,6 +56,7 @@ private slots:
   void persistsWorkspaceAndProgressiveControls();
   void precisionTrimPanelControlsTimeline();
   void exposesTransportControllerSignals();
+  void markInOutActionsTargetFocusedViewer();
   void remapsAndPersistsShortcutBindings();
   void mediaBinShowsProxyLifecycle();
   void audioMixerReflectsTrackState();
@@ -311,6 +312,42 @@ void EditorWindowTest::exposesTransportControllerSignals() {
   QCOMPARE(playback.at(0).at(0).toDouble(), -1.0);
   QCOMPARE(playback.at(1).at(0).toDouble(), -2.0);
   QCOMPARE(playback.at(2).at(0).toDouble(), 0.0);
+}
+
+void EditorWindowTest::markInOutActionsTargetFocusedViewer() {
+  QTemporaryDir directory;
+  auto settings = temporarySettings(directory);
+  EditorWindow window(settings.get());
+  QSignalSpy source_in(&window, &EditorWindow::sourceMarkInRequested);
+  QSignalSpy source_out(&window, &EditorWindow::sourceMarkOutRequested);
+  QSignalSpy program_in(&window, &EditorWindow::programMarkInRequested);
+  QSignalSpy program_out(&window, &EditorWindow::programMarkOutRequested);
+
+  window.action(QStringLiteral("sourceMarkIn"))->trigger();
+  window.action(QStringLiteral("sourceMarkOut"))->trigger();
+  QCOMPARE(source_in.count(), 0);
+  QCOMPARE(source_out.count(), 0);
+  QCOMPARE(program_in.count(), 1);
+  QCOMPARE(program_out.count(), 1);
+
+  window.markSourceIn();
+  window.markSourceOut();
+  QCOMPARE(source_in.count(), 1);
+  QCOMPARE(source_out.count(), 1);
+  QCOMPARE(program_in.count(), 1);
+  QCOMPARE(program_out.count(), 1);
+
+  window.setSourceMonitorVisible(true);
+  window.show();
+  QVERIFY(QTest::qWaitForWindowExposed(&window));
+  window.sourceViewer()->setFocus(Qt::OtherFocusReason);
+  QTRY_VERIFY(window.sourceMonitorHasFocus());
+  window.action(QStringLiteral("sourceMarkIn"))->trigger();
+  window.action(QStringLiteral("sourceMarkOut"))->trigger();
+  QCOMPARE(source_in.count(), 2);
+  QCOMPARE(source_out.count(), 2);
+  QCOMPARE(program_in.count(), 1);
+  QCOMPARE(program_out.count(), 1);
 }
 
 void EditorWindowTest::remapsAndPersistsShortcutBindings() {

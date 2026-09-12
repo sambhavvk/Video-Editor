@@ -88,6 +88,12 @@ public:
   void setDuration(qint64 duration, qint64 timeScale);
   void setMarkers(QVector<TimelineMarkerView> markers);
   void setProgramMarks(std::optional<qint64> markIn, std::optional<qint64> markOut);
+  [[nodiscard]] std::optional<qint64> programMarkIn() const noexcept {
+    return program_mark_in_;
+  }
+  [[nodiscard]] std::optional<qint64> programMarkOut() const noexcept {
+    return program_mark_out_;
+  }
   void setGaps(QVector<TimelineGapView> gaps);
   void setSnapResolver(std::function<TimelineSnapResult(const TimelineSnapRequest&)> resolver);
   void setTransitions(const QVector<TransitionView>& transitions);

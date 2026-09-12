@@ -47,6 +47,9 @@ Choose a starting point:
   PTS sidecars, authoritative originals, and present cache limitations.
 - [Testing and release gates](quality/testing-and-release-gates.md) — local checks, fixtures,
   packaging state, and the remaining public-beta gates.
+- [Baseline workflow verification](quality/baseline-workflow-verification.md) — B01 evidence for
+  import, source trim, timeline edit, save/reopen, captions, and export, plus later-chunk
+  classification.
 
 ## Source API references
 

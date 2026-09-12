@@ -147,6 +147,7 @@ public slots:
   void toggleProgramFullscreen();
   void exitProgramFullscreen();
   void setProgramOutputScreen(QScreen* screen);
+  [[nodiscard]] bool sourceMonitorHasFocus() const;
 
 signals:
   void workspaceChanged(Workspace workspace);
@@ -199,6 +200,8 @@ signals:
   void gotoTimecodeRequested();
   void toggleLoopPlaybackRequested();
   void playAroundRequested();
+  void programMarkInRequested();
+  void programMarkOutRequested();
   void clearProgramInRequested();
   void clearProgramOutRequested();
   void clearProgramMarksRequested();
@@ -275,7 +278,6 @@ private:
   void restoreProgramOutputScreen();
   void setShuttleRate(double rate);
   void stepShuttle(int direction);
-  [[nodiscard]] bool sourceMonitorHasFocus() const;
   void addAction(const QString& id, QAction* action);
   [[nodiscard]] QString settingsKeyForWorkspace(Workspace workspace) const;
   [[nodiscard]] static QString workspaceDisplayName(Workspace workspace);

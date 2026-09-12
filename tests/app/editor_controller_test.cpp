@@ -164,6 +164,7 @@ private slots:
   void presentsFramesContinuouslyWhilePlaybackIsRunning();
   void reusesPreviewCacheForTheSamePausedFrame();
   void loadsSourceMonitorAndRippleInsertsMarkedRange();
+  void inOutActionMarksProgramWhenSourceIsHidden();
   void importsSearchesAndExportsCaptions();
   void beginnerFifteenMinutePathWithoutFullEncode();
   void normalizationOnlyAdjustsAudibleContributingTracks();
@@ -947,6 +948,39 @@ void EditorControllerTest::loadsSourceMonitorAndRippleInsertsMarkedRange() {
                .value(),
            static_cast<std::int64_t>(48'000));
   QTRY_VERIFY_WITH_TIMEOUT(window.programViewer()->hasFrame(), 10'000);
+}
+
+void EditorControllerTest::inOutActionMarksProgramWhenSourceIsHidden() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString video_path = directory.filePath(QStringLiteral("program-marks.mkv"));
+  QVERIFY(writePlaybackVideo(video_path));
+
+  QSettings settings(directory.filePath(QStringLiteral("program-marks-ui.ini")),
+                     QSettings::IniFormat);
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+  controller.importPaths({video_path});
+  QTRY_COMPARE_WITH_TIMEOUT(
+      controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
+
+  window.mediaActivated(window.mediaBin()->items().front().id);
+  window.rippleInsertFromSource();
+  QTRY_VERIFY_WITH_TIMEOUT(!window.timeline()->clips().isEmpty(), 10'000);
+  window.setSourceMonitorVisible(false);
+  QVERIFY(!window.sourceMonitorHasFocus());
+
+  const qint64 duration = window.timeline()->clips().front().duration;
+  QVERIFY(duration > 2);
+  const qint64 in_point = duration / 4;
+  const qint64 out_point = duration / 2;
+  window.seekRequested(in_point);
+  window.action(QStringLiteral("sourceMarkIn"))->trigger();
+  window.seekRequested(out_point);
+  window.action(QStringLiteral("sourceMarkOut"))->trigger();
+
+  QCOMPARE(window.timeline()->programMarkIn().value_or(-1), in_point);
+  QCOMPARE(window.timeline()->programMarkOut().value_or(-1), out_point);
 }
 
 void EditorControllerTest::importsSearchesAndExportsCaptions() {

@@ -1074,10 +1074,20 @@ void EditorWindow::createActions() {
   });
   connect(sourceMonitor, &QAction::toggled, this, &EditorWindow::setSourceMonitorVisible);
   connect(precisionTrim, &QAction::toggled, this, &EditorWindow::setPrecisionTrimVisible);
-  connect(action(QStringLiteral("sourceMarkIn")), &QAction::triggered, this,
-          &EditorWindow::markSourceIn);
-  connect(action(QStringLiteral("sourceMarkOut")), &QAction::triggered, this,
-          &EditorWindow::markSourceOut);
+  connect(action(QStringLiteral("sourceMarkIn")), &QAction::triggered, this, [this] {
+    if (sourceMonitorHasFocus()) {
+      markSourceIn();
+      return;
+    }
+    emit programMarkInRequested();
+  });
+  connect(action(QStringLiteral("sourceMarkOut")), &QAction::triggered, this, [this] {
+    if (sourceMonitorHasFocus()) {
+      markSourceOut();
+      return;
+    }
+    emit programMarkOutRequested();
+  });
   connect(action(QStringLiteral("sourceRippleInsert")), &QAction::triggered, this,
           &EditorWindow::rippleInsertFromSource);
   connect(action(QStringLiteral("sourceOverwriteInsert")), &QAction::triggered, this,
