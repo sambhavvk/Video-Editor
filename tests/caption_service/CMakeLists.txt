@@ -3,6 +3,7 @@ find_package(GTest CONFIG REQUIRED)
 
 add_executable(video_editor_caption_service_tests
   caption_service_test.cpp
+  paper_edit_test.cpp
   reflow_search_test.cpp
   transcript_proposal_test.cpp)
 target_compile_features(video_editor_caption_service_tests PRIVATE cxx_std_20)

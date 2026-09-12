@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "video_editor/caption_service/caption_service.h"
 
+#include "internal.h"
+
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -11,25 +13,6 @@
 
 namespace video_editor::caption_service {
 namespace {
-
-[[nodiscard]] edit::EntityId fragment_id(const edit::EntityId source,
-                                         const std::size_t fragment) noexcept {
-  auto bytes = source.bytes();
-  std::uint64_t value = static_cast<std::uint64_t>(fragment) + 1U;
-  for (std::size_t index = 0; index < sizeof(value); ++index) {
-    bytes[8U + index] ^= static_cast<std::uint8_t>(value >> (index * 8U));
-  }
-  bytes[6] = static_cast<std::uint8_t>((bytes[6] & 0x0FU) | 0x70U);
-  bytes[8] = static_cast<std::uint8_t>((bytes[8] & 0x3FU) | 0x80U);
-  return edit::EntityId(bytes);
-}
-
-[[nodiscard]] edit::Time source_delta(const edit::Clip& clip, const edit::Time timeline_delta) {
-  return timeline_delta
-      .scaled(clip.playback_rate.numerator(), clip.playback_rate.denominator(),
-              edit::RoundingMode::NearestTiesEven)
-      .rescaledTo(clip.source_range.duration.timescale(), edit::RoundingMode::NearestTiesEven);
-}
 
 [[nodiscard]] edit::Time removed_before(const edit::Time time,
                                         std::span<const edit::TimeRange> ranges) {
@@ -70,19 +53,10 @@ namespace {
                                        const std::optional<edit::EntityId> linked_group) {
   edit::Clip result = source;
   if (!preserve_id) {
-    result.id = fragment_id(source.id, index);
+    result.id = detail::fragmentId(source.id, index);
   }
   result.timeline_range = edit::TimeRange(start - shift, end - start);
-  const auto head = start - source.timeline_range.start;
-  const auto duration = end - start;
-  const auto source_head = source_delta(source, head);
-  const auto source_duration = source_delta(source, duration);
-  if (source.reversed) {
-    result.source_range =
-        edit::TimeRange(source.source_range.end() - source_head - source_duration, source_duration);
-  } else {
-    result.source_range = edit::TimeRange(source.source_range.start + source_head, source_duration);
-  }
+  result.source_range = detail::sourceRangeForSubClip(source, start, end);
   result.linked_group = linked_group;
   return result;
 }
@@ -222,7 +196,7 @@ ProposalResult buildTimelineCutProposal(const edit::TimelineSnapshot& snapshot,
         const bool preserve_id = !clip_cut;
         std::optional<edit::EntityId> group = clip.linked_group;
         if (group && !preserve_id) {
-          group = fragment_id(*group, segment_index);
+          group = detail::fragmentId(*group, segment_index);
         }
         replacement.clips.push_back(make_fragment(clip, segment.start, segment.end(), shift,
                                                   fragment_index++, preserve_id, group));

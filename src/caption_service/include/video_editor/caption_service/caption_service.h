@@ -229,4 +229,72 @@ buildTimelineCutProposal(const edit::TimelineSnapshot& snapshot,
 mapCaptionThroughCuts(const edit::Caption& caption,
                       std::span<const edit::TimeRange> selected_ranges);
 
+// --- Transcript paper-edit assembly ----------------------------------------
+//
+// A paper edit assembles selected transcript passages (each a sub-range of an
+// existing clip) into a contiguous rough cut on a dedicated track. This is the
+// engine behind a transcript-first workspace: pick sentences across any number
+// of clips, order them, and get a deterministic timeline that preserves each
+// passage's source reference and exact source range.
+
+// One passage to include in the rough cut.
+struct PaperEditSelection final {
+  // A clip in the snapshot's sequence that this passage is taken from.
+  edit::EntityId source_clip_id{};
+  // The timeline sub-range of that clip to keep. Must be contained in the
+  // clip's timeline range and have a positive duration.
+  edit::TimeRange timeline_range{};
+  friend bool operator==(const PaperEditSelection&, const PaperEditSelection&) = default;
+};
+
+enum class PaperEditErrorCode {
+  NoSelections,
+  InvalidRange,
+  SourceClipNotFound,
+  RangeOutsideClip,
+  TargetTrackNotFound,
+  TargetTrackLocked,
+  IncompatibleTrackKind,
+};
+
+struct PaperEditError final {
+  PaperEditErrorCode code{PaperEditErrorCode::NoSelections};
+  std::string message;
+  // The offending selection, when applicable.
+  std::size_t selection_index{0};
+};
+
+struct PaperEditOptions final {
+  // Where the assembled rough cut begins on the target track timeline.
+  edit::Time assembly_start{};
+  // Optional non-negative gap inserted between adjacent passages, for example
+  // to leave room for a later transition. Defaults to butt-joined passages.
+  edit::Time gap_between{};
+};
+
+struct PaperEditAssembly final {
+  edit::Revision base_revision{};
+  edit::EntityId target_track_id{};
+  // The assembled fragments, in selection order, laid out from assembly_start.
+  std::vector<edit::Clip> clips;
+  // A complete replacement of the target track's clip list, ready to apply
+  // through TimelineEditor::apply. Applying it realizes the rough cut.
+  edit::ApplyTimelineCutChangeSetCommand timeline_change;
+  std::vector<ReviewItem> review_items;
+};
+
+using PaperEditResult = edit::Result<PaperEditAssembly, PaperEditError>;
+
+// Builds a deterministic rough-cut assembly. Passages may come from any clips
+// in any order; assembly order is selection order. Source references (asset,
+// effects, transform, title, playback rate, and reverse) are preserved, and
+// each fragment's source range is derived exactly from its passage. The target
+// track is replaced wholesale, so it should be a dedicated assembly track whose
+// kind accepts every selected clip (video/title on a video track, audio on an
+// audio track).
+[[nodiscard]] PaperEditResult
+buildPaperEditAssembly(const edit::TimelineSnapshot& snapshot, edit::EntityId target_track_id,
+                       std::span<const PaperEditSelection> selections,
+                       const PaperEditOptions& options = {});
+
 } // namespace video_editor::caption_service
