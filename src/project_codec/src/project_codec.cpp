@@ -500,6 +500,17 @@ void encodeAsset(const edit::Asset& value, wire::Asset* output, std::string_view
   if (value.production.preferred_take) {
     output->set_production_preferred_take(true);
   }
+  for (const auto& channel : value.audio_channel_map) {
+    auto* entry = output->add_audio_channel_map();
+    entry->set_index(channel.index);
+    entry->set_label(channel.label);
+  }
+  if (value.monitor_left_channel != 0) {
+    output->set_monitor_left_channel(value.monitor_left_channel);
+  }
+  if (value.monitor_right_channel != 1) {
+    output->set_monitor_right_channel(value.monitor_right_channel);
+  }
 }
 
 void encodeClip(const edit::Clip& value, wire::Clip* output, std::string_view path,
@@ -1626,6 +1637,18 @@ decodeMetadata(const google::protobuf::RepeatedPtrField<wire::StringEntry>& entr
   }
   if (value.has_production_preferred_take()) {
     result.production.preferred_take = value.production_preferred_take();
+  }
+  for (const auto& channel : value.audio_channel_map()) {
+    edit::AudioChannelDescriptor descriptor;
+    descriptor.index = channel.index();
+    descriptor.label = channel.label();
+    result.audio_channel_map.push_back(descriptor);
+  }
+  if (value.has_monitor_left_channel()) {
+    result.monitor_left_channel = value.monitor_left_channel();
+  }
+  if (value.has_monitor_right_channel()) {
+    result.monitor_right_channel = value.monitor_right_channel();
   }
   return result;
 }

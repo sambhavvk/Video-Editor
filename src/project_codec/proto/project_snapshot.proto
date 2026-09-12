@@ -141,6 +141,14 @@ message Asset {
   optional string production_audio_roll = 24;
   optional string production_source_timecode = 25;
   optional bool production_preferred_take = 26;
+  repeated AudioChannelDescriptor audio_channel_map = 27;
+  optional uint32 monitor_left_channel = 28;
+  optional uint32 monitor_right_channel = 29;
+}
+
+message AudioChannelDescriptor {
+  uint32 index = 1;
+  string label = 2;
 }
 
 enum TrackKind {

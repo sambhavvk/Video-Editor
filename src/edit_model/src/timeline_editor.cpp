@@ -2977,6 +2977,28 @@ struct PlannedClip final {
             found->notes = command.notes;
             return std::nullopt;
           },
+          [&](const SetAssetAudioMonitoringCommand& command) -> std::optional<EditError> {
+            if (command.asset_id.isNil()) {
+              return error(EditErrorCode::InvalidArgument, "asset id cannot be nil");
+            }
+            const auto found =
+                std::find_if(project.assets.begin(), project.assets.end(),
+                             [&](const Asset& asset) { return asset.id == command.asset_id; });
+            if (found == project.assets.end()) {
+              return error(EditErrorCode::EntityNotFound, "asset was not found");
+            }
+            if (found->audio_channels == 0) {
+              return error(EditErrorCode::InvalidArgument, "asset has no audio channels to monitor");
+            }
+            if (command.left_channel >= found->audio_channels ||
+                command.right_channel >= found->audio_channels) {
+              return error(EditErrorCode::InvalidArgument,
+                           "monitor channels must reference existing source channels");
+            }
+            found->monitor_left_channel = command.left_channel;
+            found->monitor_right_channel = command.right_channel;
+            return std::nullopt;
+          },
           [&](const AssembleSelectsSequenceCommand& command) -> std::optional<EditError> {
             if (command.subclip_ids.empty()) {
               return error(EditErrorCode::InvalidArgument,
@@ -3458,6 +3480,8 @@ std::string commandName(const EditCommand& command) {
           return "Remove subclip";
         if constexpr (std::is_same_v<T, UpdateSubclipNotesCommand>)
           return "Update subclip notes";
+        if constexpr (std::is_same_v<T, SetAssetAudioMonitoringCommand>)
+          return "Set audio monitoring";
         if constexpr (std::is_same_v<T, AssembleSelectsSequenceCommand>)
           return "Assemble selects sequence";
         if constexpr (std::is_same_v<T, ReplaceClipMediaCommand>)
@@ -3615,6 +3639,8 @@ std::string commandType(const EditCommand& command) {
           return "remove_subclip";
         if constexpr (std::is_same_v<T, UpdateSubclipNotesCommand>)
           return "update_subclip_notes";
+        if constexpr (std::is_same_v<T, SetAssetAudioMonitoringCommand>)
+          return "set_asset_audio_monitoring";
         if constexpr (std::is_same_v<T, AssembleSelectsSequenceCommand>)
           return "assemble_selects_sequence";
         if constexpr (std::is_same_v<T, ReplaceClipMediaCommand>)

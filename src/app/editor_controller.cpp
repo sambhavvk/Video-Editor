@@ -144,6 +144,17 @@ void explainUnavailable(desktop_ui::EditorWindow& window, const char* location,
   window.showTransientMessage(message);
 }
 
+[[nodiscard]] audio_render::OriginalAudioMedia originalAudioMediaFor(
+    const edit::Asset& asset, const std::filesystem::path& path) {
+  return audio_render::OriginalAudioMedia{
+      .path = path,
+      .audio_stream_index = -1,
+      .monitor_left_channel = asset.monitor_left_channel,
+      .monitor_right_channel = asset.monitor_right_channel,
+      .source_channel_count = std::max(asset.audio_channels, 2U),
+  };
+}
+
 [[nodiscard]] QString speakerLabelFromCaption(const edit::Caption& caption) {
   const std::string& identity = caption.provenance.model_identity;
   if (identity.rfind("speaker:", 0) == 0 && identity.size() > 8) {
@@ -3707,8 +3718,7 @@ void EditorController::addImportedAsset(assets::AssetRecord asset) {
     }
     if (model_asset.has_audio) {
       if (audio_registry_->register_original(
-              model_asset.id,
-              audio_render::OriginalAudioMedia{.path = asset.uri, .audio_stream_index = -1})) {
+              model_asset.id, originalAudioMediaFor(model_asset, asset.uri))) {
         registered_audio_assets_.push_back(model_asset.id);
       }
     }
@@ -11607,9 +11617,7 @@ void EditorController::rebuildPlaybackRegistry() {
     }
     if (asset.has_audio) {
       if (audio_registry_->register_original(
-              asset.id,
-              audio_render::OriginalAudioMedia{.path = pathFromUtf8String(asset.source_uri),
-                                               .audio_stream_index = -1})) {
+              asset.id, originalAudioMediaFor(asset, pathFromUtf8String(asset.source_uri)))) {
         registered_audio_assets_.push_back(asset.id);
       }
     }
@@ -12777,7 +12785,9 @@ void EditorController::reregisterAssetMedia(const assets::AssetRecord& record) {
   frame_provider_->invalidate(*model_id);
   if (recordHasAudio(record)) {
     (void)audio_registry_->register_original(
-        *model_id, audio_render::OriginalAudioMedia{.path = record.uri, .audio_stream_index = -1});
+        *model_id, originalAudioMediaFor(*edit::findAsset(*editor_->projectAt(editor_->revision()),
+                                                           *model_id),
+                                         record.uri));
   }
 }
 

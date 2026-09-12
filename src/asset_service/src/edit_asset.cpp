@@ -66,6 +66,16 @@ edit::Asset asset_from_record(const AssetRecord& record) {
       model_asset.audio_sample_rate = static_cast<std::uint32_t>(stream.audio->sample_rate);
       model_asset.audio_channels = static_cast<std::uint32_t>(stream.audio->channels);
       model_asset.metadata["audio_codec"] = stream.codec_name;
+      for (std::uint32_t channel = 0; channel < model_asset.audio_channels; ++channel) {
+        edit::AudioChannelDescriptor descriptor;
+        descriptor.index = channel;
+        if (!stream.audio->channel_layout.empty()) {
+          descriptor.label = stream.audio->channel_layout + "-" + std::to_string(channel + 1);
+        } else {
+          descriptor.label = "Ch " + std::to_string(channel + 1);
+        }
+        model_asset.audio_channel_map.push_back(descriptor);
+      }
     }
   }
   return model_asset;

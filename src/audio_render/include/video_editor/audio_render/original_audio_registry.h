@@ -16,6 +16,9 @@ struct OriginalAudioMedia final {
   std::filesystem::path path;
   // A negative index asks FFmpeg to select the best audio stream.
   int audio_stream_index{-1};
+  std::uint32_t monitor_left_channel{0};
+  std::uint32_t monitor_right_channel{1};
+  std::uint32_t source_channel_count{2};
 
   friend bool operator==(const OriginalAudioMedia&, const OriginalAudioMedia&) = default;
 };

@@ -312,6 +312,17 @@ decode_requested_samples(const OriginalAudioMedia& media,
         AudioRenderErrorCode::ResampleFailed, "could not initialize the 48 kHz stereo resampler"));
   }
   SwrPtr resampler(raw_resampler);
+  if (media.source_channel_count > 2) {
+    const int input_channels = decoder->ch_layout.nb_channels;
+    std::vector<double> matrix(static_cast<std::size_t>(input_channels) * 2, 0.0);
+    const auto left = static_cast<int>(std::min(media.monitor_left_channel,
+                                                static_cast<std::uint32_t>(input_channels - 1)));
+    const auto right = static_cast<int>(std::min(media.monitor_right_channel,
+                                                 static_cast<std::uint32_t>(input_channels - 1)));
+    matrix[static_cast<std::size_t>(left)] = 1.0;
+    matrix[static_cast<std::size_t>(input_channels + right)] = 1.0;
+    (void)swr_set_matrix(resampler.get(), matrix.data(), input_channels);
+  }
   PacketPtr packet(av_packet_alloc());
   FramePtr frame(av_frame_alloc());
   if (!packet || !frame) {

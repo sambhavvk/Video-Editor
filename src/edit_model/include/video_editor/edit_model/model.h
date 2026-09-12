@@ -109,6 +109,12 @@ struct SmartQuery final {
   friend bool operator==(const SmartQuery&, const SmartQuery&) = default;
 };
 
+struct AudioChannelDescriptor final {
+  std::uint32_t index{0};
+  std::string label;
+  friend bool operator==(const AudioChannelDescriptor&, const AudioChannelDescriptor&) = default;
+};
+
 struct ProductionMetadata final {
   std::string scene;
   std::string shot;
@@ -160,6 +166,9 @@ struct Asset final {
   std::optional<Rate> nominal_frame_rate;
   std::uint32_t audio_sample_rate{0};
   std::uint32_t audio_channels{0};
+  std::vector<AudioChannelDescriptor> audio_channel_map;
+  std::uint32_t monitor_left_channel{0};
+  std::uint32_t monitor_right_channel{1};
   std::map<std::string, std::string, std::less<>> metadata;
   std::optional<EntityId> bin_id;
   std::string display_title;

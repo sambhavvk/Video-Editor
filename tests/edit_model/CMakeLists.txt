@@ -13,6 +13,7 @@ add_executable(video_editor_edit_model_tests
   multicam_m03_test.cpp
   f01_production_metadata_test.cpp
   f02_subclips_test.cpp
+  f03_audio_channels_test.cpp
   time_test.cpp
   title_transition_test.cpp
   track_audio_state_test.cpp
