@@ -294,6 +294,11 @@ private slots:
   void cancelTranscription();
   void applyCaptionReview();
   void discardCaptionReview();
+  void addPassageFromSelection();
+  void removePassage(const QString& passageId);
+  void movePassage(const QString& passageId, int delta);
+  void insertAssembledPassages();
+  void clearAssembledPassages();
   void captionStyleEdited(const QString& captionId, const desktop_ui::CaptionStyleView& style);
   void updateSelectedClipProperty(const QString& parameterId, const QVariant& value);
   void beginViewerTransform(const QString& handle, QPointF sequencePos);
@@ -388,6 +393,14 @@ private:
     std::vector<audio_render::SilenceRange> silence_ranges;
     std::vector<edit::TimeRange> filler_ranges;
     QString error;
+  };
+
+  struct AssembledPassage final {
+    edit::EntityId id{edit::EntityId::generate()};
+    edit::EntityId source_clip_id{};
+    edit::TimeRange timeline_range{};
+    edit::TimeRange source_range{};
+    std::string summary;
   };
 
   struct ModelVerificationOutcome {
@@ -529,6 +542,7 @@ private:
   void refreshViewerOverlay();
   void refreshMixerView();
   void refreshCaptionView();
+  void refreshPassageView();
   void refreshTranscriptionState();
   void refreshJobActivitySummary();
   void deferBackgroundJobAdmission();
@@ -795,6 +809,7 @@ private:
   QVector<edit::TimeRange> proposal_cut_ranges_;
   QVector<int> proposal_caption_indices_;
   std::vector<edit::Caption> pending_caption_additions_;
+  std::vector<AssembledPassage> assembled_passages_;
   std::stop_source caption_analysis_stop_source_;
   QFuture<CaptionAnalysisOutcome> caption_analysis_future_;
   QFutureWatcher<CaptionAnalysisOutcome> caption_analysis_watcher_;

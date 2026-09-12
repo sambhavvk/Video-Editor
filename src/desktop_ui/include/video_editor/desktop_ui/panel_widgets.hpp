@@ -389,6 +389,9 @@ public:
   void setTranscriptionOptions(const TranscriptionOptionsView& options);
   void setCaptionStyle(const CaptionStyleView& style);
   void setReviewProposals(const QVector<CaptionProposalView>& proposals);
+  void setAssembledPassages(const QVector<TranscriptPassageView>& passages);
+  [[nodiscard]] QStringList selectedWordIds() const;
+  [[nodiscard]] int currentCaptionRow() const;
   [[nodiscard]] TranscriptionState transcriptionState() const noexcept {
     return transcription_state_;
   }
@@ -413,6 +416,11 @@ signals:
   void reviewProposalToggled(const QString& proposalId, bool selected);
   void applyReviewRequested();
   void discardReviewRequested();
+  void addPassageFromSelectionRequested();
+  void removePassageRequested(const QString& passageId);
+  void movePassageRequested(const QString& passageId, int delta);
+  void insertPassagesRequested();
+  void clearPassagesRequested();
 
 private:
   void updateWordList(int row);
@@ -454,6 +462,8 @@ private:
   QListWidget* review_{nullptr};
   QPushButton* apply_review_{nullptr};
   QPushButton* discard_review_{nullptr};
+  QGroupBox* passages_group_{nullptr};
+  QListWidget* passages_{nullptr};
   QLabel* spelling_hint_{nullptr};
   QVector<CaptionRowView> rows_;
   QVector<CaptionProposalView> proposals_;

@@ -393,6 +393,15 @@ struct TranscriptionOptionsView final {
   int threadCount{0};
 };
 
+struct TranscriptPassageView final {
+  QString id;
+  QString sourceClipId;
+  QString summary;
+  QString previewRange;
+  qint64 timelineStart{0};
+  qint64 timelineEnd{0};
+};
+
 struct CaptionProposalView final {
   QString id;
   QString kind;

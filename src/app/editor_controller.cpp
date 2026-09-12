@@ -1620,6 +1620,16 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::applyCaptionReview);
   connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::discardReviewRequested, this,
           &EditorController::discardCaptionReview);
+  connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::addPassageFromSelectionRequested,
+          this, &EditorController::addPassageFromSelection);
+  connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::removePassageRequested, this,
+          &EditorController::removePassage);
+  connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::movePassageRequested, this,
+          &EditorController::movePassage);
+  connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::insertPassagesRequested, this,
+          &EditorController::insertAssembledPassages);
+  connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::clearPassagesRequested, this,
+          &EditorController::clearAssembledPassages);
   connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::reviewProposalToggled, this,
           [this](const QString& id, const bool selected) {
             for (auto& proposal : caption_proposals_) {
@@ -10458,6 +10468,215 @@ void EditorController::refreshCaptionView() {
   }
   window_.captionsPanel()->setCaptionRows(rows);
   window_.captionsPanel()->setTranscriptPlayhead(playhead_);
+  refreshPassageView();
+}
+
+void EditorController::refreshPassageView() {
+  const edit::Sequence* sequence = currentSequence();
+  QVector<desktop_ui::TranscriptPassageView> views;
+  views.reserve(static_cast<qsizetype>(assembled_passages_.size()));
+  for (const AssembledPassage& passage : assembled_passages_) {
+    desktop_ui::TranscriptPassageView view;
+    view.id = QString::fromStdString(passage.id.toString());
+    view.sourceClipId = QString::fromStdString(passage.source_clip_id.toString());
+    view.summary = QString::fromStdString(passage.summary);
+    if (sequence != nullptr) {
+      view.previewRange =
+          tr("%1 → %2")
+              .arg(timecodeText(toUiTime(passage.timeline_range.start), sequence->frame_rate))
+              .arg(timecodeText(toUiTime(passage.timeline_range.end()), sequence->frame_rate));
+    }
+    view.timelineStart = toUiTime(passage.timeline_range.start);
+    view.timelineEnd = toUiTime(passage.timeline_range.end());
+    views.push_back(std::move(view));
+  }
+  window_.captionsPanel()->setAssembledPassages(views);
+}
+
+void EditorController::addPassageFromSelection() {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    explainUnavailable(window_, "editor_controller.cpp:addPassageFromSelection",
+                       tr("Open a sequence before assembling transcript passages"));
+    return;
+  }
+  const QStringList selectedWordIds = window_.captionsPanel()->selectedWordIds();
+  if (selectedWordIds.isEmpty()) {
+    window_.showTransientMessage(tr("Select one or more timed words to add a passage"));
+    return;
+  }
+  const int visibleRow = window_.captionsPanel()->currentCaptionRow();
+  if (visibleRow < 0 ||
+      static_cast<std::size_t>(visibleRow) >= visible_caption_indices_.size()) {
+    window_.showTransientMessage(tr("Select a caption cue before adding a passage"));
+    return;
+  }
+  const edit::Caption& caption =
+      sequence->captions[visible_caption_indices_.at(static_cast<std::size_t>(visibleRow))];
+  std::vector<const edit::CaptionWord*> selected_words;
+  for (const auto& word : caption.words) {
+    if (selectedWordIds.contains(QString::fromStdString(word.id.toString()))) {
+      selected_words.push_back(&word);
+    }
+  }
+  if (selected_words.empty()) {
+    window_.showTransientMessage(tr("The selected words are no longer available"));
+    refreshCaptionView();
+    return;
+  }
+  std::sort(selected_words.begin(), selected_words.end(),
+            [](const edit::CaptionWord* left, const edit::CaptionWord* right) {
+              return left->range.start < right->range.start;
+            });
+  edit::EntityId source_clip_id = transcription_clip_id_;
+  if (source_clip_id.isNil() && active_clip_id_.has_value()) {
+    source_clip_id = *active_clip_id_;
+  }
+  const edit::Clip* source_clip = edit::findClip(*sequence, source_clip_id);
+  if (source_clip == nullptr ||
+      (source_clip->kind != edit::ClipKind::Audio && source_clip->kind != edit::ClipKind::Video)) {
+    window_.showTransientMessage(
+        tr("Select the source audio or video clip that owns these transcript timings"));
+    return;
+  }
+  edit::TimeRange timeline_range(selected_words.front()->range.start,
+                                 selected_words.back()->range.end() -
+                                     selected_words.front()->range.start);
+  const edit::TimeRange source_range = sourceRangeForTimelineRange(*source_clip, timeline_range);
+  if (source_range.empty() || timeline_range.empty()) {
+    window_.showTransientMessage(tr("The selected passage has no usable timing"));
+    return;
+  }
+  QStringList summary_words;
+  summary_words.reserve(static_cast<qsizetype>(selected_words.size()));
+  for (const auto* word : selected_words) {
+    summary_words.push_back(QString::fromStdString(word->text));
+  }
+  AssembledPassage passage;
+  passage.source_clip_id = source_clip_id;
+  passage.timeline_range = timeline_range;
+  passage.source_range = source_range;
+  passage.summary = summary_words.join(' ').toStdString();
+  assembled_passages_.push_back(std::move(passage));
+  refreshPassageView();
+}
+
+void EditorController::removePassage(const QString& passageId) {
+  const auto parsed = edit::EntityId::parse(passageId.toStdString());
+  if (!parsed.has_value()) {
+    return;
+  }
+  std::erase_if(assembled_passages_, [&](const AssembledPassage& passage) {
+    return passage.id == *parsed;
+  });
+  refreshPassageView();
+}
+
+void EditorController::movePassage(const QString& passageId, const int delta) {
+  const auto parsed = edit::EntityId::parse(passageId.toStdString());
+  if (!parsed.has_value() || delta == 0) {
+    return;
+  }
+  const auto it = std::find_if(assembled_passages_.begin(), assembled_passages_.end(),
+                                 [&](const AssembledPassage& passage) {
+                                   return passage.id == *parsed;
+                                 });
+  if (it == assembled_passages_.end()) {
+    return;
+  }
+  const std::size_t index = static_cast<std::size_t>(std::distance(assembled_passages_.begin(), it));
+  const std::size_t target = static_cast<std::size_t>(static_cast<int>(index) + delta);
+  if (target >= assembled_passages_.size()) {
+    return;
+  }
+  std::swap(assembled_passages_[index], assembled_passages_[target]);
+  refreshPassageView();
+}
+
+void EditorController::insertAssembledPassages() {
+  if (assembled_passages_.empty()) {
+    window_.showTransientMessage(tr("Add transcript passages before inserting them"));
+    return;
+  }
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || editor_ == nullptr) {
+    explainUnavailable(window_, "editor_controller.cpp:insertAssembledPassages",
+                       tr("Open a sequence before inserting passages"));
+    return;
+  }
+  std::optional<edit::EntityId> video_track_id;
+  std::optional<edit::EntityId> audio_track_id;
+  for (const edit::Track& track : sequence->tracks) {
+    if (!track.locked && track.targeted && track.kind == edit::TrackKind::Video &&
+        !video_track_id.has_value()) {
+      video_track_id = track.id;
+    }
+    if (!track.locked && track.targeted && track.kind == edit::TrackKind::Audio &&
+        !audio_track_id.has_value()) {
+      audio_track_id = track.id;
+    }
+  }
+  edit::Time insert_at = playheadTime();
+  const std::string gesture = "insert-passages:" + edit::EntityId::generate().toString();
+  std::vector<edit::EditCommand> commands;
+  for (const AssembledPassage& passage : assembled_passages_) {
+    const edit::Clip* source_clip = edit::findClip(*sequence, passage.source_clip_id);
+    if (source_clip == nullptr) {
+      window_.showTransientMessage(tr("A passage source clip is missing; rebuild the assembly"));
+      return;
+    }
+    const edit::Asset* asset =
+        edit::findAsset(*editor_->projectAt(editor_->revision()), source_clip->asset_id);
+    if (asset == nullptr) {
+      window_.showTransientMessage(tr("A passage source asset is missing; rebuild the assembly"));
+      return;
+    }
+    const edit::Time duration = passage.timeline_range.duration;
+    const edit::EntityId linked = edit::EntityId::generate();
+    const auto prepare = [&](const std::optional<edit::EntityId> track_id,
+                             const edit::ClipKind kind) {
+      if (!track_id.has_value()) {
+        return;
+      }
+      edit::Clip clip = *source_clip;
+      clip.id = edit::EntityId::generate();
+      clip.kind = kind;
+      clip.timeline_range = edit::TimeRange(insert_at, duration);
+      clip.source_range = passage.source_range;
+      if (asset->has_video && asset->has_audio) {
+        clip.linked_group = linked;
+      }
+      commands.push_back({.operation = edit::InsertClipCommand{.sequence_id = sequence->id,
+                                                                .track_id = *track_id,
+                                                                .clip = std::move(clip),
+                                                                .mode = edit::InsertMode::Ripple},
+                          .coalescing_key = gesture});
+    };
+    if (asset->has_video) {
+      prepare(video_track_id, edit::ClipKind::Video);
+    }
+    if (asset->has_audio) {
+      prepare(audio_track_id, edit::ClipKind::Audio);
+    }
+    insert_at = insert_at + duration;
+  }
+  if (commands.empty()) {
+    window_.showTransientMessage(tr("No unlocked targeted tracks are available for insertion"));
+    return;
+  }
+  if (!applyBatch(std::move(commands), tr("Could not insert assembled passages"))) {
+    return;
+  }
+  const qsizetype passage_count = static_cast<qsizetype>(assembled_passages_.size());
+  assembled_passages_.clear();
+  refreshPassageView();
+  refreshViews();
+  window_.showTransientMessage(tr("Inserted %1 transcript passage(s)").arg(passage_count));
+}
+
+void EditorController::clearAssembledPassages() {
+  assembled_passages_.clear();
+  refreshPassageView();
 }
 
 void EditorController::rebuildPlaybackRegistry() {

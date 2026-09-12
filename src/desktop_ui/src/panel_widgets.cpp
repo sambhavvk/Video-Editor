@@ -2886,9 +2886,43 @@ CaptionsPanelWidget::CaptionsPanelWidget(QWidget* parent) : QWidget(parent) {
   words_ = new QListWidget(wordsGroup);
   words_->setObjectName(QStringLiteral("captionWordsList"));
   words_->setAccessibleName(tr("Word-level transcript navigation"));
+  words_->setSelectionMode(QAbstractItemView::ExtendedSelection);
   words_->setMaximumHeight(110);
   wordsLayout->addWidget(words_);
   tableLayout->addWidget(wordsGroup);
+
+  passages_group_ = new QGroupBox(tr("Assemble passages"), tablePage);
+  passages_group_->setObjectName(QStringLiteral("transcriptPassagesGroup"));
+  auto* passagesLayout = new QVBoxLayout(passages_group_);
+  passages_ = new QListWidget(passages_group_);
+  passages_->setObjectName(QStringLiteral("transcriptPassagesList"));
+  passages_->setAccessibleName(tr("Selected transcript passages"));
+  passages_->setMaximumHeight(100);
+  passagesLayout->addWidget(passages_);
+  auto* passageButtons = new QHBoxLayout;
+  auto* addPassage = new QPushButton(tr("Add selection"), passages_group_);
+  addPassage->setObjectName(QStringLiteral("addTranscriptPassageButton"));
+  addPassage->setAccessibleName(tr("Add the selected words as a passage"));
+  auto* removePassage = new QPushButton(tr("Remove"), passages_group_);
+  removePassage->setObjectName(QStringLiteral("removeTranscriptPassageButton"));
+  auto* moveUpPassage = new QPushButton(tr("Up"), passages_group_);
+  moveUpPassage->setObjectName(QStringLiteral("moveTranscriptPassageUpButton"));
+  auto* moveDownPassage = new QPushButton(tr("Down"), passages_group_);
+  moveDownPassage->setObjectName(QStringLiteral("moveTranscriptPassageDownButton"));
+  auto* insertPassages = new QPushButton(tr("Insert on timeline"), passages_group_);
+  insertPassages->setObjectName(QStringLiteral("insertTranscriptPassagesButton"));
+  insertPassages->setAccessibleName(tr("Insert assembled passages on the timeline"));
+  auto* clearPassages = new QPushButton(tr("Clear"), passages_group_);
+  clearPassages->setObjectName(QStringLiteral("clearTranscriptPassagesButton"));
+  passageButtons->addWidget(addPassage);
+  passageButtons->addWidget(removePassage);
+  passageButtons->addWidget(moveUpPassage);
+  passageButtons->addWidget(moveDownPassage);
+  passageButtons->addStretch();
+  passageButtons->addWidget(insertPassages);
+  passageButtons->addWidget(clearPassages);
+  passagesLayout->addLayout(passageButtons);
+  tableLayout->addWidget(passages_group_);
 
   auto* captionActions = new QHBoxLayout;
   auto* addCaption = new QPushButton(tr("Add at playhead"), tablePage);
@@ -3109,6 +3143,30 @@ CaptionsPanelWidget::CaptionsPanelWidget(QWidget* parent) : QWidget(parent) {
   connect(apply_review_, &QPushButton::clicked, this, &CaptionsPanelWidget::applyReviewRequested);
   connect(discard_review_, &QPushButton::clicked, this,
           &CaptionsPanelWidget::discardReviewRequested);
+  connect(addPassage, &QPushButton::clicked, this,
+          &CaptionsPanelWidget::addPassageFromSelectionRequested);
+  connect(removePassage, &QPushButton::clicked, this, [this] {
+    const auto* item = passages_->currentItem();
+    if (item != nullptr) {
+      emit removePassageRequested(item->data(Qt::UserRole).toString());
+    }
+  });
+  connect(moveUpPassage, &QPushButton::clicked, this, [this] {
+    const auto* item = passages_->currentItem();
+    if (item != nullptr) {
+      emit movePassageRequested(item->data(Qt::UserRole).toString(), -1);
+    }
+  });
+  connect(moveDownPassage, &QPushButton::clicked, this, [this] {
+    const auto* item = passages_->currentItem();
+    if (item != nullptr) {
+      emit movePassageRequested(item->data(Qt::UserRole).toString(), 1);
+    }
+  });
+  connect(insertPassages, &QPushButton::clicked, this,
+          &CaptionsPanelWidget::insertPassagesRequested);
+  connect(clearPassages, &QPushButton::clicked, this,
+          &CaptionsPanelWidget::clearPassagesRequested);
   updateStateControls();
 }
 
@@ -3349,6 +3407,41 @@ void CaptionsPanelWidget::setReviewProposals(const QVector<CaptionProposalView>&
     item->setCheckState(proposal.selected ? Qt::Checked : Qt::Unchecked);
   }
   apply_review_->setEnabled(!proposals_.isEmpty());
+}
+
+void CaptionsPanelWidget::setAssembledPassages(const QVector<TranscriptPassageView>& passages) {
+  const QSignalBlocker blocker(passages_);
+  const QString selectedId =
+      passages_->currentItem() != nullptr ? passages_->currentItem()->data(Qt::UserRole).toString()
+                                          : QString{};
+  passages_->clear();
+  for (const auto& passage : passages) {
+    auto* item = new QListWidgetItem(tr("%1 · %2").arg(passage.summary, passage.previewRange),
+                                     passages_);
+    item->setData(Qt::UserRole, passage.id);
+    item->setToolTip(tr("Source clip %1").arg(passage.sourceClipId));
+    if (passage.id == selectedId) {
+      passages_->setCurrentItem(item);
+    }
+  }
+  if (passages_group_ != nullptr) {
+    passages_group_->setVisible(true);
+  }
+}
+
+QStringList CaptionsPanelWidget::selectedWordIds() const {
+  QStringList ids;
+  if (words_ == nullptr) {
+    return ids;
+  }
+  for (const auto* item : words_->selectedItems()) {
+    ids.push_back(item->data(Qt::UserRole).toString());
+  }
+  return ids;
+}
+
+int CaptionsPanelWidget::currentCaptionRow() const {
+  return table_ != nullptr ? table_->currentRow() : -1;
 }
 
 void CaptionsPanelWidget::updateWordList(const int row) {
