@@ -130,6 +130,7 @@ public:
   void setSequenceFormatStatus(const QString& text);
   void setJobActivitySummary(const QString& summary);
   void showExportDialog(const QString& presetId = {});
+  void setTrimPreviewStatus(const QString& status);
   void focusInspector();
   void refreshRecentProjectsMenu(const QStringList& paths, bool reopenLastOnStartup);
 

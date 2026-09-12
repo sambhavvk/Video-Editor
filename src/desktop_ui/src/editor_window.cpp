@@ -528,6 +528,18 @@ void EditorWindow::setPrecisionTrimVisible(bool visible) {
   }
 }
 
+void EditorWindow::setTrimPreviewStatus(const QString& status) {
+  if (precision_tool_status_ == nullptr) {
+    return;
+  }
+  if (status.isEmpty()) {
+    syncTimelineToolActions();
+    return;
+  }
+  precision_tool_status_->setText(status);
+  precision_tool_status_->setAccessibleName(status);
+}
+
 void EditorWindow::restoreUiState() {
   if (settings_ == nullptr) {
     applyDefaultLayout(workspace_);

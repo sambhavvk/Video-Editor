@@ -12,6 +12,7 @@
 #include <QAction>
 #include <QApplication>
 #include <QCheckBox>
+#include <QColor>
 #include <QComboBox>
 #include <QContextMenuEvent>
 #include <QCoreApplication>
@@ -91,6 +92,8 @@ private slots:
   void timelineRollUsesTheControllerBoundaryConvention();
   void timelineRejectsLockedTrackEditsWithMessage();
   void timelineShowsLinkedCompanionSelection();
+  void timelineEmitsTrimPreviewStatusDuringGestures();
+  void programViewerRestoresProgramFrameAfterTrimCompare();
   void timelineMarkerSnappingExcludesTheDraggedMarker();
   void timelineRefreshCancelsMarkerGesturesAndUsesAuthoritativeSelection();
   void timelineCanCreateTracksWithoutAnExistingTrack();
@@ -2057,6 +2060,76 @@ void EditorWindowTest::timelineShowsLinkedCompanionSelection() {
   QVERIFY(!timeline.clips().at(0).selected);
   QVERIFY(!timeline.clips().at(0).active);
   QVERIFY(timeline.clips().at(0).linkedCompanion);
+}
+
+void EditorWindowTest::timelineEmitsTrimPreviewStatusDuringGestures() {
+  TimelineWidget timeline;
+  configureInteractiveTimeline(timeline);
+  timeline.setFrameRate(30, 1);
+  QSignalSpy status(&timeline, &TimelineWidget::editPreviewStatusChanged);
+  sendPointer(timeline, QEvent::MouseButtonPress, {276, 60}, Qt::LeftButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseMove, {326, 60}, Qt::NoButton, Qt::LeftButton);
+  QVERIFY(status.count() >= 1);
+  const QString trimStatus = status.last().at(0).toString();
+  QVERIFY(trimStatus.contains(QStringLiteral("Trim")));
+  QVERIFY(trimStatus.contains(QLatin1Char('f')));
+  sendPointer(timeline, QEvent::MouseButtonRelease, {326, 60}, Qt::LeftButton, Qt::NoButton);
+  QVERIFY(status.last().at(0).toString().isEmpty());
+
+  status.clear();
+  sendPointer(timeline, QEvent::MouseButtonPress, {276, 60}, Qt::LeftButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseMove, {326, 60}, Qt::NoButton, Qt::LeftButton);
+  QVERIFY(!status.last().at(0).toString().isEmpty());
+  QTest::keyClick(&timeline, Qt::Key_Escape);
+  QVERIFY(status.last().at(0).toString().isEmpty());
+
+  timeline.setToolMode(TimelineWidget::ToolMode::RippleTrim);
+  status.clear();
+  sendPointer(timeline, QEvent::MouseButtonPress, {276, 60}, Qt::LeftButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseMove, {326, 60}, Qt::NoButton, Qt::LeftButton);
+  QVERIFY(status.last().at(0).toString().contains(QStringLiteral("ripple")));
+  sendPointer(timeline, QEvent::MouseButtonRelease, {326, 60}, Qt::LeftButton, Qt::NoButton);
+
+  configureInteractiveTimeline(
+      timeline, {{QStringLiteral("left"), QStringLiteral("Left"), 0, 1'000, 2'000},
+                 {QStringLiteral("right"), QStringLiteral("Right"), 0, 3'000, 2'000}});
+  timeline.setFrameRate(30, 1);
+  timeline.setToolMode(TimelineWidget::ToolMode::Roll);
+  status.clear();
+  sendPointer(timeline, QEvent::MouseButtonPress, {473, 60}, Qt::LeftButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseMove, {523, 60}, Qt::NoButton, Qt::LeftButton,
+              Qt::ShiftModifier);
+  QVERIFY(status.last().at(0).toString().contains(QStringLiteral("Roll")));
+  sendPointer(timeline, QEvent::MouseButtonRelease, {523, 60}, Qt::LeftButton, Qt::NoButton,
+              Qt::ShiftModifier);
+
+  timeline.setToolMode(TimelineWidget::ToolMode::Slip);
+  status.clear();
+  sendPointer(timeline, QEvent::MouseButtonPress, {350, 60}, Qt::LeftButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseMove, {400, 60}, Qt::NoButton, Qt::LeftButton);
+  QVERIFY(status.last().at(0).toString().contains(QStringLiteral("Slip")));
+  sendPointer(timeline, QEvent::MouseButtonRelease, {400, 60}, Qt::LeftButton, Qt::NoButton);
+}
+
+void EditorWindowTest::programViewerRestoresProgramFrameAfterTrimCompare() {
+  video_editor::desktop_ui::ProgramViewer viewer;
+  QImage program(4, 4, QImage::Format_RGBA8888);
+  program.fill(QColor(10, 20, 30));
+  QImage outgoing(4, 4, QImage::Format_RGBA8888);
+  outgoing.fill(QColor(200, 0, 0));
+  QImage incoming(4, 4, QImage::Format_RGBA8888);
+  incoming.fill(QColor(0, 200, 0));
+  QImage later(4, 4, QImage::Format_RGBA8888);
+  later.fill(QColor(0, 0, 200));
+
+  viewer.setFrame(program);
+  QCOMPARE(viewer.currentDisplayImage().pixelColor(0, 0), QColor(10, 20, 30));
+  viewer.setTrimCompareFrames(outgoing, incoming);
+  QCOMPARE(viewer.currentDisplayImage().pixelColor(0, 0), QColor(200, 0, 0));
+  viewer.setFrame(later);
+  QCOMPARE(viewer.currentDisplayImage().pixelColor(0, 0), QColor(200, 0, 0));
+  viewer.clearTrimCompareFrames();
+  QCOMPARE(viewer.currentDisplayImage().pixelColor(0, 0), QColor(0, 0, 200));
 }
 
 QTEST_MAIN(EditorWindowTest)

@@ -122,6 +122,7 @@ private:
 
   QImage frame_;
   QImage compare_frame_;
+  QImage program_frame_before_trim_;
   bool trim_compare_active_{false};
   QSize sampling_frame_size_{16, 9};
   QString timecode_{QStringLiteral("00:00:00:00")};

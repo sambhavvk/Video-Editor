@@ -116,6 +116,10 @@ ProgramViewer::~ProgramViewer() {
 }
 
 void ProgramViewer::setFrame(const QImage& frame) {
+  if (trim_compare_active_) {
+    program_frame_before_trim_ = frame;
+    return;
+  }
   frame_ = frame;
   if (!frame_.isNull()) {
     sampling_frame_size_ = frame_.size();
@@ -133,20 +137,34 @@ void ProgramViewer::setSamplingFrameSize(const QSize& size) {
 void ProgramViewer::clearFrame() {
   frame_ = {};
   compare_frame_ = {};
+  program_frame_before_trim_ = {};
   trim_compare_active_ = false;
   update();
 }
 
 void ProgramViewer::setTrimCompareFrames(const QImage& outgoing, const QImage& incoming) {
+  if (!trim_compare_active_) {
+    program_frame_before_trim_ = frame_;
+  }
   frame_ = outgoing;
   compare_frame_ = incoming;
   trim_compare_active_ = !outgoing.isNull() || !incoming.isNull();
+  if (!trim_compare_active_) {
+    if (!program_frame_before_trim_.isNull()) {
+      frame_ = program_frame_before_trim_;
+    }
+    program_frame_before_trim_ = {};
+  }
   update();
 }
 
 void ProgramViewer::clearTrimCompareFrames() {
   compare_frame_ = {};
   trim_compare_active_ = false;
+  if (!program_frame_before_trim_.isNull()) {
+    frame_ = program_frame_before_trim_;
+  }
+  program_frame_before_trim_ = {};
   update();
 }
 

@@ -246,6 +246,7 @@ signals:
   void trackTargetToggled(const QString& trackId, bool targeted);
   void trackRemoveRequested(const QString& trackId);
   void editDestinationRejected(const QString& message);
+  void editPreviewStatusChanged(const QString& status);
 
 protected:
   void paintEvent(QPaintEvent* event) override;
@@ -311,6 +312,14 @@ private:
   [[nodiscard]] bool moveDestinationIsValid(int trackIndex) const;
   void reportEditDestinationRejected(const QString& message);
   void syncClipSelectionChrome();
+  void emitEditPreviewStatus();
+  [[nodiscard]] QString editPreviewStatusText() const;
+  struct NeighborPreviewDelta {
+    int clipIndex{-1};
+    qint64 startDelta{0};
+    qint64 durationDelta{0};
+  };
+  [[nodiscard]] QVector<NeighborPreviewDelta> neighborPreviewDeltas() const;
 
   QVector<TimelineTrackView> tracks_;
   QVector<TimelineClipView> clips_;
@@ -375,6 +384,7 @@ private:
     TimelineSnapResult snap;
     QStringList clipIds;
     bool rollCutAtStart{false};
+    int rollPartnerIndex{-1};
     qint64 rollMinimumDelta{0};
     qint64 rollMaximumDelta{0};
     bool editingFade{false};

@@ -152,11 +152,16 @@ active tool, including razor, pen, hand, zoom, ripple/overwrite trim, roll, slip
 - **Z — Zoom:** click to zoom in at the pointer, **Alt-click** to zoom out, or drag a range to
   frame it. **Ctrl+wheel** also zooms around the pointer.
 - **R — Ripple Trim:** drag an edge and shift following material by the exact duration change.
+  The timeline shows frame deltas and affected neighbors while dragging; the program viewer can
+  show outgoing/incoming frames at the edit point.
 - **W — Overwrite Trim:** drag an edge without moving later positions; covered material is removed
   or edge-trimmed.
-- **N — Roll:** drag the shared edge between adjacent clips while preserving the outer span.
+- **N — Roll:** drag the shared edge between adjacent clips while preserving the outer span. Roll
+  previews include the partner clip and a two-up compare in the program viewer.
 - **Y — Slip:** drag a clip body to change its source window without changing timeline position.
-- **U — Slide:** drag a middle clip body and trim its immediate neighbors.
+  Slip previews show the source shift in frames and a before/after compare in the program viewer.
+- **U — Slide:** drag a middle clip body and trim its immediate neighbors. Neighbor ghosts show the
+  proposed trims during the drag.
 - **A — Track Select Forward:** click a clip to select it and every later clip on the track.
 
 Control requests ripple intent and Alt requests overwrite intent for compatible Select-tool

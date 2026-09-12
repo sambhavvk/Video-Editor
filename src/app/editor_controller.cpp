@@ -1335,6 +1335,8 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::freezeFrameFromTimeline);
   connect(window_.timeline(), &desktop_ui::TimelineWidget::editDestinationRejected, this,
           [this](const QString& message) { window_.showTransientMessage(message); });
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::editPreviewStatusChanged, this,
+          [this](const QString& status) { window_.setTrimPreviewStatus(status); });
   connect(window_.timeline(), &desktop_ui::TimelineWidget::followPlayheadDisabled, this, [this] {
     if (auto* action = window_.action(QStringLiteral("toggleFollowPlayhead"))) {
       action->setChecked(false);
@@ -1602,6 +1604,7 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
                  const desktop_ui::TimelineSnapResult& snap) {
             Q_UNUSED(snap)
             clearTrimTwoUpPreview();
+            window_.setTrimPreviewStatus({});
             commitTimelineBatchEdit(clipIds, destinationTrackIndex, startDelta, durationDelta,
                                     static_cast<int>(mode), static_cast<int>(intent));
           });
@@ -1613,7 +1616,10 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
             updateTrimTwoUpPreview(clipIds, static_cast<int>(mode), startDelta, durationDelta);
           });
   connect(window_.timeline(), &desktop_ui::TimelineWidget::clipBatchEditCanceled, this,
-          [this](const QStringList&) { clearTrimTwoUpPreview(); });
+          [this](const QStringList&) {
+            clearTrimTwoUpPreview();
+            window_.setTrimPreviewStatus({});
+          });
   connect(window_.timeline(), &desktop_ui::TimelineWidget::frameNudgeRequested, this,
           [this](const QStringList& clipIds, const int frameCount,
                  const desktop_ui::TimelineWidget::EditIntent intent) {
@@ -8141,6 +8147,7 @@ void EditorController::refreshProgramViewerChrome() {
 }
 
 void EditorController::clearTrimTwoUpPreview() {
+  ++trim_two_up_serial_;
   window_.programViewer()->clearTrimCompareFrames();
 }
 
@@ -8149,7 +8156,7 @@ void EditorController::updateTrimTwoUpPreview(const QStringList& clipIds, const 
   using desktop_ui::TimelineWidget;
   const auto mode = static_cast<TimelineWidget::EditMode>(editMode);
   if (mode != TimelineWidget::EditMode::TrimIn && mode != TimelineWidget::EditMode::TrimOut &&
-      mode != TimelineWidget::EditMode::Roll) {
+      mode != TimelineWidget::EditMode::Roll && mode != TimelineWidget::EditMode::Slip) {
     clearTrimTwoUpPreview();
     return;
   }
@@ -8167,32 +8174,47 @@ void EditorController::updateTrimTwoUpPreview(const QStringList& clipIds, const 
   }
   const edit::Clip* outgoing = primary;
   const edit::Clip* incoming = primary;
-  if (mode == TimelineWidget::EditMode::Roll) {
-    for (const edit::Track& track : sequence->tracks) {
-      for (std::size_t index = 0; index + 1 < track.clips.size(); ++index) {
-        if (track.clips[index].id == *parsed) {
-          outgoing = &track.clips[index];
-          incoming = &track.clips[index + 1];
-          break;
-        }
-        if (track.clips[index + 1].id == *parsed) {
-          outgoing = &track.clips[index];
-          incoming = &track.clips[index + 1];
-          break;
+  edit::Time outgoing_source{};
+  edit::Time incoming_source{};
+  if (mode == TimelineWidget::EditMode::Slip) {
+    const edit::Time sample_time = timelineTime(timelineValue(primary->timeline_range.start));
+    outgoing_source = edit::sourceTimeAtTimelineTime(*primary, sample_time);
+    const edit::Time source_delta =
+        timelineTime(startDelta)
+            .scaled(primary->playback_rate.numerator(), primary->playback_rate.denominator(),
+                    edit::RoundingMode::NearestTiesEven)
+            .rescaledTo(primary->source_range.start.timescale(),
+                        edit::RoundingMode::NearestTiesEven);
+    incoming_source = outgoing_source + source_delta;
+  } else {
+    if (mode == TimelineWidget::EditMode::Roll) {
+      for (const edit::Track& track : sequence->tracks) {
+        for (std::size_t index = 0; index + 1 < track.clips.size(); ++index) {
+          if (track.clips[index].id == *parsed) {
+            outgoing = &track.clips[index];
+            incoming = &track.clips[index + 1];
+            break;
+          }
+          if (track.clips[index + 1].id == *parsed) {
+            outgoing = &track.clips[index];
+            incoming = &track.clips[index + 1];
+            break;
+          }
         }
       }
     }
+    const qint64 roll_cut_delta = mode == TimelineWidget::EditMode::Roll ? startDelta : 0;
+    const qint64 outgoing_end =
+        timelineValue(outgoing->timeline_range.start + outgoing->timeline_range.duration) +
+        (outgoing->id == *parsed ? durationDelta : roll_cut_delta);
+    const qint64 incoming_start =
+        timelineValue(incoming->timeline_range.start) +
+        (incoming->id == *parsed ? startDelta : roll_cut_delta);
+    const edit::Time outgoing_time = timelineTime(std::max<qint64>(0, outgoing_end - 1));
+    const edit::Time incoming_time = timelineTime(incoming_start);
+    outgoing_source = edit::sourceTimeAtTimelineTime(*outgoing, outgoing_time);
+    incoming_source = edit::sourceTimeAtTimelineTime(*incoming, incoming_time);
   }
-  const qint64 outgoing_end =
-      timelineValue(outgoing->timeline_range.start + outgoing->timeline_range.duration) +
-      (outgoing->id == *parsed ? durationDelta : 0);
-  const qint64 incoming_start =
-      timelineValue(incoming->timeline_range.start) +
-      (incoming->id == *parsed ? startDelta : 0);
-  const edit::Time outgoing_time = timelineTime(std::max<qint64>(0, outgoing_end - 1));
-  const edit::Time incoming_time = timelineTime(incoming_start);
-  const edit::Time outgoing_source = edit::sourceTimeAtTimelineTime(*outgoing, outgoing_time);
-  const edit::Time incoming_source = edit::sourceTimeAtTimelineTime(*incoming, incoming_time);
   const std::uint64_t serial = ++trim_two_up_serial_;
   const auto provider = frame_provider_;
   QtConcurrent::run([this, provider, outgoing = *outgoing, incoming = *incoming, outgoing_source,

@@ -39,6 +39,7 @@ constexpr QColor kPlayhead{244, 89, 93};
 constexpr QColor kSnapGuide{94, 214, 194};
 constexpr QColor kEditPreview{230, 238, 255, 105};
 constexpr QColor kEditPreviewRejected{220, 90, 90, 120};
+constexpr QColor kNeighborPreview{180, 200, 220, 80};
 constexpr QColor kSelectionAccent{238, 243, 252, 185};
 constexpr QColor kActiveClipAccent{238, 183, 72, 220};
 constexpr QColor kLinkedCompanionAccent{94, 214, 194, 205};
@@ -140,6 +141,66 @@ void paintClipSelectionChrome(QPainter& painter, const QPainterPath& shape, cons
 }
 
 } // namespace
+
+QVector<TimelineWidget::NeighborPreviewDelta> TimelineWidget::neighborPreviewDeltas() const {
+  QVector<NeighborPreviewDelta> result;
+  if (!clip_gesture_.dragging || clip_gesture_.clipIndex < 0 ||
+      clip_gesture_.clipIndex >= clips_.size()) {
+    return result;
+  }
+  const auto& primary = clips_.at(clip_gesture_.clipIndex);
+  const int track = primary.trackIndex;
+  const qint64 originalEnd = clip_gesture_.originalStart + clip_gesture_.originalDuration;
+
+  const auto onSameTrack = [&](const int index) {
+    return index >= 0 && index < clips_.size() && clips_.at(index).trackIndex == track;
+  };
+
+  switch (clip_gesture_.mode) {
+  case EditMode::Roll:
+    if (clip_gesture_.rollPartnerIndex >= 0 && onSameTrack(clip_gesture_.rollPartnerIndex)) {
+      if (clip_gesture_.rollCutAtStart) {
+        result.push_back({clip_gesture_.rollPartnerIndex, 0, clip_gesture_.startDelta});
+      } else {
+        result.push_back({clip_gesture_.rollPartnerIndex, clip_gesture_.startDelta,
+                          -clip_gesture_.durationDelta});
+      }
+    }
+    break;
+  case EditMode::Slide:
+    for (int index = 0; index < clips_.size(); ++index) {
+      if (index == clip_gesture_.clipIndex || !onSameTrack(index)) {
+        continue;
+      }
+      const auto& candidate = clips_.at(index);
+      if (candidate.start + candidate.duration == clip_gesture_.originalStart) {
+        result.push_back({index, 0, -clip_gesture_.startDelta});
+      } else if (candidate.start == originalEnd) {
+        result.push_back({index, clip_gesture_.startDelta, -clip_gesture_.startDelta});
+      }
+    }
+    break;
+  case EditMode::TrimIn:
+  case EditMode::TrimOut:
+    if (clip_gesture_.intent == EditIntent::Ripple) {
+      // The model ripples by duration change and, for trim-in, keeps the left
+      // timeline edge fixed. Downstream clips therefore move by durationDelta.
+      const qint64 rippleDelta = clip_gesture_.durationDelta;
+      for (int index = 0; index < clips_.size(); ++index) {
+        if (index == clip_gesture_.clipIndex || !onSameTrack(index)) {
+          continue;
+        }
+        if (clips_.at(index).start >= originalEnd) {
+          result.push_back({index, rippleDelta, 0});
+        }
+      }
+    }
+    break;
+  default:
+    break;
+  }
+  return result;
+}
 
 TimelineWidget::TimelineWidget(QWidget* parent) : QAbstractScrollArea(parent) {
   setObjectName(QStringLiteral("timelineWidget"));
@@ -557,6 +618,57 @@ void TimelineWidget::reportEditDestinationRejected(const QString& message) {
   emit editDestinationRejected(message);
 }
 
+QString TimelineWidget::editPreviewStatusText() const {
+  if (!clip_gesture_.dragging) {
+    return {};
+  }
+  const auto frameDuration = roundedFrameDuration();
+  if (frameDuration <= 0) {
+    return {};
+  }
+  const qint64 dominantDelta = clip_gesture_.mode == EditMode::TrimOut
+                                   ? clip_gesture_.durationDelta
+                                   : clip_gesture_.startDelta;
+  const qint64 frames = dominantDelta / frameDuration;
+  QString modeName;
+  switch (clip_gesture_.mode) {
+  case EditMode::Move:
+    modeName = tr("Move");
+    break;
+  case EditMode::TrimIn:
+    modeName = tr("Trim in");
+    break;
+  case EditMode::TrimOut:
+    modeName = tr("Trim out");
+    break;
+  case EditMode::Roll:
+    modeName = tr("Roll");
+    break;
+  case EditMode::Slip:
+    modeName = tr("Slip");
+    break;
+  case EditMode::Slide:
+    modeName = tr("Slide");
+    break;
+  }
+  QString intentSuffix;
+  if (clip_gesture_.intent == EditIntent::Ripple) {
+    intentSuffix = tr(" ripple");
+  } else if (clip_gesture_.intent == EditIntent::Overwrite) {
+    intentSuffix = tr(" overwrite");
+  }
+  if (frames == 0 && clip_gesture_.mode != EditMode::Slip) {
+    return modeName + intentSuffix;
+  }
+  return tr("%1%2 %3%4f")
+      .arg(modeName, intentSuffix, frames > 0 ? QStringLiteral("+") : QString())
+      .arg(frames);
+}
+
+void TimelineWidget::emitEditPreviewStatus() {
+  emit editPreviewStatusChanged(editPreviewStatusText());
+}
+
 void TimelineWidget::syncClipSelectionChrome() {
   QStringList selectedGroups;
   if (linked_selection_enabled_) {
@@ -969,24 +1081,66 @@ void TimelineWidget::paintEvent(QPaintEvent* event) {
 
   if (clip_gesture_.dragging && clip_gesture_.clipIndex >= 0 &&
       clip_gesture_.clipIndex < clips_.size()) {
-    auto previewClip = clips_.at(clip_gesture_.clipIndex);
+    const QRect clipViewport = viewport()->rect().adjusted(header_width_, ruler_height_, 0, 0);
+    for (const auto& neighbor : neighborPreviewDeltas()) {
+      if (neighbor.clipIndex < 0 || neighbor.clipIndex >= clips_.size()) {
+        continue;
+      }
+      auto preview = clips_.at(neighbor.clipIndex);
+      preview.start += neighbor.startDelta;
+      preview.duration += neighbor.durationDelta;
+      if (preview.duration <= 0) {
+        continue;
+      }
+      const QRect previewRect = clipRect(preview);
+      if (!previewRect.intersects(clipViewport)) {
+        continue;
+      }
+      painter.fillRect(previewRect, kNeighborPreview);
+      painter.setPen(QPen{QColor{200, 214, 228, 180}, 1, Qt::DashLine});
+      painter.drawRoundedRect(previewRect, 4, 4);
+    }
+    const bool rejected =
+        clip_gesture_.mode == EditMode::Move &&
+        (clip_gesture_.sourceTrackLocked ||
+         !moveDestinationIsValid(clip_gesture_.destinationTrackIndex));
+    auto primaryPreview = clips_.at(clip_gesture_.clipIndex);
     if (clip_gesture_.mode != EditMode::Slip) {
-      previewClip.start += clip_gesture_.startDelta;
-      previewClip.duration += clip_gesture_.durationDelta;
+      if (clip_gesture_.mode == EditMode::TrimIn &&
+          clip_gesture_.intent == EditIntent::Ripple) {
+        primaryPreview.duration += clip_gesture_.durationDelta;
+      } else {
+        primaryPreview.start += clip_gesture_.startDelta;
+        primaryPreview.duration += clip_gesture_.durationDelta;
+      }
     }
     if (clip_gesture_.mode == EditMode::Move) {
-      previewClip.trackIndex = clip_gesture_.destinationTrackIndex;
+      primaryPreview.trackIndex = clip_gesture_.destinationTrackIndex;
     }
-    const auto previewRect = clipRect(previewClip);
-    if (previewRect.intersects(viewport()->rect())) {
-      const bool rejected =
-          clip_gesture_.mode == EditMode::Move &&
-          (clip_gesture_.sourceTrackLocked ||
-           !moveDestinationIsValid(clip_gesture_.destinationTrackIndex));
-      painter.fillRect(previewRect, rejected ? kEditPreviewRejected : kEditPreview);
+    const QRect primaryPreviewRect = clipRect(primaryPreview);
+    if (primaryPreviewRect.intersects(clipViewport)) {
+      painter.fillRect(primaryPreviewRect, rejected ? kEditPreviewRejected : kEditPreview);
       painter.setPen(QPen{rejected ? QColor{244, 120, 120} : QColor{238, 243, 252}, 1,
                           Qt::DashLine});
-      painter.drawRoundedRect(previewRect, 4, 4);
+      painter.drawRoundedRect(primaryPreviewRect, 4, 4);
+    }
+    const auto frameDuration = roundedFrameDuration();
+    if (frameDuration > 0 && primaryPreviewRect.intersects(clipViewport)) {
+      const qint64 dominantDelta = clip_gesture_.mode == EditMode::TrimOut
+                                       ? clip_gesture_.durationDelta
+                                       : clip_gesture_.startDelta;
+      const qint64 frames = dominantDelta / frameDuration;
+      if (frames != 0) {
+        const QString deltaText =
+            QStringLiteral("%1%2f")
+                .arg(frames > 0 ? QStringLiteral("+") : QString())
+                .arg(frames);
+        painter.setPen(QColor{244, 246, 250});
+        painter.setFont(
+            QFont{font().family(), std::max(8, font().pointSize() - 1), QFont::DemiBold});
+        painter.drawText(primaryPreviewRect.adjusted(6, 4, -6, -4),
+                         Qt::AlignTop | Qt::AlignRight, deltaText);
+      }
     }
   }
 
@@ -2240,9 +2394,8 @@ void TimelineWidget::beginClipGesture(int clipIndex, const QPoint& position,
     clip_gesture_.targetFadeIn = clip.fadeIn;
     clip_gesture_.targetFadeOut = clip.fadeOut;
   }
-  if (clip_gesture_.clipIds.isEmpty()) {
-    clip_gesture_.clipIds.append(clip.id);
-  }
+  clip_gesture_.clipIds.removeAll(clip.id);
+  clip_gesture_.clipIds.prepend(clip.id);
   if (clip_gesture_.mode == EditMode::Roll) {
     const auto minimumDuration = [](qint64 duration, qint64 frameDuration) {
       return std::max<qint64>(1, std::min(duration, frameDuration));
@@ -2268,12 +2421,14 @@ void TimelineWidget::beginClipGesture(int clipIndex, const QPoint& position,
     if (following >= 0) {
       const auto followingMinimum =
           minimumDuration(clips_.at(following).duration, roundedFrameDuration());
+      clip_gesture_.rollPartnerIndex = following;
       clip_gesture_.rollMinimumDelta = -(clip.duration - clipMinimum);
       clip_gesture_.rollMaximumDelta = clips_.at(following).duration - followingMinimum;
     } else if (preceding >= 0) {
       const auto precedingMinimum =
           minimumDuration(clips_.at(preceding).duration, roundedFrameDuration());
       clip_gesture_.rollCutAtStart = true;
+      clip_gesture_.rollPartnerIndex = preceding;
       clip_gesture_.rollMinimumDelta = -(clips_.at(preceding).duration - precedingMinimum);
       clip_gesture_.rollMaximumDelta = clip.duration - clipMinimum;
     } else {
@@ -2558,6 +2713,7 @@ void TimelineWidget::updateClipGesture(const QPoint& position, Qt::KeyboardModif
                                                clip_gesture_.mode == EditMode::Slide
                                            ? TimelineCursorKind::HandClosed
                                            : TimelineCursorKind::Trim));
+  emitEditPreviewStatus();
   viewport()->update();
 }
 
@@ -2581,6 +2737,7 @@ void TimelineWidget::finishClipGesture(const QPoint& position, Qt::KeyboardModif
   const auto clipId = clips_.at(clip_gesture_.clipIndex).id;
   const auto completed = clip_gesture_;
   clip_gesture_ = ClipGesture{};
+  emit editPreviewStatusChanged({});
   if (QWidget::mouseGrabber() == viewport()) {
     viewport()->releaseMouse();
   }
@@ -2647,6 +2804,7 @@ void TimelineWidget::cancelClipGesture() {
     viewport()->releaseMouse();
   }
   viewport()->setCursor(timelineCursor(TimelineCursorKind::Arrow));
+  emit editPreviewStatusChanged({});
   viewport()->update();
   if (!editingEnvelope && !clipId.isEmpty()) {
     emit clipEditCanceled(clipId);
