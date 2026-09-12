@@ -4,6 +4,7 @@
 #include "path_utils.hpp"
 #include "project_recent_paths.hpp"
 #include "delivery_recipes.hpp"
+#include "channel_style_kits.hpp"
 #include "restore_points.hpp"
 #include "timecode_util.hpp"
 #include "session_event_log.hpp"
@@ -1663,6 +1664,11 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           });
   connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::captionStyleEdited, this,
           &EditorController::captionStyleEdited);
+  connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::styleKitApplyRequested, this,
+          &EditorController::applyStyleKit);
+  connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::styleKitSaveRequested, this,
+          &EditorController::saveStyleKit);
+  refreshStyleKits();
   connect(&window_, &desktop_ui::EditorWindow::exportConfirmed, this,
           [this](const QString& destination, const QString& presetId) {
             (void)startVideoExport(pathFromQString(destination), presetId, true);
@@ -12658,6 +12664,144 @@ void EditorController::queueDeliveryRecipe(const QString& recipeId) {
     window_.showTransientMessage(
         tr("Queued %1 export job(s) from recipe \"%2\"").arg(queued).arg(recipe->name));
   }
+}
+
+namespace {
+[[nodiscard]] edit::CaptionStyle captionStyleFromView(const desktop_ui::CaptionStyleView& style) {
+  edit::CaptionStyle result;
+  result.font_family = style.fontFamily.toStdString();
+  result.font_size = style.fontSize;
+  result.text_color = {style.textColor.redF(), style.textColor.greenF(), style.textColor.blueF(),
+                       style.textColor.alphaF()};
+  result.background_color = {style.backgroundColor.redF(), style.backgroundColor.greenF(),
+                           style.backgroundColor.blueF(), style.backgroundColor.alphaF()};
+  result.bold = style.bold;
+  result.italic = style.italic;
+  result.vertical_position = style.verticalPosition;
+  result.safe_margin = style.safeMargin;
+  result.outline_width = style.outlineWidth;
+  result.outline_color = {style.outlineColor.redF(), style.outlineColor.greenF(),
+                          style.outlineColor.blueF(), style.outlineColor.alphaF()};
+  result.alignment =
+      style.alignment == QStringLiteral("left")
+          ? edit::CaptionAlignment::Left
+          : (style.alignment == QStringLiteral("right") ? edit::CaptionAlignment::Right
+                                                        : edit::CaptionAlignment::Center);
+  return result;
+}
+
+[[nodiscard]] bool fontSupportedForKit(const QString& fontFamily) {
+  const QString normalized = fontFamily.trimmed().toLower();
+  return normalized.isEmpty() || normalized == QStringLiteral("sans-serif") ||
+         normalized == QStringLiteral("noto sans") || normalized == QStringLiteral("notosans");
+}
+} // namespace
+
+void EditorController::refreshStyleKits() {
+  QVector<QPair<QString, QString>> kits;
+  QString attribution;
+  for (const ChannelStyleKitEntry& entry : loadChannelStyleKits(windowSettings(window_))) {
+    kits.push_back({entry.id, entry.name});
+    if (attribution.isEmpty() && !entry.fontAttribution.isEmpty()) {
+      attribution = entry.fontAttribution;
+    }
+  }
+  window_.captionsPanel()->setStyleKits(kits, attribution);
+}
+
+void EditorController::applyStyleKit(const QString& kitId) {
+  const std::optional<ChannelStyleKitEntry> kit =
+      findChannelStyleKit(windowSettings(window_), kitId);
+  if (!kit.has_value()) {
+    window_.showTransientMessage(tr("That style kit is no longer available"));
+    return;
+  }
+  if (!fontSupportedForKit(kit->captionStyle.fontFamily) ||
+      !fontSupportedForKit(kit->titleFontFamily)) {
+    window_.showTransientMessage(
+        tr("The kit requests %1, which falls back to the bundled Noto Sans shaping path.")
+            .arg(kit->captionStyle.fontFamily));
+  }
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    explainUnavailable(window_, "editor_controller.cpp:applyStyleKit",
+                       tr("Open a sequence before applying a style kit"));
+    return;
+  }
+  std::vector<edit::EditCommand> commands;
+  const edit::CaptionStyle captionStyle = captionStyleFromView(kit->captionStyle);
+  if (kit->kind == QStringLiteral("caption_style") || kit->kind == QStringLiteral("lower_third") ||
+      kit->kind == QStringLiteral("chapter_card")) {
+    for (const edit::Caption& caption : sequence->captions) {
+      edit::Caption updated = caption;
+      updated.style = captionStyle;
+      commands.push_back({.operation = edit::UpdateCaptionCommand{sequence->id, std::move(updated)},
+                          .coalescing_key = {}});
+    }
+  }
+  if (kit->kind == QStringLiteral("lower_third") || kit->kind == QStringLiteral("chapter_card")) {
+    edit::EntityId track_id;
+    for (const auto& track : sequence->tracks) {
+      if (track.kind == edit::TrackKind::Video && !track.locked) {
+        track_id = track.id;
+        break;
+      }
+    }
+    if (track_id.isNil()) {
+      window_.showTransientMessage(tr("No unlocked video track for the title preset"));
+      return;
+    }
+    edit::Clip clip;
+    clip.kind = edit::ClipKind::Title;
+    clip.name = kit->name.toStdString();
+    const edit::Time duration = kit->kind == QStringLiteral("chapter_card") ? edit::Time(5, 1)
+                                                                            : edit::Time(4, 1);
+    clip.timeline_range = edit::TimeRange(playheadTime(), duration);
+    clip.source_range = edit::TimeRange(edit::Time{}, duration);
+    edit::Title title_payload;
+    title_payload.text = kit->titleText.toStdString();
+    title_payload.font_family = kit->titleFontFamily.toStdString();
+    title_payload.font_size = kit->titleFontSize;
+    title_payload.bold = kit->titleBold;
+    title_payload.italic = kit->titleItalic;
+    title_payload.background_color =
+        kit->kind == QStringLiteral("lower_third")
+            ? edit::ColorRgba{0.0, 0.0, 0.0, 0.72}
+            : edit::ColorRgba{0.0, 0.0, 0.0, 0.82};
+    clip.title = std::move(title_payload);
+    commands.push_back({.operation = edit::InsertClipCommand{.sequence_id = sequence->id,
+                                                             .track_id = track_id,
+                                                             .clip = std::move(clip),
+                                                             .mode = edit::InsertMode::Ripple},
+                        .coalescing_key = {}});
+  }
+  if (commands.empty()) {
+    return;
+  }
+  if (applyBatch(std::move(commands), tr("Could not apply the style kit"))) {
+    refreshCaptionView();
+    window_.captionsPanel()->setStyleKits({}, kit->fontAttribution);
+    window_.showTransientMessage(tr("Applied style kit \"%1\"").arg(kit->name));
+  }
+}
+
+void EditorController::saveStyleKit() {
+  const QString name =
+      QInputDialog::getText(&window_, tr("Save style kit"), tr("Kit name:")).trimmed();
+  if (name.isEmpty()) {
+    return;
+  }
+  ChannelStyleKitEntry entry;
+  entry.id = QString::fromStdString(edit::EntityId::generate().toString());
+  entry.name = name;
+  entry.kind = QStringLiteral("caption_style");
+  entry.captionStyle = window_.captionsPanel()->currentCaptionStyle();
+  entry.fontAttribution = fontSupportedForKit(entry.captionStyle.fontFamily)
+                              ? QStringLiteral("Noto Sans (SIL Open Font License 1.1)")
+                              : tr("Uses fallback shaping for %1").arg(entry.captionStyle.fontFamily);
+  appendChannelStyleKit(windowSettings(window_), entry);
+  refreshStyleKits();
+  window_.showTransientMessage(tr("Saved style kit \"%1\"").arg(name));
 }
 
 bool EditorController::restoreNamedRestorePoint(const QString& id) {

@@ -14,6 +14,8 @@ add_library(video_editor_app_controller
   restore_points.hpp
   delivery_recipes.cpp
   delivery_recipes.hpp
+  channel_style_kits.cpp
+  channel_style_kits.hpp
   session_event_log.cpp
   session_event_log.hpp
   timecode_util.cpp

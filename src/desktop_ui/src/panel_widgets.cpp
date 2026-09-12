@@ -3036,6 +3036,25 @@ CaptionsPanelWidget::CaptionsPanelWidget(QWidget* parent) : QWidget(parent) {
   style_preview_->setAccessibleName(tr("Caption style preview"));
   style_preview_->setWordWrap(true);
   styleForm->addRow(QString{}, style_preview_);
+  style_kits_ = new QComboBox(style);
+  style_kits_->setObjectName(QStringLiteral("captionStyleKits"));
+  style_kits_->setAccessibleName(tr("Channel style kits"));
+  styleForm->addRow(tr("Style kit"), style_kits_);
+  auto* kitButtons = new QWidget(style);
+  auto* kitButtonsLayout = new QHBoxLayout(kitButtons);
+  kitButtonsLayout->setContentsMargins(0, 0, 0, 0);
+  apply_style_kit_ = new QPushButton(tr("Apply kit"), kitButtons);
+  apply_style_kit_->setObjectName(QStringLiteral("applyStyleKitButton"));
+  save_style_kit_ = new QPushButton(tr("Save kit…"), kitButtons);
+  save_style_kit_->setObjectName(QStringLiteral("saveStyleKitButton"));
+  kitButtonsLayout->addWidget(apply_style_kit_);
+  kitButtonsLayout->addWidget(save_style_kit_);
+  kitButtonsLayout->addStretch();
+  styleForm->addRow(QString{}, kitButtons);
+  style_attribution_ = makeMutedLabel(QString(), style);
+  style_attribution_->setObjectName(QStringLiteral("captionStyleAttribution"));
+  style_attribution_->setWordWrap(true);
+  styleForm->addRow(tr("Attribution"), style_attribution_);
   layout->addWidget(style);
 
   auto* reviewGroup = new QGroupBox(tr("Review suggestions"), this);
@@ -3144,6 +3163,12 @@ CaptionsPanelWidget::CaptionsPanelWidget(QWidget* parent) : QWidget(parent) {
   connect(outline_width_, &QDoubleSpinBox::editingFinished, this, emitStyle);
   connect(style_bold_, &QCheckBox::toggled, this, [emitStyle](bool) { emitStyle(); });
   connect(style_italic_, &QCheckBox::toggled, this, [emitStyle](bool) { emitStyle(); });
+  connect(apply_style_kit_, &QPushButton::clicked, this, [this] {
+    if (style_kits_->currentData().isValid()) {
+      emit styleKitApplyRequested(style_kits_->currentData().toString());
+    }
+  });
+  connect(save_style_kit_, &QPushButton::clicked, this, &CaptionsPanelWidget::styleKitSaveRequested);
   connect(review_, &QListWidget::itemChanged, this, [this](QListWidgetItem* item) {
     if (item == nullptr)
       return;
@@ -3413,6 +3438,27 @@ void CaptionsPanelWidget::setTranscriptionOptions(const TranscriptionOptionsView
 
 void CaptionsPanelWidget::setCaptionStyle(const CaptionStyleView& style) {
   updateStyleControls(style);
+}
+
+void CaptionsPanelWidget::setStyleKits(const QVector<QPair<QString, QString>>& kits,
+                                       const QString& attribution) {
+  const QSignalBlocker blocker(style_kits_);
+  const QString selected = style_kits_->currentData().toString();
+  style_kits_->clear();
+  for (const auto& kit : kits) {
+    style_kits_->addItem(kit.second, kit.first);
+  }
+  const int index = style_kits_->findData(selected);
+  if (index >= 0) {
+    style_kits_->setCurrentIndex(index);
+  }
+  if (style_attribution_ != nullptr && !attribution.isEmpty()) {
+    style_attribution_->setText(attribution);
+  }
+}
+
+CaptionStyleView CaptionsPanelWidget::currentCaptionStyle() const {
+  return styleFromControls();
 }
 
 void CaptionsPanelWidget::setReviewProposals(const QVector<CaptionProposalView>& proposals) {

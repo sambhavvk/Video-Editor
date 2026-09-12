@@ -518,6 +518,9 @@ private:
   void refreshProjectHealthPanel();
   void handleProjectHealthRepair(const QString& issueId);
   void refreshDeliveryRecipes();
+  void refreshStyleKits();
+  void applyStyleKit(const QString& kitId);
+  void saveStyleKit();
   void saveDeliveryRecipe(const QString& name);
   void queueDeliveryRecipe(const QString& recipeId);
   void finishProxyJob(const std::string& asset_id, const ProxyOutcome& outcome);

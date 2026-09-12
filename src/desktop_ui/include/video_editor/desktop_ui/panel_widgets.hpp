@@ -388,6 +388,8 @@ public:
   void setModelDownloadState(const ModelDownloadView& state);
   void setTranscriptionOptions(const TranscriptionOptionsView& options);
   void setCaptionStyle(const CaptionStyleView& style);
+  void setStyleKits(const QVector<QPair<QString, QString>>& kits, const QString& attribution);
+  [[nodiscard]] CaptionStyleView currentCaptionStyle() const;
   void setReviewProposals(const QVector<CaptionProposalView>& proposals);
   void setReviewOptions(const CaptionReviewOptionsView& options);
   [[nodiscard]] CaptionReviewOptionsView reviewOptions() const;
@@ -415,6 +417,8 @@ signals:
   void transcribeWithOptionsRequested(const TranscriptionOptionsView& options);
   void captionTimingEdited(const QString& captionId, qint64 start, qint64 end);
   void captionStyleEdited(const QString& captionId, const CaptionStyleView& style);
+  void styleKitApplyRequested(const QString& kitId);
+  void styleKitSaveRequested();
   void reviewProposalToggled(const QString& proposalId, bool selected);
   void reviewOptionsChanged(const CaptionReviewOptionsView& options);
   void auditionProposalRequested(const QString& proposalId);
@@ -463,6 +467,10 @@ private:
   QCheckBox* style_bold_{nullptr};
   QCheckBox* style_italic_{nullptr};
   QLabel* style_preview_{nullptr};
+  QComboBox* style_kits_{nullptr};
+  QPushButton* apply_style_kit_{nullptr};
+  QPushButton* save_style_kit_{nullptr};
+  QLabel* style_attribution_{nullptr};
   QListWidget* review_{nullptr};
   QPushButton* apply_review_{nullptr};
   QPushButton* discard_review_{nullptr};
