@@ -24,6 +24,13 @@ enum class Workspace {
   Deliver,
 };
 
+enum class ArrangementPreset {
+  Creator,
+  Film,
+  Text,
+  Audio,
+};
+
 enum class TrackKind {
   Video,
   Audio,

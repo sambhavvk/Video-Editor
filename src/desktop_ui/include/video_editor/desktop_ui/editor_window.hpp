@@ -273,8 +273,23 @@ private:
   void labelInteractiveChrome();
   void applyDefaultLayout(Workspace workspace);
   void applyCompactLayoutForCurrentSize();
+  struct ArrangementSnapshot {
+    QByteArray dockState;
+    Workspace workspace{Workspace::Edit};
+    bool sourceVisible{false};
+    bool precisionVisible{false};
+  };
+  void applyArrangementDefault(ArrangementPreset preset);
+  void applyArrangementViewers(ArrangementPreset preset);
+  void updateArrangementActions();
   void maximizeFocusedPanel();
   void resetWorkspaceLayout();
+  void setArrangementPreset(ArrangementPreset preset);
+  void resetArrangementPreset();
+  void applyAppearanceScale(int fontScalePercent);
+  [[nodiscard]] ArrangementSnapshot captureArrangementSnapshot() const;
+  bool restoreArrangementSnapshot(const ArrangementSnapshot& snapshot);
+  void persistArrangementSnapshot(ArrangementPreset preset, const ArrangementSnapshot& snapshot);
   [[nodiscard]] QDockWidget* focusedDockWidget() const;
   [[nodiscard]] QList<QDockWidget*> dockWidgets() const;
   [[nodiscard]] QByteArray restorableLayoutState() const;
@@ -290,7 +305,7 @@ private:
   void addAction(const QString& id, QAction* action);
   [[nodiscard]] QString settingsKeyForWorkspace(Workspace workspace) const;
   [[nodiscard]] static QString workspaceDisplayName(Workspace workspace);
-  [[nodiscard]] static QString darkStyleSheet();
+  [[nodiscard]] static QString darkStyleSheet(int fontScalePercent = 100);
 
   QSettings* settings_{nullptr};
   std::unique_ptr<QSettings> owned_settings_;
@@ -304,6 +319,10 @@ private:
   QHash<QString, QKeySequence> shortcut_defaults_;
   QHash<Workspace, QAction*> workspace_actions_;
   QHash<Workspace, QByteArray> session_layouts_;
+  QHash<ArrangementPreset, ArrangementSnapshot> arrangement_layouts_;
+  QHash<ArrangementPreset, QAction*> arrangement_actions_;
+  ArrangementPreset arrangement_preset_{ArrangementPreset::Creator};
+  int font_scale_percent_{100};
 
   ProgramViewer* program_viewer_{nullptr};
   ProgramViewer* source_viewer_{nullptr};

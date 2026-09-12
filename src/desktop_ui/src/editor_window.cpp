@@ -24,11 +24,13 @@
 #include <QDockWidget>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFont>
 #include <QFrame>
 #include <QGroupBox>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QListWidget>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
@@ -42,6 +44,7 @@
 #include <QStatusBar>
 #include <QStyle>
 #include <QTabBar>
+#include <QTableWidget>
 #include <QToolBar>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -98,6 +101,53 @@ void resizeShownDock(QMainWindow* window, QDockWidget* dock, int size,
   window->resizeDocks({dock}, {size}, orientation);
 }
 
+int snapAppearanceScalePercent(int percent) noexcept {
+  if (percent >= 138) {
+    return 150;
+  }
+  if (percent >= 113) {
+    return 125;
+  }
+  return 100;
+}
+
+void setWidgetPointSize(QWidget* widget, int pointSize) {
+  if (widget == nullptr || pointSize <= 0) {
+    return;
+  }
+  QFont font = widget->font();
+  font.setPointSize(pointSize);
+  widget->setFont(font);
+}
+
+void applyStatusRole(QLabel* label, const QString& text) {
+  if (label == nullptr) {
+    return;
+  }
+  const auto lower = text.toLower();
+  QString role = QStringLiteral("status");
+  QString severity = QObject::tr("idle");
+  if (lower.contains(QStringLiteral("error")) || lower.contains(QStringLiteral("fail"))) {
+    role = QStringLiteral("status-error");
+    severity = QObject::tr("error");
+  } else if (lower.contains(QStringLiteral("warn")) || lower.contains(QStringLiteral("drift"))) {
+    role = QStringLiteral("status-warning");
+    severity = QObject::tr("warning");
+  } else if (!lower.contains(QStringLiteral("idle"))) {
+    role = QStringLiteral("status-success");
+    severity = QObject::tr("in sync");
+  }
+  label->setText(text);
+  label->setProperty("role", role);
+  label->setAccessibleName(text);
+  label->setAccessibleDescription(QObject::tr("Audio and video sync status (%1)").arg(severity));
+  if (auto* style = label->style()) {
+    style->unpolish(label);
+    style->polish(label);
+  }
+  label->update();
+}
+
 QString strippedActionText(const QAction* action) {
   return action == nullptr ? QString{} : action->text().remove(u'&').trimmed();
 }
@@ -151,6 +201,22 @@ void labelToolButtonsFromActions(QWidget* root) {
   }
 }
 
+Workspace workspaceForArrangement(ArrangementPreset preset) {
+  switch (preset) {
+  case ArrangementPreset::Text:
+  case ArrangementPreset::Audio:
+    return Workspace::AudioCaptions;
+  case ArrangementPreset::Creator:
+  case ArrangementPreset::Film:
+    return Workspace::Edit;
+  }
+  return Workspace::Edit;
+}
+
+QString arrangementSettingsPrefix(ArrangementPreset preset) {
+  return QStringLiteral("ui/arrangements/v1/%1/").arg(static_cast<int>(preset));
+}
+
 QDockWidget* makeDock(const QString& objectName, const QString& title, QWidget* panel,
                       QMainWindow* window) {
   auto* dock = new QDockWidget(title, window);
@@ -179,7 +245,8 @@ EditorWindow::EditorWindow(QSettings* settings, QWidget* parent) : QMainWindow(p
   setCorner(Qt::BottomLeftCorner, Qt::LeftDockWidgetArea);
   setCorner(Qt::TopRightCorner, Qt::RightDockWidgetArea);
   setCorner(Qt::BottomRightCorner, Qt::RightDockWidgetArea);
-  setStyleSheet(darkStyleSheet());
+  font_scale_percent_ = 100;
+  setStyleSheet(darkStyleSheet(font_scale_percent_));
 
   if (settings != nullptr) {
     settings_ = settings;
@@ -375,9 +442,7 @@ QString EditorWindow::commandUnavailableReason(const QAction* action) const {
 }
 
 void EditorWindow::setAudioSyncStatus(const QString& text) {
-  if (av_sync_label_ != nullptr) {
-    av_sync_label_->setText(text);
-  }
+  applyStatusRole(av_sync_label_, text);
 }
 
 void EditorWindow::setSequenceFormatStatus(const QString& text) {
@@ -506,6 +571,60 @@ void EditorWindow::restoreUiState() {
   restoreProgramOutputScreen();
   compact_tier_ = CompactTier::Normal;
   compact_height_ = false;
+  for (const auto preset : {ArrangementPreset::Creator, ArrangementPreset::Film,
+                            ArrangementPreset::Text, ArrangementPreset::Audio}) {
+    const auto prefix = arrangementSettingsPrefix(preset);
+    ArrangementSnapshot snapshot;
+    snapshot.dockState = settings_->value(prefix + QStringLiteral("state")).toByteArray();
+    if (snapshot.dockState.isEmpty()) {
+      snapshot.dockState =
+          settings_->value(QStringLiteral("ui/arrangements/v1/%1").arg(static_cast<int>(preset)))
+              .toByteArray();
+    }
+    if (snapshot.dockState.isEmpty()) {
+      continue;
+    }
+    const int raw_workspace = settings_
+                                  ->value(prefix + QStringLiteral("workspace"),
+                                          static_cast<int>(workspaceForArrangement(preset)))
+                                  .toInt();
+    if (raw_workspace >= static_cast<int>(Workspace::Import) &&
+        raw_workspace <= static_cast<int>(Workspace::Deliver)) {
+      snapshot.workspace = static_cast<Workspace>(raw_workspace);
+    } else {
+      snapshot.workspace = workspaceForArrangement(preset);
+    }
+    snapshot.sourceVisible =
+        settings_
+            ->value(prefix + QStringLiteral("sourceMonitor"),
+                    settings_->value(QStringLiteral("ui/sourceMonitorVisible"), false))
+            .toBool();
+    snapshot.precisionVisible =
+        settings_
+            ->value(prefix + QStringLiteral("precisionTrim"),
+                    settings_->value(QStringLiteral("ui/precisionTrimVisible"), false))
+            .toBool();
+    arrangement_layouts_.insert(preset, snapshot);
+  }
+  const bool has_preset_key = settings_->contains(QStringLiteral("ui/arrangementPreset"));
+  const int raw_preset = settings_
+                             ->value(QStringLiteral("ui/arrangementPreset"),
+                                     static_cast<int>(ArrangementPreset::Creator))
+                             .toInt();
+  if (raw_preset >= static_cast<int>(ArrangementPreset::Creator) &&
+      raw_preset <= static_cast<int>(ArrangementPreset::Audio)) {
+    arrangement_preset_ = static_cast<ArrangementPreset>(raw_preset);
+  }
+  const auto snapshot = arrangement_layouts_.value(arrangement_preset_);
+  if (!has_preset_key || !restoreArrangementSnapshot(snapshot)) {
+    if (has_preset_key || !settings_->contains(QStringLiteral("ui/lastWorkspace"))) {
+      applyArrangementDefault(arrangement_preset_);
+    }
+  }
+  updateArrangementActions();
+  font_scale_percent_ =
+      settings_->value(QStringLiteral("ui/appearance/fontScalePercent"), 100).toInt();
+  applyAppearanceScale(font_scale_percent_);
   applyCompactLayoutForCurrentSize();
 }
 
@@ -514,12 +633,19 @@ void EditorWindow::saveUiState() {
     return;
   }
   session_layouts_.insert(workspace_, restorableLayoutState());
+  arrangement_layouts_.insert(arrangement_preset_, captureArrangementSnapshot());
   settings_->setValue(QStringLiteral("ui/mainWindowGeometry"), saveGeometry());
   settings_->setValue(QStringLiteral("ui/lastWorkspace"), static_cast<int>(workspace_));
+  settings_->setValue(QStringLiteral("ui/arrangementPreset"),
+                      static_cast<int>(arrangement_preset_));
+  settings_->setValue(QStringLiteral("ui/appearance/fontScalePercent"), font_scale_percent_);
   settings_->setValue(QStringLiteral("ui/sourceMonitorVisible"), !source_container_->isHidden());
   settings_->setValue(QStringLiteral("ui/precisionTrimVisible"), !precision_trim_->isHidden());
   for (auto it = session_layouts_.cbegin(); it != session_layouts_.cend(); ++it) {
     settings_->setValue(settingsKeyForWorkspace(it.key()), it.value());
+  }
+  for (auto it = arrangement_layouts_.cbegin(); it != arrangement_layouts_.cend(); ++it) {
+    persistArrangementSnapshot(it.key(), it.value());
   }
   settings_->sync();
 }
@@ -1057,6 +1183,42 @@ void EditorWindow::createActions() {
   create(QStringLiteral("resetWorkspaceLayout"), tr("Reset Workspace Layout"),
          tr("Restore the default dock layout for the current workspace"),
          QKeySequence{QStringLiteral("Ctrl+Alt+R")});
+  create(QStringLiteral("resetArrangementPreset"), tr("Reset Arrangement Preset"),
+         tr("Restore the default layout for the active Creator, Film, Text, or Audio arrangement"));
+  auto* arrangementGroup = new QActionGroup(this);
+  arrangementGroup->setExclusive(true);
+  const std::array arrangementDefinitions{
+      std::pair{ArrangementPreset::Creator, tr("Creator")},
+      std::pair{ArrangementPreset::Film, tr("Film")},
+      std::pair{ArrangementPreset::Text, tr("Text")},
+      std::pair{ArrangementPreset::Audio, tr("Audio")},
+  };
+  for (const auto& [preset, label] : arrangementDefinitions) {
+    const auto id = QStringLiteral("arrangement.%1").arg(static_cast<int>(preset));
+    auto* arrangementAction = create(id, label, tr("Switch to the %1 arrangement").arg(label));
+    arrangementAction->setCheckable(true);
+    arrangementGroup->addAction(arrangementAction);
+    arrangement_actions_.insert(preset, arrangementAction);
+    connect(arrangementAction, &QAction::triggered, this,
+            [this, preset] { setArrangementPreset(preset); });
+  }
+  arrangement_actions_.value(ArrangementPreset::Creator)->setChecked(true);
+  auto* appearanceGroup = new QActionGroup(this);
+  appearanceGroup->setExclusive(true);
+  const std::array appearanceDefinitions{
+      std::pair{QStringLiteral("appearance.scale100"), 100},
+      std::pair{QStringLiteral("appearance.scale125"), 125},
+      std::pair{QStringLiteral("appearance.scale150"), 150},
+  };
+  for (const auto& [id, percent] : appearanceDefinitions) {
+    auto* scaleAction =
+        create(id, tr("Text size %1%").arg(percent), tr("Adjust interface text size"));
+    scaleAction->setCheckable(true);
+    appearanceGroup->addAction(scaleAction);
+    connect(scaleAction, &QAction::triggered, this,
+            [this, percent] { applyAppearanceScale(percent); });
+  }
+  action(QStringLiteral("appearance.scale100"))->setChecked(true);
   create(QStringLiteral("commandPalette"), tr("Command Palette…"), tr("Search and run any command"),
          QKeySequence{tr("Ctrl+Shift+P")});
 
@@ -1237,6 +1399,8 @@ void EditorWindow::createActions() {
           &EditorWindow::maximizeFocusedPanel);
   connect(action(QStringLiteral("resetWorkspaceLayout")), &QAction::triggered, this,
           &EditorWindow::resetWorkspaceLayout);
+  connect(action(QStringLiteral("resetArrangementPreset")), &QAction::triggered, this,
+          &EditorWindow::resetArrangementPreset);
   applyTimelineToolIcons();
 }
 
@@ -1378,6 +1542,15 @@ void EditorWindow::createMenus() {
   view->addAction(action(QStringLiteral("programFullscreen")));
   view->addAction(action(QStringLiteral("maximizeFocusedPanel")));
   view->addAction(action(QStringLiteral("resetWorkspaceLayout")));
+  auto* arrangements = view->addMenu(tr("Arrangements"));
+  arrangements->setObjectName(QStringLiteral("arrangementsMenu"));
+  arrangements->setAccessibleName(tr("Arrangements"));
+  for (const auto preset : {ArrangementPreset::Creator, ArrangementPreset::Film,
+                            ArrangementPreset::Text, ArrangementPreset::Audio}) {
+    arrangements->addAction(arrangement_actions_.value(preset));
+  }
+  arrangements->addSeparator();
+  arrangements->addAction(action(QStringLiteral("resetArrangementPreset")));
   program_output_menu_ = view->addMenu(tr("Program monitor on display…"));
   program_output_menu_->setObjectName(QStringLiteral("programOutputMenu"));
   program_output_menu_->setAccessibleName(tr("Program monitor on display"));
@@ -1403,6 +1576,12 @@ void EditorWindow::createMenus() {
   reopen_last_on_startup_action_->setChecked(true);
   connect(reopen_last_on_startup_action_, &QAction::toggled, this,
           &EditorWindow::reopenLastOnStartupToggled);
+  auto* appearance = preferences->addMenu(tr("Appearance"));
+  appearance->setObjectName(QStringLiteral("appearanceMenu"));
+  appearance->setAccessibleName(tr("Appearance"));
+  for (const auto* id : {"appearance.scale100", "appearance.scale125", "appearance.scale150"}) {
+    appearance->addAction(action(QString::fromLatin1(id)));
+  }
 
   auto* help = menuBar()->addMenu(tr("&Help"));
   help->setObjectName(QStringLiteral("helpMenu"));
@@ -1491,14 +1670,15 @@ void EditorWindow::createStatusBar() {
   job_activity_label_ = new QLabel(tr("Jobs: idle"), statusBar());
   job_activity_label_->setObjectName(QStringLiteral("jobActivityStatus"));
   job_activity_label_->setAccessibleName(tr("Background job activity"));
+  job_activity_label_->setProperty("role", QStringLiteral("status"));
   statusBar()->addPermanentWidget(job_activity_label_);
   auto* sync_separator = new QLabel(QStringLiteral("  •  "), statusBar());
   sync_separator->setProperty("muted", true);
   statusBar()->addPermanentWidget(sync_separator);
-  av_sync_label_ = new QLabel(tr("A/V: idle"), statusBar());
+  av_sync_label_ = new QLabel(statusBar());
   av_sync_label_->setObjectName(QStringLiteral("audioSyncStatus"));
-  av_sync_label_->setAccessibleName(tr("Audio and video sync status"));
   statusBar()->addPermanentWidget(av_sync_label_);
+  setAudioSyncStatus(tr("A/V: idle"));
   updateWorkspaceLabel();
 }
 
@@ -2069,13 +2249,193 @@ QString EditorWindow::workspaceDisplayName(Workspace workspace) {
   return tr("Edit");
 }
 
-QString EditorWindow::darkStyleSheet() {
+void EditorWindow::applyAppearanceScale(int fontScalePercent) {
+  font_scale_percent_ = snapAppearanceScalePercent(fontScalePercent);
+  const int transcriptPt = qMax(9, qRound(11.0 * font_scale_percent_ / 100.0));
+  setStyleSheet(darkStyleSheet(font_scale_percent_));
+  const auto markScale = [this](const char* id, bool selected) {
+    if (auto* scale = action(QString::fromLatin1(id))) {
+      const QSignalBlocker blocker(scale);
+      scale->setChecked(selected);
+    }
+  };
+  markScale("appearance.scale100", font_scale_percent_ == 100);
+  markScale("appearance.scale125", font_scale_percent_ == 125);
+  markScale("appearance.scale150", font_scale_percent_ == 150);
+  if (settings_ != nullptr) {
+    settings_->setValue(QStringLiteral("ui/appearance/fontScalePercent"), font_scale_percent_);
+  }
+  if (captions_panel_ != nullptr) {
+    if (auto* table = captions_panel_->findChild<QTableWidget*>(QStringLiteral("captionsTable"))) {
+      setWidgetPointSize(table, transcriptPt);
+      const QFont tableFont = table->font();
+      for (int row = 0; row < table->rowCount(); ++row) {
+        for (int column = 0; column < table->columnCount(); ++column) {
+          if (auto* item = table->item(row, column)) {
+            item->setFont(tableFont);
+          }
+        }
+      }
+    }
+    if (auto* words =
+            captions_panel_->findChild<QListWidget*>(QStringLiteral("captionWordsList"))) {
+      setWidgetPointSize(words, transcriptPt);
+      const QFont listFont = words->font();
+      for (int row = 0; row < words->count(); ++row) {
+        if (auto* item = words->item(row)) {
+          item->setFont(listFont);
+        }
+      }
+    }
+  }
+  if (initialized_) {
+    compact_tier_ = CompactTier::Normal;
+    compact_height_ = false;
+    applyCompactLayoutForCurrentSize();
+  }
+  labelInteractiveChrome();
+}
+
+void EditorWindow::applyArrangementViewers(ArrangementPreset preset) {
+  switch (preset) {
+  case ArrangementPreset::Creator:
+    setSourceMonitorVisible(false);
+    setPrecisionTrimVisible(true);
+    break;
+  case ArrangementPreset::Film:
+    setSourceMonitorVisible(true);
+    setPrecisionTrimVisible(true);
+    break;
+  case ArrangementPreset::Text:
+    setSourceMonitorVisible(false);
+    setPrecisionTrimVisible(false);
+    captions_dock_->show();
+    captions_dock_->raise();
+    inspector_dock_->show();
+    break;
+  case ArrangementPreset::Audio:
+    setSourceMonitorVisible(false);
+    setPrecisionTrimVisible(false);
+    mixer_dock_->show();
+    mixer_dock_->raise();
+    captions_dock_->show();
+    break;
+  }
+}
+
+EditorWindow::ArrangementSnapshot EditorWindow::captureArrangementSnapshot() const {
+  ArrangementSnapshot snapshot;
+  snapshot.dockState = restorableLayoutState();
+  snapshot.workspace = workspace_;
+  snapshot.sourceVisible = source_container_ != nullptr && !source_container_->isHidden();
+  snapshot.precisionVisible = precision_trim_ != nullptr && !precision_trim_->isHidden();
+  return snapshot;
+}
+
+bool EditorWindow::restoreArrangementSnapshot(const ArrangementSnapshot& snapshot) {
+  if (snapshot.dockState.isEmpty() || !restoreState(snapshot.dockState, kUiStateVersion)) {
+    return false;
+  }
+  const bool changed = workspace_ != snapshot.workspace;
+  workspace_ = snapshot.workspace;
+  setSourceMonitorVisible(snapshot.sourceVisible);
+  setPrecisionTrimVisible(snapshot.precisionVisible);
+  updateWorkspaceActions();
+  updateWorkspaceLabel();
+  if (changed) {
+    labelInteractiveChrome();
+    emit workspaceChanged(workspace_);
+  }
+  return true;
+}
+
+void EditorWindow::persistArrangementSnapshot(ArrangementPreset preset,
+                                              const ArrangementSnapshot& snapshot) {
+  if (settings_ == nullptr) {
+    return;
+  }
+  const auto prefix = arrangementSettingsPrefix(preset);
+  settings_->setValue(prefix + QStringLiteral("state"), snapshot.dockState);
+  settings_->setValue(prefix + QStringLiteral("workspace"), static_cast<int>(snapshot.workspace));
+  settings_->setValue(prefix + QStringLiteral("sourceMonitor"), snapshot.sourceVisible);
+  settings_->setValue(prefix + QStringLiteral("precisionTrim"), snapshot.precisionVisible);
+}
+
+void EditorWindow::applyArrangementDefault(ArrangementPreset preset) {
+  panel_maximized_ = false;
+  layout_before_maximize_.clear();
+  compact_tier_ = CompactTier::Normal;
+  compact_height_ = false;
+  const auto target = workspaceForArrangement(preset);
+  const bool changed = workspace_ != target;
+  workspace_ = target;
+  applyDefaultLayout(workspace_);
+  applyArrangementViewers(preset);
+  updateWorkspaceActions();
+  updateWorkspaceLabel();
+  if (changed) {
+    labelInteractiveChrome();
+    emit workspaceChanged(workspace_);
+  }
+  applyCompactLayoutForCurrentSize();
+}
+
+void EditorWindow::setArrangementPreset(ArrangementPreset preset) {
+  if (initialized_) {
+    const auto captured = captureArrangementSnapshot();
+    arrangement_layouts_.insert(arrangement_preset_, captured);
+    persistArrangementSnapshot(arrangement_preset_, captured);
+  }
+  arrangement_preset_ = preset;
+  if (settings_ != nullptr) {
+    settings_->setValue(QStringLiteral("ui/arrangementPreset"), static_cast<int>(preset));
+  }
+  panel_maximized_ = false;
+  layout_before_maximize_.clear();
+  compact_tier_ = CompactTier::Normal;
+  compact_height_ = false;
+  const auto saved = arrangement_layouts_.value(preset);
+  if (restoreArrangementSnapshot(saved)) {
+    updateArrangementActions();
+    applyCompactLayoutForCurrentSize();
+    return;
+  }
+  applyArrangementDefault(preset);
+  updateArrangementActions();
+}
+
+void EditorWindow::resetArrangementPreset() {
+  arrangement_layouts_.remove(arrangement_preset_);
+  if (settings_ != nullptr) {
+    settings_->remove(
+        QStringLiteral("ui/arrangements/v1/%1").arg(static_cast<int>(arrangement_preset_)));
+  }
+  applyArrangementDefault(arrangement_preset_);
+  updateArrangementActions();
+  const auto* preset_action = arrangement_actions_.value(arrangement_preset_);
+  showTransientMessage(
+      tr("Restored the default %1 arrangement")
+          .arg(preset_action != nullptr ? preset_action->text() : tr("arrangement")));
+}
+
+void EditorWindow::updateArrangementActions() {
+  for (auto it = arrangement_actions_.cbegin(); it != arrangement_actions_.cend(); ++it) {
+    if (auto* current = it.value()) {
+      const QSignalBlocker blocker(current);
+      current->setChecked(it.key() == arrangement_preset_);
+    }
+  }
+}
+
+QString EditorWindow::darkStyleSheet(int fontScalePercent) {
+  const int basePt = qMax(8, qRound(10.0 * fontScalePercent / 100.0));
+  const int transcriptPt = qMax(9, qRound(11.0 * fontScalePercent / 100.0));
   return QStringLiteral(R"(
         QMainWindow, QDialog, QWidget {
             background: #141618;
             color: #d8dce4;
             font-family: "Noto Sans", "Cantarell", "Source Sans 3", sans-serif;
-            font-size: 10pt;
+            font-size: %1pt;
         }
         QMainWindow::separator { background: #2a2e34; width: 4px; height: 4px; }
         QMenuBar { background: #1a1d21; border-bottom: 1px solid #2f343b; padding: 1px; }
@@ -2112,6 +2472,12 @@ QString EditorWindow::darkStyleSheet() {
         QSplitter::handle { background: #2a2e34; }
         QStatusBar { background: #1a1d21; border-top: 1px solid #2f343b; color: #b3bac4; }
         QLabel[muted="true"] { color: #8b929e; }
+        QLabel[role="status"] { font-weight: 600; }
+        QLabel[role="status-warning"] { color: #e1b762; font-weight: 600; }
+        QLabel[role="status-error"] { color: #eb7e7e; font-weight: 600; }
+        QLabel[role="status-success"] { color: #a4c1a8; font-weight: 600; }
+        QTableWidget#captionsTable, QTableWidget#captionsTable::item { font-size: %2pt; }
+        QListWidget#captionWordsList, QListWidget#captionWordsList::item { font-size: %2pt; }
         QProgressBar { background: #101214; border: 1px solid #2f343b; border-radius: 3px; }
         QProgressBar::chunk { background: #c4783a; }
         QSlider::groove:horizontal { background: #101214; height: 5px; border-radius: 2px; }
@@ -2130,7 +2496,9 @@ QString EditorWindow::darkStyleSheet() {
         QToolTip { background: #0e1013; color: #eef1f6; border: 1px solid #c4783a; padding: 4px; }
         QTabBar::tab { background: #1a1d21; color: #b3bac4; padding: 6px 12px; border: 1px solid #2f343b; }
         QTabBar::tab:selected { background: #24292f; color: #eef1f6; border-bottom-color: #c4783a; }
-    )");
+    )")
+      .arg(basePt)
+      .arg(transcriptPt);
 }
 
 ProgramViewer* EditorWindow::programOutputViewer() const noexcept {

@@ -62,6 +62,8 @@ private slots:
   void viewerFocusAndInsertControlsAreVisible();
   void compactLayoutAndWorkspaceReset();
   void precisionToolbarShowsActiveToolShortcut();
+  void appearanceScaleIncreasesReadableText();
+  void arrangementPresetsComposeViewers();
   void markInOutActionsTargetFocusedViewer();
   void remapsAndPersistsShortcutBindings();
   void mediaBinShowsProxyLifecycle();
@@ -614,6 +616,154 @@ void EditorWindowTest::precisionToolbarShowsActiveToolShortcut() {
   QVERIFY(laterTen != nullptr);
   laterTen->trigger();
   QCOMPARE(commits.count(), 1);
+}
+
+void EditorWindowTest::appearanceScaleIncreasesReadableText() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  auto settings = temporarySettings(directory);
+
+  {
+    EditorWindow window(settings.get());
+    window.show();
+    QCoreApplication::processEvents();
+
+    auto* appearance = window.findChild<QMenu*>(QStringLiteral("appearanceMenu"));
+    QVERIFY(appearance != nullptr);
+    QVERIFY(window.action(QStringLiteral("appearance.scale100")) != nullptr);
+    QVERIFY(window.action(QStringLiteral("appearance.scale125")) != nullptr);
+    QVERIFY(window.action(QStringLiteral("appearance.scale150")) != nullptr);
+    QCOMPARE(window.action(QStringLiteral("appearance.scale100"))->isChecked(), true);
+
+    auto* captions_table =
+        window.captionsPanel()->findChild<QTableWidget*>(QStringLiteral("captionsTable"));
+    QVERIFY(captions_table != nullptr);
+    auto* words =
+        window.captionsPanel()->findChild<QListWidget*>(QStringLiteral("captionWordsList"));
+    QVERIFY(words != nullptr);
+    auto* sync = window.findChild<QLabel*>(QStringLiteral("audioSyncStatus"));
+    QVERIFY(sync != nullptr);
+    auto* jobs = window.findChild<QLabel*>(QStringLiteral("jobActivityStatus"));
+    QVERIFY(jobs != nullptr);
+    QCOMPARE(jobs->property("role").toString(), QStringLiteral("status"));
+    QCOMPARE(sync->property("role").toString(), QStringLiteral("status"));
+    QCOMPARE(sync->accessibleName(), sync->text());
+    QVERIFY(sync->accessibleDescription().contains(QStringLiteral("idle"), Qt::CaseInsensitive));
+
+    using video_editor::desktop_ui::CaptionRowView;
+    CaptionRowView row;
+    row.id = QStringLiteral("c1");
+    row.timecode = QStringLiteral("00:00:00:00");
+    row.text = QStringLiteral("Hello captions");
+    window.captionsPanel()->setCaptionRows({row});
+    QCoreApplication::processEvents();
+    QVERIFY(captions_table->item(0, 1) != nullptr);
+
+    window.setAudioSyncStatus(QStringLiteral("A/V: 12.3 ms · 0 xruns · Medium"));
+    QCOMPARE(sync->property("role").toString(), QStringLiteral("status-success"));
+    QCOMPARE(sync->accessibleName(), QStringLiteral("A/V: 12.3 ms · 0 xruns · Medium"));
+    QVERIFY(sync->accessibleDescription().contains(QStringLiteral("sync"), Qt::CaseInsensitive));
+
+    window.setAudioSyncStatus(QStringLiteral("A/V: idle · Medium buffer"));
+    QCOMPARE(sync->property("role").toString(), QStringLiteral("status"));
+
+    window.setAudioSyncStatus(QStringLiteral("A/V: 40.0 ms drift · 3 xruns · Large"));
+    QCOMPARE(sync->property("role").toString(), QStringLiteral("status-warning"));
+    QVERIFY(sync->accessibleDescription().contains(QStringLiteral("warning"), Qt::CaseInsensitive));
+
+    window.setAudioSyncStatus(QStringLiteral("A/V: output device failed"));
+    QCOMPARE(sync->property("role").toString(), QStringLiteral("status-error"));
+    QCOMPARE(sync->accessibleName(), sync->text());
+    QVERIFY(sync->accessibleDescription().contains(QStringLiteral("error"), Qt::CaseInsensitive));
+
+    const int default_pt = window.font().pointSize();
+    const int captions_default_pt = captions_table->font().pointSize();
+    window.action(QStringLiteral("appearance.scale125"))->trigger();
+    QCoreApplication::processEvents();
+    QVERIFY(window.font().pointSize() > default_pt);
+    QVERIFY(captions_table->font().pointSize() > captions_default_pt);
+    QVERIFY(words->font().pointSize() >= captions_table->font().pointSize() - 1);
+    QVERIFY(captions_table->item(0, 1)->font().pointSize() >= captions_table->font().pointSize());
+    QCOMPARE(window.action(QStringLiteral("appearance.scale125"))->isChecked(), true);
+    QCOMPARE(window.action(QStringLiteral("appearance.scale100"))->isChecked(), false);
+    window.saveUiState();
+  }
+
+  EditorWindow restored(settings.get());
+  restored.show();
+  QCoreApplication::processEvents();
+  QCOMPARE(settings->value(QStringLiteral("ui/appearance/fontScalePercent")).toInt(), 125);
+  QCOMPARE(restored.action(QStringLiteral("appearance.scale125"))->isChecked(), true);
+  QCOMPARE(restored.action(QStringLiteral("appearance.scale100"))->isChecked(), false);
+  QVERIFY(restored.font().pointSize() >= 12);
+}
+
+void EditorWindowTest::arrangementPresetsComposeViewers() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  auto settings = temporarySettings(directory);
+  {
+    EditorWindow window(settings.get());
+    window.show();
+    QCoreApplication::processEvents();
+
+    auto* arrangements = window.findChild<QMenu*>(QStringLiteral("arrangementsMenu"));
+    QVERIFY(arrangements != nullptr);
+    QVERIFY(window.action(QStringLiteral("resetArrangementPreset")) != nullptr);
+    auto* source = window.findChild<QWidget*>(QStringLiteral("sourceMonitorContainer"));
+    QVERIFY(source != nullptr);
+    auto* media = requireDock(window, "mediaDock");
+    QVERIFY(media != nullptr);
+
+    window.action(QStringLiteral("arrangement.0"))->trigger();
+    QCoreApplication::processEvents();
+    QVERIFY(source->isHidden());
+    QVERIFY(window.action(QStringLiteral("arrangement.0"))->isChecked());
+    QCOMPARE(window.workspace(), Workspace::Edit);
+
+    window.action(QStringLiteral("arrangement.1"))->trigger();
+    QCoreApplication::processEvents();
+    QVERIFY(!source->isHidden());
+    QVERIFY(window.action(QStringLiteral("arrangement.1"))->isChecked());
+    QCOMPARE(window.workspace(), Workspace::Edit);
+
+    window.action(QStringLiteral("arrangement.0"))->trigger();
+    QCoreApplication::processEvents();
+    QVERIFY(source->isHidden());
+    window.action(QStringLiteral("arrangement.1"))->trigger();
+    QCoreApplication::processEvents();
+    QVERIFY(!source->isHidden());
+
+    window.action(QStringLiteral("arrangement.2"))->trigger();
+    QCoreApplication::processEvents();
+    QVERIFY(window.captionsPanel()->isVisible());
+    QVERIFY(window.action(QStringLiteral("arrangement.2"))->isChecked());
+    QCOMPARE(window.workspace(), Workspace::AudioCaptions);
+
+    window.action(QStringLiteral("arrangement.3"))->trigger();
+    QCoreApplication::processEvents();
+    QVERIFY(window.audioMixer()->isVisible());
+    QVERIFY(window.action(QStringLiteral("arrangement.3"))->isChecked());
+
+    window.action(QStringLiteral("arrangement.1"))->trigger();
+    QCoreApplication::processEvents();
+    QVERIFY(!source->isHidden());
+    QVERIFY(media->isVisible());
+    media->hide();
+    QCoreApplication::processEvents();
+    window.action(QStringLiteral("resetArrangementPreset"))->trigger();
+    QCoreApplication::processEvents();
+    QVERIFY(media->isVisible());
+    QVERIFY(!source->isHidden());
+    QVERIFY(window.action(QStringLiteral("arrangement.1"))->isChecked());
+
+    window.saveUiState();
+  }
+
+  EditorWindow restored(settings.get());
+  QVERIFY(restored.action(QStringLiteral("arrangement.1"))->isChecked());
+  QCOMPARE(restored.workspace(), Workspace::Edit);
+  QVERIFY(!restored.findChild<QWidget*>(QStringLiteral("sourceMonitorContainer"))->isHidden());
 }
 
 void EditorWindowTest::markInOutActionsTargetFocusedViewer() {
