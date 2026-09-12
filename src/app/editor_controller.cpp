@@ -1818,6 +1818,12 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
   source_playback_timer_.setInterval(16);
   connect(&source_playback_timer_, &QTimer::timeout, this,
           &EditorController::advanceSourcePlayback);
+  background_admission_resume_timer_.setSingleShot(true);
+  background_admission_resume_timer_.setInterval(750);
+  connect(&background_admission_resume_timer_, &QTimer::timeout, this, [this] {
+    background_admission_scrub_hold_ = false;
+    updateBackgroundJobAdmissionPaused();
+  });
   connect(&normalization_watcher_, &QFutureWatcher<NormalizationReview>::finished, this, [this] {
     if (!normalization_completion_gate_.complete(active_normalization_generation_)) {
       normalization_review_.valid = false;
@@ -3663,6 +3669,7 @@ void EditorController::finishProxyJob(const std::string& asset_id, const ProxyOu
   } else if (outcome.cancelled) {
     window_.showTransientMessage(tr("Proxy generation cancelled; the cache was left intact"));
   } else if (!outcome.error.isEmpty()) {
+    recordBackgroundJobFailure(tr("Proxy"), QString::fromStdString(outcome.asset_id), outcome.error);
     showError(tr("Proxy generation failed"), outcome.error);
   }
   refreshViews();
@@ -3982,6 +3989,7 @@ void EditorController::markSourceOut() {
 }
 
 void EditorController::seekSource(const qint64 position) {
+  deferBackgroundJobAdmission();
   if (!source_asset_id_.has_value()) {
     return;
   }
@@ -5648,6 +5656,7 @@ void EditorController::redo() {
 }
 
 void EditorController::seek(const qint64 position) {
+  deferBackgroundJobAdmission();
   playhead_ = toUiTime(timelineTime(std::max<qint64>(position, 0)));
   if (audio_playback_ != nullptr && !audio_session_stale_ &&
       audio_playback_->requested_state() != audio::PlaybackState::Stopped) {
@@ -5687,6 +5696,7 @@ void EditorController::setPlaybackRate(const double rate) {
   SessionEventLog::instance().log_backend("setPlaybackRate",
                                            "rate=" + QString::number(rate, 'g', 6).toStdString());
   playback_rate_ = rate;
+  updateBackgroundJobAdmissionPaused();
   if (std::abs(playback_rate_) < std::numeric_limits<double>::epsilon()) {
     audio_recovery_pending_ = false;
     audio_start_pending_ = false;
@@ -8221,6 +8231,7 @@ void EditorController::duplicateActiveSequence() {
 }
 
 void EditorController::scrubMediaPreview(const QString& mediaId, const double normalizedPosition) {
+  deferBackgroundJobAdmission();
   if (mediaId.isEmpty()) {
     return;
   }
@@ -8245,10 +8256,56 @@ void EditorController::toggleSourceTimecodeDisplay(const bool enabled) {
   refreshProgramViewerChrome();
 }
 
+void EditorController::recordBackgroundJobFailure(const QString& kind, const QString& subject,
+                                                  const QString& message) {
+  if (message.isEmpty()) {
+    return;
+  }
+  background_job_failures_.push_back({kind, subject, message});
+  while (background_job_failures_.size() > 16U) {
+    background_job_failures_.pop_front();
+  }
+  refreshJobActivitySummary();
+}
+
+void EditorController::deferBackgroundJobAdmission() {
+  background_admission_scrub_hold_ = true;
+  updateBackgroundJobAdmissionPaused();
+  background_admission_resume_timer_.start();
+}
+
+void EditorController::updateBackgroundJobAdmissionPaused() {
+  const bool should_pause =
+      std::abs(playback_rate_) > std::numeric_limits<double>::epsilon() ||
+      background_admission_scrub_hold_;
+  if (background_admission_paused_ == should_pause) {
+    refreshJobActivitySummary();
+    return;
+  }
+  background_admission_paused_ = should_pause;
+  if (!background_admission_paused_) {
+    pumpProxyQueue();
+    pumpCacheJobs();
+  }
+  refreshJobActivitySummary();
+}
+
 void EditorController::refreshJobActivitySummary() {
   QStringList parts;
+  if (background_admission_paused_) {
+    parts.push_back(tr("paused"));
+  }
+  if (!proxy_auto_queue_.empty()) {
+    parts.push_back(tr("%1 proxy queued").arg(proxy_auto_queue_.size()));
+  }
   if (!proxy_jobs_.empty()) {
     parts.push_back(tr("%1 proxy").arg(proxy_jobs_.size()));
+  }
+  if (!cache_job_queue_.empty()) {
+    parts.push_back(tr("%1 cache queued").arg(cache_job_queue_.size()));
+  }
+  if (cache_job_running_) {
+    parts.push_back(tr("cache"));
   }
   if (export_in_flight_) {
     parts.push_back(tr("export"));
@@ -8256,11 +8313,17 @@ void EditorController::refreshJobActivitySummary() {
   if (transcription_session_ != nullptr || model_download_reply_ != nullptr) {
     parts.push_back(tr("transcribe"));
   }
-  if (cache_job_running_) {
-    parts.push_back(tr("cache"));
+  if (!background_job_failures_.empty()) {
+    parts.push_back(tr("%1 failed").arg(background_job_failures_.size()));
+  }
+  QStringList detail_lines;
+  for (const BackgroundJobFailure& failure : background_job_failures_) {
+    detail_lines.push_back(
+        tr("%1 · %2 — %3").arg(failure.kind, failure.subject, failure.message));
   }
   window_.setJobActivitySummary(parts.isEmpty() ? tr("Jobs: idle")
-                                                : tr("Jobs: %1").arg(parts.join(QStringLiteral(" · "))));
+                                                : tr("Jobs: %1").arg(parts.join(QStringLiteral(" · "))),
+                                detail_lines.join(QStringLiteral("\n")));
 }
 
 desktop_ui::PreviewQualityPreset EditorController::previewQuality() const noexcept {
@@ -11172,6 +11235,7 @@ void EditorController::enqueueMediaCacheJobs(const assets::AssetRecord& asset) {
     cache_job_queue_.emplace_back(asset.id, kCacheJobWaveform);
   }
   pumpCacheJobs();
+  refreshJobActivitySummary();
 }
 
 void EditorController::finishCacheJob(const CacheJobOutcome& outcome) {
@@ -11207,6 +11271,9 @@ void EditorController::finishCacheJob(const CacheJobOutcome& outcome) {
     refreshMediaView();
     refreshTimelineView();
   } else if (!outcome.cancelled && !outcome.error.isEmpty()) {
+    const QString kind =
+        outcome.kind == kCacheJobThumbnail ? tr("Thumbnail") : tr("Waveform");
+    recordBackgroundJobFailure(kind, QString::fromStdString(outcome.asset_id), outcome.error);
     window_.showTransientMessage(
         tr("Could not cache media preview: %1").arg(outcome.error));
   }
@@ -11261,7 +11328,8 @@ void EditorController::runCacheJobWithQtConcurrent(const std::string& asset_id,
 }
 
 void EditorController::pumpCacheJobs() {
-  if (cache_job_running_ || cache_job_queue_.empty() || media_cache_ == nullptr || cache_disk_full_) {
+  if (background_admission_paused_ || cache_job_running_ || cache_job_queue_.empty() ||
+      media_cache_ == nullptr || cache_disk_full_) {
     return;
   }
   const auto job = cache_job_queue_.front();
@@ -11430,10 +11498,11 @@ void EditorController::scheduleRecommendedProxies() {
     }
   }
   pumpProxyQueue();
+  refreshJobActivitySummary();
 }
 
 void EditorController::pumpProxyQueue() {
-  if (!proxy_jobs_.empty()) {
+  if (background_admission_paused_ || !proxy_jobs_.empty()) {
     return;
   }
   while (!proxy_auto_queue_.empty()) {

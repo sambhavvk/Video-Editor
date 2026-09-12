@@ -232,6 +232,7 @@ private slots:
   void resyncLinkedAvMovesPartnersInOneUndoStep();
   void trackVisibilityPresetIsolatesAndRestores();
   void previewQualityPersistsAndUpdatesProgramTitle();
+  void backgroundJobsPauseDuringPlayback();
 
 private:
   std::unique_ptr<QTemporaryDir> application_data_;
@@ -2216,6 +2217,18 @@ void EditorControllerTest::trackVisibilityPresetIsolatesAndRestores() {
     QVERIFY(track.visible);
   }
   QVERIFY(!restore->isEnabled());
+}
+
+void EditorControllerTest::backgroundJobsPauseDuringPlayback() {
+  QSettings settings;
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+  auto* job_label = window.findChild<QLabel*>(QStringLiteral("jobActivityStatus"));
+  QVERIFY(job_label != nullptr);
+  window.playbackRateRequested(1.0);
+  QVERIFY(job_label->text().contains(QStringLiteral("paused")));
+  window.playbackRateRequested(0.0);
+  QVERIFY(!job_label->text().contains(QStringLiteral("paused")));
 }
 
 void EditorControllerTest::previewQualityPersistsAndUpdatesProgramTitle() {

@@ -464,9 +464,10 @@ void EditorWindow::setPreviewQualityPreset(const PreviewQualityPreset preset) {
   preview_quality_combo_->setCurrentIndex(index);
 }
 
-void EditorWindow::setJobActivitySummary(const QString& summary) {
+void EditorWindow::setJobActivitySummary(const QString& summary, const QString& detailTooltip) {
   if (job_activity_label_ != nullptr) {
     job_activity_label_->setText(summary);
+    job_activity_label_->setToolTip(detailTooltip);
   }
 }
 

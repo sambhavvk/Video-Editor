@@ -521,6 +521,10 @@ private:
   void refreshCaptionView();
   void refreshTranscriptionState();
   void refreshJobActivitySummary();
+  void deferBackgroundJobAdmission();
+  void updateBackgroundJobAdmissionPaused();
+  void recordBackgroundJobFailure(const QString& kind, const QString& subject,
+                                  const QString& message);
   void refreshProgramViewerChrome();
   void refreshProgramViewerTitle();
   void setProgramViewerBackendLabel(const QString& backendLabel);
@@ -647,6 +651,15 @@ private:
   bool cache_job_running_{false};
   bool cache_disk_full_{false};
   std::deque<QString> proxy_auto_queue_;
+  struct BackgroundJobFailure final {
+    QString kind;
+    QString subject;
+    QString message;
+  };
+  std::deque<BackgroundJobFailure> background_job_failures_;
+  bool background_admission_scrub_hold_{false};
+  bool background_admission_paused_{false};
+  QTimer background_admission_resume_timer_;
   QString selected_media_id_;
   std::stop_source cache_job_stop_source_;
   QFuture<CacheJobOutcome> cache_job_future_;

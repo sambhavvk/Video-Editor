@@ -134,7 +134,7 @@ public:
   void setAudioSyncStatus(const QString& text);
   void setSequenceFormatStatus(const QString& text);
   void setPreviewQualityPreset(PreviewQualityPreset preset);
-  void setJobActivitySummary(const QString& summary);
+  void setJobActivitySummary(const QString& summary, const QString& detailTooltip = QString());
   void showExportDialog(const QString& presetId = {});
   void setTrimPreviewStatus(const QString& status);
   void focusInspector();

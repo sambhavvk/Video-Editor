@@ -284,6 +284,10 @@ Choose **Full**, **Half**, or **Quarter** preview quality from the status bar. T
 title shows the active quality plus **proxy** and **reduced effects** when those preview shortcuts
 apply. Export always renders at full resolution from originals with expensive effects enabled.
 
+Background proxy and media-cache jobs pause while you play or scrub; the status bar reports
+**paused**, queued counts, and recent failures (hover for details). Cancelling a proxy job is
+separate from this pause.
+
 The render engine requests active video/title clips and composes supported crop, position, scale,
 anchor, rotation, opacity, the five premultiplied blend modes, supported clip color/crop/blur
 effects, and Cross Dissolve/Dip to Black transitions on a compatible D3D11 (Windows) or Vulkan
