@@ -774,5 +774,76 @@ TEST(TimelineAudioRenderer, NestedSequenceContributedAudioAndGapIsSilent) {
   expect_silence(result.value(), 350);
 }
 
+void write_pcm_wav_4ch(const std::filesystem::path& path,
+                       const std::span<const std::array<std::int16_t, 4>> samples) {
+  std::ofstream output(path, std::ios::binary | std::ios::trunc);
+  if (!output) {
+    throw std::runtime_error("could not create 4-channel test WAV");
+  }
+  const auto data_size = static_cast<std::uint32_t>(samples.size() * 8U);
+  output.write("RIFF", 4);
+  write_u32(output, 36U + data_size);
+  output.write("WAVEfmt ", 8);
+  write_u32(output, 16U);
+  write_u16(output, 1U);
+  write_u16(output, 4U);
+  write_u32(output, kTimelineAudioSampleRate);
+  write_u32(output, kTimelineAudioSampleRate * 8U);
+  write_u16(output, 8U);
+  write_u16(output, 16U);
+  output.write("data", 4);
+  write_u32(output, data_size);
+  for (const auto sample : samples) {
+    for (const auto channel : sample) {
+      write_u16(output, static_cast<std::uint16_t>(channel));
+    }
+  }
+  if (!output) {
+    throw std::runtime_error("could not finish 4-channel test WAV");
+  }
+}
+
+TEST(TimelineAudioRenderer, RoutesSelectedMultichannelPairsWithoutDownmix) {
+  const auto directory = std::filesystem::temp_directory_path() /
+                         ("ve_multichannel_monitor_" + edit::EntityId::generate().toString());
+  std::filesystem::create_directories(directory);
+  const auto path = directory / "quad.wav";
+  std::vector<std::array<std::int16_t, 4>> frames(64, {1'000, 2'000, 12'000, -9'000});
+  write_pcm_wav_4ch(path, frames);
+
+  TimelineFixture timeline;
+  edit::Asset asset;
+  asset.name = "quad.wav";
+  asset.duration = edit::Time(64, kTimelineAudioSampleRate);
+  asset.has_audio = true;
+  asset.audio_sample_rate = kTimelineAudioSampleRate;
+  asset.audio_channels = 4;
+  timeline.ramp_asset_id = asset.id;
+  timeline.project.assets.push_back(asset);
+  edit::Sequence sequence;
+  sequence.audio_sample_rate = kTimelineAudioSampleRate;
+  timeline.sequence_id = sequence.id;
+  timeline.project.sequences.push_back(sequence);
+
+  auto registry = std::make_shared<OriginalAudioRegistry>();
+  ASSERT_TRUE(registry->register_original(asset.id, OriginalAudioMedia{
+                                                         .path = path,
+                                                         .audio_stream_index = -1,
+                                                         .monitor_left_channel = 2,
+                                                         .monitor_right_channel = 3,
+                                                         .source_channel_count = 4,
+                                                     }));
+  TimelineAudioRenderer renderer(registry);
+  auto clip = audio_clip(asset.id, 0, 0, 64);
+  clip.audio_pan = 0.0;
+  const auto result =
+      renderer.render(snapshot(timeline, {audio_track({clip})}), {.start_sample = 0, .sample_count = 32});
+  ASSERT_TRUE(result) << result.error().message;
+  constexpr float kPan = 0.70710677F;
+  EXPECT_NEAR(result.value().channel(0)[0], (12'000.0F / 32'768.0F) * kPan, 0.02F);
+  EXPECT_NEAR(result.value().channel(1)[0], (-9'000.0F / 32'768.0F) * kPan, 0.02F);
+  std::filesystem::remove_all(directory);
+}
+
 } // namespace
 } // namespace video_editor::audio_render

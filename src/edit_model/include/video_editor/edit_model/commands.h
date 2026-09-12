@@ -427,17 +427,15 @@ using EditOperation = std::variant<
     AddTrackEffectCommand, RemoveTrackEffectCommand, SetTrackEffectParameterCommand,
     ApplyCaptionChangeSetCommand, ApplyTimelineCutChangeSetCommand, RelinkAssetCommand,
     CreateBinCommand, RenameBinCommand, MoveBinCommand, RemoveBinCommand, SetAssetBinCommand,
-    SetAssetMetadataCommand, SetSmartQueryCommand, UpsertSavedMediaViewCommand,
-    RemoveSavedMediaViewCommand, SetActiveMediaViewCommand, CreateSubclipCommand,
-    RemoveSubclipCommand, UpdateSubclipNotesCommand, CreateSequenceVersionCommand,
-    AddReviewNoteCommand, ResolveReviewNoteCommand, SetAssetAudioMonitoringCommand,
-    AssembleSelectsSequenceCommand,
-    ReplaceClipMediaCommand,
-    SetClipNameCommand,
+    SetAssetMetadataCommand, SetSmartQueryCommand, ReplaceClipMediaCommand, SetClipNameCommand,
     SetClipLinkedGroupCommand, SetClipEnabledCommand, SetSequenceNameCommand,
     SetSequenceStartTimeCommand, CreateMulticamGroupCommand, RemoveMulticamGroupCommand,
     SetMulticamSyncCommand, SetMulticamActiveAngleCommand, SetMulticamAudioMasterCommand,
-    RecordMulticamSwitchCommand, RemoveMulticamSwitchCommand, UpdateMulticamSwitchCommand>;
+    RecordMulticamSwitchCommand, RemoveMulticamSwitchCommand, UpdateMulticamSwitchCommand,
+    UpsertSavedMediaViewCommand, RemoveSavedMediaViewCommand, SetActiveMediaViewCommand,
+    CreateSubclipCommand, RemoveSubclipCommand, UpdateSubclipNotesCommand,
+    CreateSequenceVersionCommand, AddReviewNoteCommand, ResolveReviewNoteCommand,
+    SetAssetAudioMonitoringCommand, AssembleSelectsSequenceCommand>;
 
 struct EditCommand final {
   EditOperation operation;

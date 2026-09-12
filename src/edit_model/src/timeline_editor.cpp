@@ -953,8 +953,10 @@ validateTransition(const Project& project, const Sequence& sequence, const Trans
     if (asset == nullptr) {
       return error(EditErrorCode::EntityNotFound, "subclip references a source asset that does not exist");
     }
-    if (subclip.source_range.duration.isZero() || subclip.source_range.duration.isNegative()) {
-      return error(EditErrorCode::InvalidArgument, "subclip source range must be positive");
+    if (subclip.source_range.start.isNegative() || subclip.source_range.duration.isZero() ||
+        subclip.source_range.duration.isNegative()) {
+      return error(EditErrorCode::InvalidArgument,
+                   "subclip source range must have a non-negative start and positive duration");
     }
     if (subclip.source_range.end() > asset->duration) {
       return error(EditErrorCode::InvalidArgument, "subclip source range exceeds source asset duration");
@@ -1658,6 +1660,13 @@ struct PlannedClip final {
                                "asset cannot be removed while clips reference it");
                 }
               }
+            }
+            if (std::any_of(project.subclips.begin(), project.subclips.end(),
+                            [&](const Subclip& subclip) {
+                              return subclip.source_asset_id == command.asset_id;
+                            })) {
+              return error(EditErrorCode::AssetInUse,
+                           "asset cannot be removed while subclips reference it");
             }
             project.assets.erase(found);
             return std::nullopt;
@@ -2930,9 +2939,11 @@ struct PlannedClip final {
             if (asset == nullptr) {
               return error(EditErrorCode::EntityNotFound, "subclip source asset was not found");
             }
-            if (command.subclip.source_range.duration.isZero() ||
+            if (command.subclip.source_range.start.isNegative() ||
+                command.subclip.source_range.duration.isZero() ||
                 command.subclip.source_range.duration.isNegative()) {
-              return error(EditErrorCode::InvalidArgument, "subclip source range must be positive");
+              return error(EditErrorCode::InvalidArgument,
+                           "subclip source range must have a non-negative start and positive duration");
             }
             if (command.subclip.source_range.end() > asset->duration) {
               return error(EditErrorCode::InvalidArgument,
@@ -3041,6 +3052,8 @@ struct PlannedClip final {
             }
             Sequence sequence;
             sequence.name = command.sequence_name.empty() ? "Selects" : command.sequence_name;
+            sequence.width = 0;
+            sequence.height = 0;
             Track video_track;
             video_track.kind = TrackKind::Video;
             video_track.name = "V1";
@@ -3067,6 +3080,10 @@ struct PlannedClip final {
                 }
               }
               const TimeRange timeline_range{cursor, subclip->source_range.duration};
+              std::optional<EntityId> linked_group;
+              if (asset->has_video && asset->has_audio) {
+                linked_group = EntityId::generate();
+              }
               if (asset->has_video) {
                 Clip clip;
                 clip.asset_id = asset->id;
@@ -3074,6 +3091,7 @@ struct PlannedClip final {
                 clip.name = subclip->name;
                 clip.source_range = subclip->source_range;
                 clip.timeline_range = timeline_range;
+                clip.linked_group = linked_group;
                 if (const auto issue =
                         insertClip(project, sequence, sequence.tracks.front(), clip,
                                    InsertMode::RejectOverlap)) {
@@ -3087,6 +3105,7 @@ struct PlannedClip final {
                 clip.name = subclip->name;
                 clip.source_range = subclip->source_range;
                 clip.timeline_range = timeline_range;
+                clip.linked_group = linked_group;
                 if (const auto issue = insertClip(project, sequence, sequence.tracks.back(), clip,
                                                   InsertMode::RejectOverlap)) {
                   return issue;

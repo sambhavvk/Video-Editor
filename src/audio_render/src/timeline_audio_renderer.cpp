@@ -216,6 +216,22 @@ clip_output_bounds(const edit::Clip& clip, const AudioRenderRequest& request) {
   return {std::min(begin, request.sample_count), std::min(end, request.sample_count)};
 }
 
+[[nodiscard]] bool configure_monitor_matrix(SwrContext* resampler, const OriginalAudioMedia& media,
+                                            const int input_channels,
+                                            std::vector<double>& matrix) {
+  if (resampler == nullptr || media.source_channel_count <= 2 || input_channels <= 0) {
+    return true;
+  }
+  matrix.assign(static_cast<std::size_t>(input_channels) * 2U, 0.0);
+  const auto left = static_cast<int>(std::min(media.monitor_left_channel,
+                                              static_cast<std::uint32_t>(input_channels - 1)));
+  const auto right = static_cast<int>(std::min(media.monitor_right_channel,
+                                               static_cast<std::uint32_t>(input_channels - 1)));
+  matrix[static_cast<std::size_t>(left)] = 1.0;
+  matrix[static_cast<std::size_t>(input_channels) + static_cast<std::size_t>(right)] = 1.0;
+  return swr_set_matrix(resampler, matrix.data(), input_channels) >= 0;
+}
+
 [[nodiscard]] edit::Result<DecodedSamples, AudioRenderError>
 decode_requested_samples(const OriginalAudioMedia& media,
                          std::span<const std::int64_t> requested_samples,
@@ -304,25 +320,22 @@ decode_requested_samples(const OriginalAudioMedia& media,
                                static_cast<int>(kTimelineAudioSampleRate), &decoder->ch_layout,
                                decoder->sample_fmt, decoder->sample_rate, 0, nullptr);
   av_channel_layout_uninit(&output_layout);
-  if (status < 0 || raw_resampler == nullptr || swr_init(raw_resampler) < 0) {
+  if (status < 0 || raw_resampler == nullptr) {
     if (raw_resampler != nullptr) {
       swr_free(&raw_resampler);
     }
     return edit::Result<DecodedSamples, AudioRenderError>::failure(make_error(
         AudioRenderErrorCode::ResampleFailed, "could not initialize the 48 kHz stereo resampler"));
   }
-  SwrPtr resampler(raw_resampler);
-  if (media.source_channel_count > 2) {
-    const int input_channels = decoder->ch_layout.nb_channels;
-    std::vector<double> matrix(static_cast<std::size_t>(input_channels) * 2, 0.0);
-    const auto left = static_cast<int>(std::min(media.monitor_left_channel,
-                                                static_cast<std::uint32_t>(input_channels - 1)));
-    const auto right = static_cast<int>(std::min(media.monitor_right_channel,
-                                                 static_cast<std::uint32_t>(input_channels - 1)));
-    matrix[static_cast<std::size_t>(left)] = 1.0;
-    matrix[static_cast<std::size_t>(input_channels + right)] = 1.0;
-    (void)swr_set_matrix(resampler.get(), matrix.data(), input_channels);
+  std::vector<double> monitor_matrix;
+  if (!configure_monitor_matrix(raw_resampler, media, decoder->ch_layout.nb_channels,
+                                monitor_matrix) ||
+      swr_init(raw_resampler) < 0) {
+    swr_free(&raw_resampler);
+    return edit::Result<DecodedSamples, AudioRenderError>::failure(make_error(
+        AudioRenderErrorCode::ResampleFailed, "could not initialize the 48 kHz stereo resampler"));
   }
+  SwrPtr resampler(raw_resampler);
   PacketPtr packet(av_packet_alloc());
   FramePtr frame(av_frame_alloc());
   if (!packet || !frame) {
@@ -350,7 +363,9 @@ decode_requested_samples(const OriginalAudioMedia& media,
     if (av_seek_frame(format.get(), stream_index, target, AVSEEK_FLAG_BACKWARD) >= 0) {
       avcodec_flush_buffers(decoder.get());
       swr_close(resampler.get());
-      if (swr_init(resampler.get()) < 0) {
+      if (!configure_monitor_matrix(resampler.get(), media, decoder->ch_layout.nb_channels,
+                                    monitor_matrix) ||
+          swr_init(resampler.get()) < 0) {
         return edit::Result<DecodedSamples, AudioRenderError>::failure(
             make_error(AudioRenderErrorCode::ResampleFailed,
                        "could not reset the audio resampler after seek"));

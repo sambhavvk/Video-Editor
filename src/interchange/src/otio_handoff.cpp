@@ -2,12 +2,45 @@
 #include "video_editor/interchange/otio_handoff.h"
 
 #include <fstream>
+#include <system_error>
+#include <unordered_set>
 
 namespace video_editor::interchange {
 namespace {
 
 void write_line(std::ofstream& out, const std::string& line) {
   out << line << '\n';
+}
+
+[[nodiscard]] std::string clip_label(const edit::Clip& clip) {
+  return clip.name.empty() ? clip.id.toString() : clip.name;
+}
+
+void collect_sequence_asset_uris(const edit::Project& project, const edit::Sequence& sequence,
+                                 std::vector<std::string>& uris,
+                                 std::unordered_set<edit::EntityId>& visited,
+                                 std::unordered_set<std::string>& seen_uris) {
+  if (!visited.insert(sequence.id).second) {
+    return;
+  }
+  for (const auto& track : sequence.tracks) {
+    for (const auto& clip : track.clips) {
+      if (clip.kind == edit::ClipKind::NestedSequence && clip.nested_sequence_id.has_value()) {
+        if (const edit::Sequence* nested =
+                edit::findSequence(project, *clip.nested_sequence_id)) {
+          collect_sequence_asset_uris(project, *nested, uris, visited, seen_uris);
+        }
+        continue;
+      }
+      const edit::Asset* asset = edit::findAsset(project, clip.asset_id);
+      if (asset == nullptr || asset->source_uri.empty()) {
+        continue;
+      }
+      if (seen_uris.insert(asset->source_uri).second) {
+        uris.push_back(asset->source_uri);
+      }
+    }
+  }
 }
 
 } // namespace
@@ -40,11 +73,20 @@ edit::Result<OtioHandoffPackage, std::string> build_otio_handoff_package(
     for (const auto& clip : track.clips) {
       for (const auto& effect : clip.effects) {
         if (!effect.known) {
-          report.omitted.push_back("Unknown clip effect on " + clip.name + ": " + effect.type);
+          report.omitted.push_back("Unknown clip effect on " + clip_label(clip) + ": " +
+                                   effect.type);
+        } else {
+          report.baked.push_back("Clip effect metadata-only on " + clip_label(clip) + ": " +
+                                 effect.type);
         }
       }
+      if (clip.playback_rate != edit::Rate(1, 1) || clip.reversed) {
+        report.omitted.push_back("Retime on " + clip_label(clip) +
+                                 " is not exported as OTIO LinearTimeWarp");
+      }
       if (clip.kind == edit::ClipKind::NestedSequence) {
-        report.flattened.push_back("Nested sequence clip: " + clip.name);
+        report.supported.push_back("Nested sequence exported as inline OTIO Stack: " +
+                                   clip_label(clip));
       }
     }
   }
@@ -83,8 +125,12 @@ edit::Result<OtioHandoffPackage, std::string> build_otio_handoff_package(
     if (!manifest) {
       return edit::Result<OtioHandoffPackage, std::string>::failure("could not write media manifest");
     }
-    for (const edit::Asset& asset : project.assets) {
-      write_line(manifest, asset.source_uri);
+    std::vector<std::string> uris;
+    std::unordered_set<edit::EntityId> visited;
+    std::unordered_set<std::string> seen_uris;
+    collect_sequence_asset_uris(project, *sequence, uris, visited, seen_uris);
+    for (const auto& uri : uris) {
+      write_line(manifest, uri);
     }
   }
   {

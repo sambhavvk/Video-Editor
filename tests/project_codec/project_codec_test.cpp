@@ -479,7 +479,7 @@ TEST(ProjectCodecTest, DeclaredVersionTwoCaptionDefaultsUpgradeToCanonicalV3) {
   EXPECT_EQ(style.alignment, edit::CaptionAlignment::Center);
   EXPECT_DOUBLE_EQ(style.vertical_position, 0.9);
   EXPECT_DOUBLE_EQ(style.safe_margin, 0.05);
-  EXPECT_EQ(serialize_project(decoded.value())[1], std::byte{0x04});
+  EXPECT_EQ(serialize_project(decoded.value())[1], std::byte{0x07});
 }
 
 TEST(ProjectCodecTest, SerializationIsDeterministic) {
@@ -493,7 +493,7 @@ TEST(ProjectCodecTest, SerializationIsDeterministic) {
   EXPECT_EQ(serialize_project(decoded.value()), first);
   ASSERT_GE(first.size(), 4U);
   EXPECT_EQ(first[0], std::byte{0x08});
-  EXPECT_EQ(first[1], std::byte{0x04});
+  EXPECT_EQ(first[1], std::byte{0x07});
   EXPECT_EQ(first[2], std::byte{0x10});
   EXPECT_EQ(first[3], std::byte{0x01});
 }
@@ -528,13 +528,13 @@ TEST(ProjectCodecTest, RejectsMalformedAndMissingVersionData) {
 }
 
 TEST(ProjectCodecTest, RejectsFutureSchemaAndReaderVersions) {
-  // schema_version = 5, minimum_reader_version = 1
-  const auto future_schema = deserialize_project(bytes({0x08, 0x05, 0x10, 0x01}));
+  // schema_version = 8, minimum_reader_version = 1
+  const auto future_schema = deserialize_project(bytes({0x08, 0x08, 0x10, 0x01}));
   ASSERT_FALSE(future_schema);
   EXPECT_EQ(future_schema.error().code, CodecErrorCode::UnsupportedSchemaVersion);
 
-  // schema_version = 4, minimum_reader_version = 5
-  const auto future_reader = deserialize_project(bytes({0x08, 0x04, 0x10, 0x05}));
+  // schema_version = 7, minimum_reader_version = 8
+  const auto future_reader = deserialize_project(bytes({0x08, 0x07, 0x10, 0x08}));
   ASSERT_FALSE(future_reader);
   EXPECT_EQ(future_reader.error().code, CodecErrorCode::UnsupportedMinimumReaderVersion);
 }
@@ -603,7 +603,7 @@ TEST(ProjectCodecTest, UpgradesGenuineVersionOneTitleClipAndLeavesMediaClipsTitl
   const auto reserialized = serialize_project(decoded.value());
   ASSERT_GE(reserialized.size(), 4U);
   EXPECT_EQ(reserialized[0], std::byte{0x08});
-  EXPECT_EQ(reserialized[1], std::byte{0x04});
+  EXPECT_EQ(reserialized[1], std::byte{0x07});
   EXPECT_EQ(reserialized[2], std::byte{0x10});
   EXPECT_EQ(reserialized[3], std::byte{0x01});
 }
@@ -760,7 +760,7 @@ TEST(ProjectCodecTest, SchemaV4RoundTripsBinsMetadataAndNestedSequenceClip) {
 
   const auto bytes = serialize_project(project);
   ASSERT_GE(bytes.size(), 4U);
-  EXPECT_EQ(bytes[1], std::byte{0x04});
+  EXPECT_EQ(bytes[1], std::byte{0x07});
 
   auto decoded = deserialize_project(bytes);
   ASSERT_TRUE(decoded) << (decoded ? "" : decoded.error().message);
@@ -821,7 +821,7 @@ TEST(ProjectCodecTest, MulticamGroupsRoundTripInSchemaV6) {
 
   const auto bytes = serialize_project(project);
   ASSERT_GE(bytes.size(), 4U);
-  EXPECT_EQ(bytes[1], std::byte{0x06});
+  EXPECT_EQ(bytes[1], std::byte{0x07});
 
   auto decoded = deserialize_project(bytes);
   ASSERT_TRUE(decoded) << (decoded ? "" : decoded.error().message);
@@ -902,6 +902,47 @@ TEST(ProjectCodecTest, F01ProductionMetadataAndSavedViewsRoundTrip) {
   EXPECT_EQ(decoded.value().assets.front().production.scene, "4");
   EXPECT_EQ(decoded.value().saved_media_views.front().name, "Scene 4");
   EXPECT_EQ(decoded.value().active_media_view_id, view.id);
+}
+
+TEST(ProjectCodecTest, F02F03SubclipChannelMapAndMonitoringRoundTrip) {
+  edit::Project project;
+  edit::Asset asset;
+  asset.name = "boom.wav";
+  asset.source_uri = "memory://boom";
+  asset.duration = edit::Time(48, 1);
+  asset.has_audio = true;
+  asset.audio_sample_rate = 48000;
+  asset.audio_channels = 4;
+  asset.audio_channel_map = {{0, "Ch 1"}, {1, "Ch 2"}, {2, "BOOM"}, {3, "RF"}};
+  asset.monitor_left_channel = 2;
+  asset.monitor_right_channel = 3;
+  project.assets.push_back(asset);
+
+  edit::Subclip subclip;
+  subclip.source_asset_id = asset.id;
+  subclip.source_range = edit::TimeRange{edit::Time(2, 1), edit::Time(4, 1)};
+  subclip.name = "Select";
+  subclip.notes = "boom only";
+  project.subclips.push_back(subclip);
+
+  const auto bytes = serialize_project(project);
+  video_editor::persistence::v1::ProjectSnapshot snapshot;
+  ASSERT_TRUE(snapshot.ParseFromArray(bytes.data(), static_cast<int>(bytes.size())));
+  EXPECT_EQ(snapshot.schema_version(), 7U);
+
+  auto decoded = deserialize_project(bytes);
+  ASSERT_TRUE(decoded);
+  const auto& restored = decoded.value();
+  ASSERT_FALSE(restored.assets.empty());
+  EXPECT_EQ(restored.assets.front().audio_channel_map.size(), 4U);
+  EXPECT_EQ(restored.assets.front().audio_channel_map[2].label, "BOOM");
+  EXPECT_EQ(restored.assets.front().monitor_left_channel, 2U);
+  EXPECT_EQ(restored.assets.front().monitor_right_channel, 3U);
+  ASSERT_EQ(restored.subclips.size(), 1U);
+  EXPECT_EQ(restored.subclips.front().name, "Select");
+  EXPECT_EQ(restored.subclips.front().notes, "boom only");
+  EXPECT_EQ(restored.subclips.front().source_asset_id, asset.id);
+  EXPECT_EQ(restored.subclips.front().source_range.duration, edit::Time(4, 1));
 }
 
 } // namespace

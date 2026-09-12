@@ -27,6 +27,9 @@ namespace {
 
 TEST(F02SubclipsTest, SubclipPreservesSourceIdentityAndSelectsAssemblyIsUndoable) {
   auto project = makeProjectWithAsset();
+  project.assets.front().width = 3840;
+  project.assets.front().height = 2160;
+  project.assets.front().nominal_frame_rate = Rate(24, 1);
   const auto asset_id = project.assets.front().id;
   TimelineEditor editor(std::move(project));
 
@@ -42,10 +45,27 @@ TEST(F02SubclipsTest, SubclipPreservesSourceIdentityAndSelectsAssemblyIsUndoable
   EXPECT_EQ(stored->source_asset_id, asset_id);
   EXPECT_EQ(stored->source_range.duration, Time(20, 1));
 
+  Subclip invalid;
+  invalid.source_asset_id = asset_id;
+  invalid.source_range = TimeRange{Time(-1, 1), Time(2, 1)};
+  EXPECT_FALSE(applyOk(editor, EditCommand{.operation = CreateSubclipCommand{.subclip = invalid}}));
+
   ASSERT_TRUE(applyOk(editor, EditCommand{.operation = AssembleSelectsSequenceCommand{
                                               .sequence_name = "Selects",
                                               .subclip_ids = {subclip.id}}}));
-  EXPECT_EQ(editor.projectAt(editor.revision())->sequences.size(), 1U);
+  const auto assembled = editor.projectAt(editor.revision());
+  ASSERT_EQ(assembled->sequences.size(), 1U);
+  EXPECT_EQ(assembled->sequences.front().width, 3840U);
+  EXPECT_EQ(assembled->sequences.front().height, 2160U);
+  EXPECT_EQ(assembled->sequences.front().frame_rate, Rate(24, 1));
+  ASSERT_EQ(assembled->sequences.front().tracks.size(), 2U);
+  ASSERT_FALSE(assembled->sequences.front().tracks.front().clips.empty());
+  ASSERT_FALSE(assembled->sequences.front().tracks.back().clips.empty());
+  EXPECT_EQ(assembled->sequences.front().tracks.front().clips.front().linked_group,
+            assembled->sequences.front().tracks.back().clips.front().linked_group);
+  EXPECT_TRUE(assembled->sequences.front().tracks.front().clips.front().linked_group.has_value());
+
+  EXPECT_FALSE(applyOk(editor, EditCommand{.operation = RemoveAssetCommand{.asset_id = asset_id}}));
 
   ASSERT_TRUE(applyOk(editor, EditCommand{.operation = RemoveSubclipCommand{.subclip_id = subclip.id}}));
   EXPECT_EQ(editor.projectAt(editor.revision())->subclips.size(), 0U);

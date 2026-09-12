@@ -169,7 +169,7 @@ TEST(TrackAudioStateTest, IsAppendedAfterEveryExistingOperation) {
   EXPECT_EQ(EditOperation{CreateBinCommand{}}.index(), 46U);
   EXPECT_EQ(EditOperation{SetSmartQueryCommand{}}.index(), 52U);
   EXPECT_EQ(EditOperation{SetSequenceStartTimeCommand{}}.index(), 58U);
-  EXPECT_EQ(std::variant_size_v<EditOperation>, 59U);
+  EXPECT_EQ(std::variant_size_v<EditOperation>, 78U);
 }
 
 TEST(TrackAudioMixTest, AppliesGainAndPanToAudioTrackOnly) {

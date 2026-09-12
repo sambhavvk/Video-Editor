@@ -9882,6 +9882,8 @@ bool EditorController::apply(edit::EditCommand command, const QString& failureCo
                              const bool persist) {
   const bool live_multicam_cut =
       std::holds_alternative<edit::RecordMulticamSwitchCommand>(command.operation);
+  const bool reregister_audio_monitoring =
+      std::holds_alternative<edit::SetAssetAudioMonitoringCommand>(command.operation);
   const std::string operation = edit::commandName(command);
   const auto result = editor_->apply(std::move(command), editor_->revision());
   if (!result) {
@@ -9904,6 +9906,9 @@ bool EditorController::apply(edit::EditCommand command, const QString& failureCo
     }
   }
   setDirty(true);
+  if (reregister_audio_monitoring) {
+    rebuildPlaybackRegistry();
+  }
   if (persist) {
     refreshViews();
   } else {
@@ -10701,6 +10706,14 @@ void EditorController::refreshMediaView() {
         .formatText = tr("Subclip"),
         .metadataTitle = QString::fromStdString(subclip.name),
         .notes = QString::fromStdString(subclip.notes),
+        .scene = QString::fromStdString(asset->production.scene),
+        .shot = QString::fromStdString(asset->production.shot),
+        .take = QString::fromStdString(asset->production.take),
+        .camera = QString::fromStdString(asset->production.camera),
+        .reel = QString::fromStdString(asset->production.reel),
+        .audioRoll = QString::fromStdString(asset->production.audio_roll),
+        .sourceTimecode = QString::fromStdString(asset->production.source_timecode),
+        .preferredTake = asset->production.preferred_take,
         .isSubclip = true,
         .subclipNotes = QString::fromStdString(subclip.notes),
         .offline = record == nullptr || record->availability == assets::AssetAvailability::Missing,
@@ -12889,11 +12902,13 @@ void EditorController::presentAssetMetadata(const QString& assetId) {
     view.audioRoll = QString::fromStdString(asset->production.audio_roll);
     view.sourceTimecode = QString::fromStdString(asset->production.source_timecode);
     view.preferredTake = asset->production.preferred_take;
-    if (!view.title.isEmpty() || !view.notes.isEmpty() || view.rating != 0 || !view.tags.isEmpty() ||
-        !view.scene.isEmpty() || !view.shot.isEmpty() || !view.take.isEmpty()) {
-      window_.inspector()->setAssetMetadata(view);
-      return;
+    if (view.title.isEmpty()) {
+      if (const auto title = media_metadata_titles_.find(key); title != media_metadata_titles_.end()) {
+        view.title = title->second;
+      }
     }
+    window_.inspector()->setAssetMetadata(view);
+    return;
   }
   if (media_cache_ != nullptr && !cache_job_running_) {
     if (auto loaded = media_cache::load_metadata(key, *media_cache_)) {
@@ -12961,11 +12976,6 @@ void EditorController::migrateCacheMetadataToProject() {
   std::vector<edit::EditCommand> commands;
   const auto project = editor_->projectAt(editor_->revision());
   for (const edit::Asset& asset : project->assets) {
-    const bool project_empty = asset.display_title.empty() && asset.tags.empty() &&
-                               asset.notes.empty() && asset.rating == 0;
-    if (!project_empty) {
-      continue;
-    }
     const auto loaded = media_cache::load_metadata(asset.id.toString(), *media_cache_);
     if (!loaded) {
       continue;
@@ -12977,10 +12987,19 @@ void EditorController::migrateCacheMetadataToProject() {
     }
     edit::SetAssetMetadataCommand command;
     command.asset_id = asset.id;
-    command.display_title = document.title;
-    command.notes = document.notes;
-    command.rating = document.rating;
-    command.tags = document.tags;
+    command.display_title =
+        asset.display_title.empty() ? document.title : asset.display_title;
+    command.notes = asset.notes.empty() ? document.notes : asset.notes;
+    command.rating = asset.rating == 0 ? document.rating : asset.rating;
+    command.tags = asset.tags.empty() ? document.tags : asset.tags;
+    command.production = asset.production;
+    const bool fills_title = asset.display_title.empty() && !document.title.empty();
+    const bool fills_notes = asset.notes.empty() && !document.notes.empty();
+    const bool fills_rating = asset.rating == 0 && document.rating != 0;
+    const bool fills_tags = asset.tags.empty() && !document.tags.empty();
+    if (!fills_title && !fills_notes && !fills_rating && !fills_tags) {
+      continue;
+    }
     commands.push_back(edit::EditCommand{.operation = command});
   }
   if (commands.empty()) {

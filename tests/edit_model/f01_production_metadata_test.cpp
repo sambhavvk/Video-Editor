@@ -64,6 +64,10 @@ TEST(F01ProductionMetadataTest, SceneTakeSearchAndRenamePreservesIdentity) {
   SmartQuery other;
   other.scene_equals = "99";
   EXPECT_FALSE(assetMatchesSmartQuery(*asset, other));
+
+  SmartQuery preferred;
+  preferred.preferred_take_only = true;
+  EXPECT_TRUE(assetMatchesSmartQuery(*asset, preferred));
 }
 
 TEST(F01ProductionMetadataTest, UpsertSavedMediaViewIsUndoable) {

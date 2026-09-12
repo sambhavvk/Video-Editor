@@ -1367,6 +1367,17 @@ void insertOptionalEntityId(QJsonObject& object, const QString& key,
   object.insert(QStringLiteral("tags"), tags);
   object.insert(QStringLiteral("notes"), stdToQstr(asset.notes));
   object.insert(QStringLiteral("rating"), asset.rating);
+  QJsonObject production;
+  production.insert(QStringLiteral("scene"), stdToQstr(asset.production.scene));
+  production.insert(QStringLiteral("shot"), stdToQstr(asset.production.shot));
+  production.insert(QStringLiteral("take"), stdToQstr(asset.production.take));
+  production.insert(QStringLiteral("camera"), stdToQstr(asset.production.camera));
+  production.insert(QStringLiteral("reel"), stdToQstr(asset.production.reel));
+  production.insert(QStringLiteral("audio_roll"), stdToQstr(asset.production.audio_roll));
+  production.insert(QStringLiteral("source_timecode"),
+                    stdToQstr(asset.production.source_timecode));
+  production.insert(QStringLiteral("preferred_take"), asset.production.preferred_take);
+  object.insert(QStringLiteral("production"), production);
   return object;
 }
 
@@ -1421,6 +1432,20 @@ void insertOptionalEntityId(QJsonObject& object, const QString& key,
   }
   asset.notes = qstrToStd(object.value(QStringLiteral("notes")).toString());
   asset.rating = object.value(QStringLiteral("rating")).toInt();
+  if (object.value(QStringLiteral("production")).isObject()) {
+    const QJsonObject production = object.value(QStringLiteral("production")).toObject();
+    asset.production.scene = qstrToStd(production.value(QStringLiteral("scene")).toString());
+    asset.production.shot = qstrToStd(production.value(QStringLiteral("shot")).toString());
+    asset.production.take = qstrToStd(production.value(QStringLiteral("take")).toString());
+    asset.production.camera = qstrToStd(production.value(QStringLiteral("camera")).toString());
+    asset.production.reel = qstrToStd(production.value(QStringLiteral("reel")).toString());
+    asset.production.audio_roll =
+        qstrToStd(production.value(QStringLiteral("audio_roll")).toString());
+    asset.production.source_timecode =
+        qstrToStd(production.value(QStringLiteral("source_timecode")).toString());
+    asset.production.preferred_take =
+        production.value(QStringLiteral("preferred_take")).toBool();
+  }
   return DecodeResult<edit::Asset>::success(asset);
 }
 
@@ -1539,6 +1564,18 @@ void insertOptionalEntityId(QJsonObject& object, const QString& key,
   if (query.name_contains.has_value()) {
     object.insert(QStringLiteral("name_contains"), stdToQstr(*query.name_contains));
   }
+  if (query.scene_equals.has_value()) {
+    object.insert(QStringLiteral("scene_equals"), stdToQstr(*query.scene_equals));
+  }
+  if (query.shot_equals.has_value()) {
+    object.insert(QStringLiteral("shot_equals"), stdToQstr(*query.shot_equals));
+  }
+  if (query.take_equals.has_value()) {
+    object.insert(QStringLiteral("take_equals"), stdToQstr(*query.take_equals));
+  }
+  if (query.preferred_take_only.has_value()) {
+    object.insert(QStringLiteral("preferred_take_only"), *query.preferred_take_only);
+  }
   return object;
 }
 
@@ -1567,6 +1604,18 @@ void insertOptionalEntityId(QJsonObject& object, const QString& key,
   }
   if (object.contains(QStringLiteral("name_contains"))) {
     query.name_contains = qstrToStd(object.value(QStringLiteral("name_contains")).toString());
+  }
+  if (object.contains(QStringLiteral("scene_equals"))) {
+    query.scene_equals = qstrToStd(object.value(QStringLiteral("scene_equals")).toString());
+  }
+  if (object.contains(QStringLiteral("shot_equals"))) {
+    query.shot_equals = qstrToStd(object.value(QStringLiteral("shot_equals")).toString());
+  }
+  if (object.contains(QStringLiteral("take_equals"))) {
+    query.take_equals = qstrToStd(object.value(QStringLiteral("take_equals")).toString());
+  }
+  if (object.contains(QStringLiteral("preferred_take_only"))) {
+    query.preferred_take_only = object.value(QStringLiteral("preferred_take_only")).toBool();
   }
   return DecodeResult<edit::SmartQuery>::success(query);
 }
@@ -1882,6 +1931,18 @@ void encodeOperationFields(QJsonObject& object, const EditOperation& operation) 
           object.insert(QStringLiteral("tags"), tags);
           object.insert(QStringLiteral("notes"), stdToQstr(command.notes));
           object.insert(QStringLiteral("rating"), command.rating);
+          QJsonObject production;
+          production.insert(QStringLiteral("scene"), stdToQstr(command.production.scene));
+          production.insert(QStringLiteral("shot"), stdToQstr(command.production.shot));
+          production.insert(QStringLiteral("take"), stdToQstr(command.production.take));
+          production.insert(QStringLiteral("camera"), stdToQstr(command.production.camera));
+          production.insert(QStringLiteral("reel"), stdToQstr(command.production.reel));
+          production.insert(QStringLiteral("audio_roll"),
+                            stdToQstr(command.production.audio_roll));
+          production.insert(QStringLiteral("source_timecode"),
+                            stdToQstr(command.production.source_timecode));
+          production.insert(QStringLiteral("preferred_take"), command.production.preferred_take);
+          object.insert(QStringLiteral("production"), production);
         } else if constexpr (std::is_same_v<T, edit::SetSmartQueryCommand>) {
           object.insert(QStringLiteral("bin_id"), encodeEntityId(command.bin_id));
           object.insert(QStringLiteral("query"), encodeSmartQuery(command.query));
@@ -2597,6 +2658,20 @@ void encodeOperationFields(QJsonObject& object, const EditOperation& operation) 
     }
     command.notes = qstrToStd(object.value(QStringLiteral("notes")).toString());
     command.rating = object.value(QStringLiteral("rating")).toInt();
+    if (object.value(QStringLiteral("production")).isObject()) {
+      const QJsonObject production = object.value(QStringLiteral("production")).toObject();
+      command.production.scene = qstrToStd(production.value(QStringLiteral("scene")).toString());
+      command.production.shot = qstrToStd(production.value(QStringLiteral("shot")).toString());
+      command.production.take = qstrToStd(production.value(QStringLiteral("take")).toString());
+      command.production.camera = qstrToStd(production.value(QStringLiteral("camera")).toString());
+      command.production.reel = qstrToStd(production.value(QStringLiteral("reel")).toString());
+      command.production.audio_roll =
+          qstrToStd(production.value(QStringLiteral("audio_roll")).toString());
+      command.production.source_timecode =
+          qstrToStd(production.value(QStringLiteral("source_timecode")).toString());
+      command.production.preferred_take =
+          production.value(QStringLiteral("preferred_take")).toBool();
+    }
     return DecodeResult<EditOperation>::success(command);
   }
   if (type == QStringLiteral("set_smart_query")) {
