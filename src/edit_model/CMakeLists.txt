@@ -23,6 +23,7 @@ add_library(video_editor_edit_model STATIC
   src/effect_evaluator.cpp
   src/entity_id.cpp
   src/model.cpp
+  src/sequence_diff.cpp
   src/snapping.cpp
   src/time.cpp
   src/timeline_editor.cpp
