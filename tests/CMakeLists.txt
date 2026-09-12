@@ -100,4 +100,14 @@ if(VIDEO_EDITOR_PYTHON3)
     COMMAND ${VIDEO_EDITOR_PYTHON3} "${CMAKE_SOURCE_DIR}/tools/quality/generate_corpus.py"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     COMMENT "Generate the synthetic media compatibility corpus")
+  add_test(
+    NAME quality.validate_reference_scenarios
+    COMMAND ${VIDEO_EDITOR_PYTHON3} "${CMAKE_SOURCE_DIR}/tools/quality/generate_reference_fixture.py"
+            --validate
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+  add_custom_target(
+    generate-reference-fixture
+    COMMAND ${VIDEO_EDITOR_PYTHON3} "${CMAKE_SOURCE_DIR}/tools/quality/generate_reference_fixture.py"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    COMMENT "Generate synthetic reference-scenario media and optional agent project")
 endif()

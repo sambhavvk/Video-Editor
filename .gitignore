@@ -36,6 +36,10 @@ __pycache__/
 /tests/fixtures/corpus/generated/*
 !/tests/fixtures/corpus/generated/.gitkeep
 
+# Reference scenario fixtures (generated locally / in CI; do not commit binaries)
+/tests/fixtures/reference/generated/*
+!/tests/fixtures/reference/generated/.gitkeep
+
 priority.md
 
 # Zed editor

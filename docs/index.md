@@ -52,6 +52,8 @@ Choose a starting point:
   classification.
 - [FOSS component register](quality/foss-component-register.md) — selected libraries, codecs,
   fonts, model assets, licenses, and blocked/deferred items.
+- [Reference projects](quality/reference-projects.md) — B03 synthetic scenarios, substitution
+  rules, expected edits/delivery, and local measurement logs.
 
 ## Source API references
 

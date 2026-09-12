@@ -66,7 +66,7 @@ Each later roadmap chunk is a **new feature**, an **extension** of something alr
 | ID | Class | Why |
 | --- | --- | --- |
 | B02 | Extension | `THIRD_PARTY.md`, SPDX SBOM, and the license gate exist; B02 must pin exact versions/eligibility and block unresolved items (whisper model `NOASSERTION`, Qt 6.11.1 vs 6.11.2 doc drift, protobuf 35.1 vs 36.1). |
-| B03 | Extension | Synthetic lavfi corpus generator exists; B03 adds repeatable YouTube/interview/film scenarios and measurement records. |
+| B03 | Extension | Synthetic lavfi reference scenarios and measurement records — see [Reference projects](reference-projects.md). |
 | U01 | Extension | Remappable insert/overwrite commands exist; **L** with source focus still inserts instead of shuttle. |
 | U02 | Extension | Source/program viewers, titles, and timecode exist; focus/identity must be unmistakable. |
 | U03 | Extension | Four workspaces persist; compact 980×680 / maximize-panel / reset are not verified. |

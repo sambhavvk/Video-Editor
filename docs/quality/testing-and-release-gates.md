@@ -31,6 +31,14 @@ python3 tools/quality/generate_corpus.py
 python3 tools/quality/verify_corpus.py --release
 ```
 
+Validate and generate the four B03 reference scenarios (lavfi/sine stand-ins; binaries and
+`.veproj` stay gitignored). See [Reference projects](reference-projects.md).
+
+```sh
+python3 tools/quality/generate_reference_fixture.py --validate
+python3 tools/quality/generate_reference_fixture.py
+```
+
 For memory and undefined-behavior checks on a supported non-MSVC toolchain:
 
 ```sh

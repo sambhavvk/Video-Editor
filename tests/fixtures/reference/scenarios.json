@@ -1,0 +1,163 @@
+{
+  "license": "MPL-2.0",
+  "schemaVersion": 1,
+  "mediaLicense": "MPL-2.0",
+  "note": "Stand-in media is synthetic lavfi/sine only. Substitute the tester's own eligible footage using the same properties; do not commit copyrighted files.",
+  "scenarios": [
+    {
+      "id": "synthetic-edit",
+      "title": "Synthetic editing fixture",
+      "kind": "synthetic",
+      "purpose": "Repeatable import, insert, save, reopen, caption, and reference-export checks.",
+      "media": [
+        {
+          "id": "talking-head",
+          "file": "talking-head.mkv",
+          "width": 1280,
+          "height": 720,
+          "frameRate": "30/1",
+          "durationSeconds": 6,
+          "audioHz": 48000,
+          "audioChannels": 2
+        }
+      ],
+      "expectedEdits": [
+        "Import talking-head.mkv",
+        "Ripple-insert the full asset at 00:00:00:00",
+        "Add two SRT captions covering 0–3 s and 3–6 s",
+        "Save synthetic-edit.veproj"
+      ],
+      "expectedDelivery": "master.ffv1 reference plus optional YouTube 1080p VP9/Opus WebM",
+      "relinkCheck": "Move talking-head.mkv, reopen, Relink to the new path; asset count stays 1 and clip count stays 2 (linked video+audio from the muxed MKV)."
+    },
+    {
+      "id": "youtube-episode",
+      "title": "YouTube episode (stand-in)",
+      "kind": "youtube",
+      "purpose": "Short generated stand-in (12 s A-roll / 6 s B-roll) for a 10–20 minute creator workflow: A-roll, B-roll, music, captions, 16:9 delivery.",
+      "media": [
+        {
+          "id": "a-roll",
+          "file": "a-roll.mkv",
+          "width": 1920,
+          "height": 1080,
+          "frameRate": "30/1",
+          "durationSeconds": 12,
+          "audioHz": 48000,
+          "audioChannels": 2
+        },
+        {
+          "id": "b-roll",
+          "file": "b-roll.mkv",
+          "width": 1920,
+          "height": 1080,
+          "frameRate": "30/1",
+          "durationSeconds": 6,
+          "audioHz": 48000,
+          "audioChannels": 2
+        },
+        {
+          "id": "music",
+          "file": "music.wav",
+          "width": 0,
+          "height": 0,
+          "frameRate": "",
+          "durationSeconds": 12,
+          "audioHz": 48000,
+          "audioChannels": 2
+        }
+      ],
+      "expectedEdits": [
+        "Mark source In/Out on A-roll (2 s–10 s) and ripple-insert",
+        "Overlay B-roll on a second video track for 3 s at 4 s",
+        "Place music under the sequence; lower clip gain so dialogue stays readable",
+        "Add captions for the A-roll sentences",
+        "Export YouTube 1080p VP9/Opus"
+      ],
+      "expectedDelivery": "YouTube 1080p VP9/Opus WebM; sidecar WebVTT optional",
+      "relinkCheck": "Relink A-roll after moving the file; sequence duration and caption times must not change."
+    },
+    {
+      "id": "interview",
+      "title": "Two-person interview (stand-in)",
+      "kind": "interview",
+      "purpose": "Two picture angles plus one master audio recording before multicam exists.",
+      "media": [
+        {
+          "id": "camera-a",
+          "file": "camera-a.mkv",
+          "width": 1920,
+          "height": 1080,
+          "frameRate": "30/1",
+          "durationSeconds": 10,
+          "audioHz": 48000,
+          "audioChannels": 2
+        },
+        {
+          "id": "camera-b",
+          "file": "camera-b.mkv",
+          "width": 1920,
+          "height": 1080,
+          "frameRate": "30/1",
+          "durationSeconds": 10,
+          "audioHz": 48000,
+          "audioChannels": 2
+        },
+        {
+          "id": "lav-master",
+          "file": "lav-master.wav",
+          "width": 0,
+          "height": 0,
+          "frameRate": "",
+          "durationSeconds": 10,
+          "audioHz": 48000,
+          "audioChannels": 2
+        }
+      ],
+      "expectedEdits": [
+        "Align both cameras and lav-master at 00:00:00:00 (manual; no multicam group yet)",
+        "Keep lav-master as the audible track; mute camera audio",
+        "Cut picture between camera A and B by trimming/splitting at 4 s and 7 s",
+        "Export podcast Opus-only plus a VP9 picture reference"
+      ],
+      "expectedDelivery": "Podcast Opus WebM plus optional VP9 picture",
+      "relinkCheck": "Offline camera-b, relink; A/V offset of the remaining clips must stay zero."
+    },
+    {
+      "id": "short-film",
+      "title": "Short film scene (stand-in)",
+      "kind": "film",
+      "purpose": "24 fps picture, production sound, titles, and a reference master.",
+      "media": [
+        {
+          "id": "scene-wide",
+          "file": "scene-wide.mkv",
+          "width": 1920,
+          "height": 1080,
+          "frameRate": "24/1",
+          "durationSeconds": 8,
+          "audioHz": 48000,
+          "audioChannels": 2
+        },
+        {
+          "id": "production-sound",
+          "file": "production-sound.wav",
+          "width": 0,
+          "height": 0,
+          "frameRate": "",
+          "durationSeconds": 8,
+          "audioHz": 48000,
+          "audioChannels": 2
+        }
+      ],
+      "expectedEdits": [
+        "Set sequence to 1920×1080 24 fps if the first clip does not",
+        "Insert picture and production sound, linked or stacked",
+        "Add a title at 0–3 s",
+        "Export FFV1/MKV reference master"
+      ],
+      "expectedDelivery": "master.ffv1 at 24 fps, Rec.709, originals-only",
+      "relinkCheck": "Copy the project folder to another path and reopen; media comes back Online or Relink reports the missing URI."
+    }
+  ]
+}
