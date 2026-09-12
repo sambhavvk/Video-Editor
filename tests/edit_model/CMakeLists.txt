@@ -24,6 +24,7 @@ add_executable(video_editor_edit_model_tests
 target_link_libraries(video_editor_edit_model_tests
   PRIVATE
     VideoEditor::EditModel
+    VideoEditor::ProjectCodec
     GTest::gtest_main
 )
 target_compile_features(video_editor_edit_model_tests PRIVATE cxx_std_20)

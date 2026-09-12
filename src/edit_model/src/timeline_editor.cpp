@@ -883,6 +883,89 @@ validateTransition(const Project& project, const Sequence& sequence, const Trans
   return std::nullopt;
 }
 
+void remintEffectIds(Effect& effect) {
+  effect.id = EntityId::generate();
+  for (auto& [parameter_id, parameter] : effect.parameters) {
+    static_cast<void>(parameter_id);
+    for (auto& keyframe : parameter.keyframes) {
+      keyframe.id = EntityId::generate();
+    }
+  }
+}
+
+void remintSnapshotNestedIds(Sequence& sequence) {
+  std::unordered_map<EntityId, EntityId> clip_ids;
+  for (auto& track : sequence.tracks) {
+    track.id = EntityId::generate();
+    for (auto& effect : track.effects) {
+      remintEffectIds(effect);
+    }
+    for (auto& clip : track.clips) {
+      const EntityId old_id = clip.id;
+      clip.id = EntityId::generate();
+      for (auto& effect : clip.effects) {
+        remintEffectIds(effect);
+      }
+      clip_ids.emplace(old_id, clip.id);
+    }
+  }
+  for (auto& transition : sequence.transitions) {
+    transition.id = EntityId::generate();
+    if (const auto outgoing = clip_ids.find(transition.outgoing_clip_id);
+        outgoing != clip_ids.end()) {
+      transition.outgoing_clip_id = outgoing->second;
+    }
+    if (const auto incoming = clip_ids.find(transition.incoming_clip_id);
+        incoming != clip_ids.end()) {
+      transition.incoming_clip_id = incoming->second;
+    }
+  }
+  for (auto& marker : sequence.markers) {
+    marker.id = EntityId::generate();
+  }
+  for (auto& caption : sequence.captions) {
+    caption.id = EntityId::generate();
+    for (auto& word : caption.words) {
+      word.id = EntityId::generate();
+    }
+  }
+}
+
+void refreshReviewNoteReconciliation(Project& project) {
+  for (auto& note : project.review_notes) {
+    if (note.resolved) {
+      continue;
+    }
+    bool ok = true;
+    const auto version =
+        std::find_if(project.sequence_versions.begin(), project.sequence_versions.end(),
+                     [&](const NamedSequenceVersion& candidate) {
+                       return candidate.id == note.sequence_version_id;
+                     });
+    if (version == project.sequence_versions.end()) {
+      ok = false;
+    }
+    if (note.asset_id.has_value()) {
+      const Asset* asset = findAsset(project, *note.asset_id);
+      if (asset == nullptr) {
+        ok = false;
+      } else if (note.source_range.has_value()) {
+        const TimeRange& range = *note.source_range;
+        if (range.start.isNegative() || range.duration.isZero() || range.duration.isNegative() ||
+            range.end() > asset->duration) {
+          ok = false;
+        }
+      }
+    } else if (note.source_range.has_value()) {
+      const TimeRange& range = *note.source_range;
+      if (range.start.isNegative() || range.duration.isZero() || range.duration.isNegative()) {
+        ok = false;
+      }
+    }
+    note.needs_reconciliation = !ok;
+  }
+}
+
 [[nodiscard]] std::optional<EditError> validateProject(const Project& project) {
   if (project.id.isNil()) {
     return error(EditErrorCode::InvalidArgument, "project id cannot be nil");
@@ -1086,6 +1169,32 @@ validateTransition(const Project& project, const Sequence& sequence, const Trans
       if (const auto issue = validateTransition(project, sequence, transition)) {
         return issue;
       }
+    }
+  }
+  for (const auto& version : project.sequence_versions) {
+    if (!addId(version.id)) {
+      return error(EditErrorCode::DuplicateId,
+                   "project contains a duplicate or nil sequence version id");
+    }
+    if (version.name.empty() || !validUtf8(version.name)) {
+      return error(EditErrorCode::InvalidArgument,
+                   "sequence version name must be non-empty UTF-8");
+    }
+    if (version.sequence_id.isNil() || findSequence(project, version.sequence_id) == nullptr) {
+      return error(EditErrorCode::EntityNotFound,
+                   "sequence version references a sequence that does not exist");
+    }
+  }
+  for (const auto& note : project.review_notes) {
+    if (!addId(note.id)) {
+      return error(EditErrorCode::DuplicateId,
+                   "project contains a duplicate or nil review note id");
+    }
+    if (note.sequence_version_id.isNil()) {
+      return error(EditErrorCode::InvalidArgument, "review note sequence version id cannot be nil");
+    }
+    if (!validUtf8(note.author) || !validUtf8(note.body)) {
+      return error(EditErrorCode::InvalidArgument, "review note text must be valid UTF-8");
     }
   }
   return std::nullopt;
@@ -1730,6 +1839,15 @@ struct PlannedClip final {
             if (group_in_use) {
               return error(EditErrorCode::AssetInUse,
                            "cannot remove a sequence that still has a multicam group");
+            }
+            const bool version_in_use = std::any_of(
+                project.sequence_versions.begin(), project.sequence_versions.end(),
+                [&](const NamedSequenceVersion& version) {
+                  return version.sequence_id == command.sequence_id;
+                });
+            if (version_in_use) {
+              return error(EditErrorCode::AssetInUse,
+                           "cannot remove a sequence that is a named version snapshot");
             }
             project.sequences.erase(found);
             return std::nullopt;
@@ -2989,23 +3107,49 @@ struct PlannedClip final {
             return std::nullopt;
           },
           [&](const CreateSequenceVersionCommand& command) -> std::optional<EditError> {
-            if (command.version.id.isNil() || command.version.sequence_id.isNil()) {
+            if (command.version.id.isNil() || command.version.sequence_id.isNil() ||
+                command.sequence_snapshot.id.isNil()) {
               return error(EditErrorCode::InvalidArgument, "sequence version ids cannot be nil");
+            }
+            if (command.version.sequence_id != command.sequence_snapshot.id) {
+              return error(EditErrorCode::InvalidArgument,
+                           "sequence version must reference the snapshot sequence id");
             }
             if (command.version.name.empty() || !validUtf8(command.version.name)) {
               return error(EditErrorCode::InvalidArgument,
                            "sequence version name must be non-empty UTF-8");
             }
+            const auto duplicate_version =
+                std::find_if(project.sequence_versions.begin(), project.sequence_versions.end(),
+                             [&](const NamedSequenceVersion& version) {
+                               return version.id == command.version.id;
+                             });
+            if (duplicate_version != project.sequence_versions.end()) {
+              return error(EditErrorCode::DuplicateId,
+                           "a sequence version with the same id already exists");
+            }
             if (findSequence(project, command.sequence_snapshot.id) != nullptr) {
               return error(EditErrorCode::DuplicateId, "version sequence id already exists");
             }
-            project.sequences.push_back(command.sequence_snapshot);
+            Sequence snapshot = command.sequence_snapshot;
+            remintSnapshotNestedIds(snapshot);
+            project.sequences.push_back(std::move(snapshot));
             project.sequence_versions.push_back(command.version);
             return std::nullopt;
           },
           [&](const AddReviewNoteCommand& command) -> std::optional<EditError> {
             if (command.note.id.isNil()) {
               return error(EditErrorCode::InvalidArgument, "review note id cannot be nil");
+            }
+            if (command.note.sequence_version_id.isNil()) {
+              return error(EditErrorCode::InvalidArgument,
+                           "review note sequence version id cannot be nil");
+            }
+            const auto duplicate_note =
+                std::find_if(project.review_notes.begin(), project.review_notes.end(),
+                             [&](const ReviewNote& note) { return note.id == command.note.id; });
+            if (duplicate_note != project.review_notes.end()) {
+              return error(EditErrorCode::DuplicateId, "a review note with the same id already exists");
             }
             if (!validUtf8(command.note.body) || !validUtf8(command.note.author)) {
               return error(EditErrorCode::InvalidArgument, "review note text must be valid UTF-8");
@@ -3014,6 +3158,9 @@ struct PlannedClip final {
             return std::nullopt;
           },
           [&](const ResolveReviewNoteCommand& command) -> std::optional<EditError> {
+            if (command.note_id.isNil()) {
+              return error(EditErrorCode::InvalidArgument, "review note id cannot be nil");
+            }
             const auto found =
                 std::find_if(project.review_notes.begin(), project.review_notes.end(),
                              [&](const ReviewNote& note) { return note.id == command.note_id; });
@@ -3021,6 +3168,9 @@ struct PlannedClip final {
               return error(EditErrorCode::EntityNotFound, "review note was not found");
             }
             found->resolved = command.resolved;
+            if (command.resolved) {
+              found->needs_reconciliation = false;
+            }
             return std::nullopt;
           },
           [&](const SetAssetAudioMonitoringCommand& command) -> std::optional<EditError> {
@@ -3826,6 +3976,7 @@ TimelineEditor::TimelineEditor(Project initial_project) {
       sortClips(track);
     }
   }
+  refreshReviewNoteReconciliation(initial_project);
   if (const auto issue = validateProject(initial_project)) {
     throw std::invalid_argument(issue->message);
   }
@@ -3874,6 +4025,7 @@ Result<Revision, EditError> TimelineEditor::apply(EditCommand command, Revision 
         sortClips(track);
       }
     }
+    refreshReviewNoteReconciliation(*candidate);
     if (auto issue = validateProject(*candidate)) {
       return Result<Revision, EditError>::failure(std::move(*issue));
     }
@@ -3940,6 +4092,7 @@ Result<Revision, EditError> TimelineEditor::applyBatch(std::vector<EditCommand> 
         sortClips(track);
       }
     }
+    refreshReviewNoteReconciliation(*candidate);
     if (auto issue = validateProject(*candidate)) {
       return Result<Revision, EditError>::failure(std::move(*issue));
     }
