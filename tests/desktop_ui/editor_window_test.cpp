@@ -50,6 +50,7 @@ using video_editor::desktop_ui::TimelineClipView;
 using video_editor::desktop_ui::TimelineTrackView;
 using video_editor::desktop_ui::TimelineWidget;
 using video_editor::desktop_ui::PreviewQualityPreset;
+using video_editor::desktop_ui::ProjectHealthPanelWidget;
 using video_editor::desktop_ui::TrackHeightPreset;
 using video_editor::desktop_ui::TrackKind;
 using video_editor::desktop_ui::TrackNavWidget;
@@ -104,6 +105,7 @@ private slots:
   void trackNavFiltersAndFocusesTracks();
   void trackNavAppliesHeightPresets();
   void previewQualityComboEmitsPreset();
+  void projectHealthPanelExposesRepairControls();
   void programViewerRestoresProgramFrameAfterTrimCompare();
   void timelineMarkerSnappingExcludesTheDraggedMarker();
   void timelineRefreshCancelsMarkerGesturesAndUsesAuthoritativeSelection();
@@ -2219,6 +2221,27 @@ void EditorWindowTest::trackNavAppliesHeightPresets() {
   QCOMPARE(timeline.trackHeight(), 96);
   timeline.applyTrackHeightPreset(TrackHeightPreset::Normal);
   QCOMPARE(timeline.trackHeight(), 58);
+}
+
+void EditorWindowTest::projectHealthPanelExposesRepairControls() {
+  ProjectHealthPanelWidget panel;
+  panel.resize(420, 240);
+  panel.show();
+  QCoreApplication::processEvents();
+  auto* list = panel.findChild<QListWidget*>(QStringLiteral("projectHealthList"));
+  auto* repair = panel.findChild<QPushButton*>(QStringLiteral("projectHealthRepair"));
+  QVERIFY(list != nullptr);
+  QVERIFY(repair != nullptr);
+  panel.setIssues({{QStringLiteral("missing-media:test"), QStringLiteral("Missing media"),
+                    QStringLiteral("Offline clip"), QStringLiteral("Relink media")}});
+  QCOMPARE(list->count(), 1);
+  QVERIFY(!repair->isEnabled());
+  list->setCurrentRow(0);
+  QVERIFY(repair->isEnabled());
+  QSignalSpy repair_spy(&panel, &ProjectHealthPanelWidget::repairRequested);
+  repair->click();
+  QCOMPARE(repair_spy.count(), 1);
+  QCOMPARE(repair_spy.takeFirst().at(0).toString(), QStringLiteral("missing-media:test"));
 }
 
 void EditorWindowTest::previewQualityComboEmitsPreset() {

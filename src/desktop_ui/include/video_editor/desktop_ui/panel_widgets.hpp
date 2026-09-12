@@ -458,6 +458,24 @@ private:
   QColor outline_color_value_{Qt::black};
 };
 
+class ProjectHealthPanelWidget final : public QWidget {
+  Q_OBJECT
+
+public:
+  explicit ProjectHealthPanelWidget(QWidget* parent = nullptr);
+
+  void setIssues(const QVector<ProjectHealthIssueView>& issues);
+  [[nodiscard]] QString selectedIssueId() const;
+
+signals:
+  void repairRequested(const QString& issueId);
+  void refreshRequested();
+
+private:
+  QListWidget* list_{nullptr};
+  QPushButton* repair_{nullptr};
+};
+
 class DeliverPanelWidget final : public QWidget {
   Q_OBJECT
 

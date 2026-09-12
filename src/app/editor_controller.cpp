@@ -1794,6 +1794,12 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::showMediaCacheBrowser);
   connect(&window_, &desktop_ui::EditorWindow::manageRestorePointsRequested, this,
           &EditorController::showRestorePointsDialog);
+  if (auto* health = window_.projectHealthPanel(); health != nullptr) {
+    connect(health, &desktop_ui::ProjectHealthPanelWidget::repairRequested, this,
+            &EditorController::handleProjectHealthRepair);
+    connect(health, &desktop_ui::ProjectHealthPanelWidget::refreshRequested, this,
+            &EditorController::refreshProjectHealthPanel);
+  }
   if (auto* dialog = window_.restorePointsDialog(); dialog != nullptr) {
     connect(dialog, &desktop_ui::RestorePointsDialog::createRestorePointRequested, this,
             [this](const QString& name) {
@@ -9641,6 +9647,7 @@ void EditorController::refreshViews() {
   requestPreview();
   refreshJobActivitySummary();
   refreshProgramViewerChrome();
+  refreshProjectHealthPanel();
 }
 
 void EditorController::refreshMediaView() {
@@ -12039,6 +12046,93 @@ bool EditorController::createNamedRestorePoint(const QString& name, const bool s
       showError(tr("Could not create restore point"), QString::fromUtf8(exception.what()));
     }
     return false;
+  }
+}
+
+void EditorController::refreshProjectHealthPanel() {
+  auto* panel = window_.projectHealthPanel();
+  if (panel == nullptr) {
+    return;
+  }
+  QVector<desktop_ui::ProjectHealthIssueView> issues;
+  for (const assets::AssetRecord& record : imported_assets_) {
+    const QString asset_id = QString::fromStdString(record.id);
+    const QString name = asset_id;
+    if (record.availability == assets::AssetAvailability::Missing) {
+      issues.push_back({QStringLiteral("missing-media:") + asset_id, tr("Missing media"),
+                        tr("Media file is offline: %1").arg(name), tr("Relink media")});
+    } else if (record.availability == assets::AssetAvailability::Changed) {
+      issues.push_back({QStringLiteral("changed-media:") + asset_id, tr("Changed media"),
+                        tr("Source file changed since import: %1").arg(name), tr("Relink media")});
+    } else if (assets::AssetService::should_recommend_proxy(record) &&
+               (!record.proxy.has_value() || !record.proxy->complete) &&
+               !proxy_jobs_.contains(record.id)) {
+      issues.push_back({QStringLiteral("proxy-missing:") + asset_id, tr("Proxy"),
+                        tr("Recommended editing proxy is not ready: %1").arg(name),
+                        tr("Create proxy")});
+    }
+  }
+  if (cache_disk_full_) {
+    issues.push_back({QStringLiteral("cache-full"), tr("Media cache"),
+                      tr("The media cache is full"), tr("Manage cache")});
+  }
+  for (std::size_t index = 0; index < background_job_failures_.size(); ++index) {
+    const BackgroundJobFailure& failure = background_job_failures_[index];
+    issues.push_back(
+        {QStringLiteral("background-failure:") + QString::number(index), failure.kind,
+         tr("%1 — %2").arg(failure.subject, failure.message), tr("Dismiss")});
+  }
+  for (const ExportJobRecord& job : export_jobs_) {
+    if (job.state != ExportJobState::Failed) {
+      continue;
+    }
+    issues.push_back({QStringLiteral("export-failed:") + job.job_id, tr("Export"),
+                      tr("Export failed: %1").arg(job.error), tr("Retry export")});
+  }
+  panel->setIssues(issues);
+}
+
+void EditorController::handleProjectHealthRepair(const QString& issueId) {
+  if (issueId.startsWith(QStringLiteral("missing-media:")) ||
+      issueId.startsWith(QStringLiteral("changed-media:"))) {
+    relinkMedia(issueId.section(QLatin1Char(':'), 1));
+    refreshProjectHealthPanel();
+    return;
+  }
+  if (issueId.startsWith(QStringLiteral("proxy-missing:"))) {
+    generateProxy(issueId.section(QLatin1Char(':'), 1));
+    refreshProjectHealthPanel();
+    return;
+  }
+  if (issueId == QStringLiteral("cache-full")) {
+    showMediaCacheBrowser();
+    if (auto* browser = window_.cacheBrowser(); browser != nullptr) {
+      browser->exec();
+    }
+    refreshProjectHealthPanel();
+    return;
+  }
+  if (issueId.startsWith(QStringLiteral("background-failure:"))) {
+    const int index = issueId.section(QLatin1Char(':'), 1).toInt();
+    if (index >= 0 && static_cast<std::size_t>(index) < background_job_failures_.size()) {
+      background_job_failures_.erase(background_job_failures_.begin() + index);
+      refreshJobActivitySummary();
+    }
+    refreshProjectHealthPanel();
+    return;
+  }
+  if (issueId.startsWith(QStringLiteral("export-failed:"))) {
+    const QString job_id = issueId.section(QLatin1Char(':'), 1);
+    for (ExportJobRecord& job : export_jobs_) {
+      if (job.job_id == job_id && job.state == ExportJobState::Failed) {
+        job.state = ExportJobState::Queued;
+        job.error.clear();
+        pumpExportQueue();
+        break;
+      }
+    }
+    refreshProjectHealthPanel();
+    refreshExportJobViews();
   }
 }
 

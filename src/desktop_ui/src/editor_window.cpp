@@ -943,6 +943,9 @@ void EditorWindow::createPanels() {
   captions_dock_ =
       makeDock(QStringLiteral("captionsDock"), tr("Captions & Transcript"), captions_panel_, this);
   deliver_dock_ = makeDock(QStringLiteral("deliverDock"), tr("Deliver"), deliver_panel_, this);
+  project_health_panel_ = new ProjectHealthPanelWidget(this);
+  project_health_dock_ =
+      makeDock(QStringLiteral("projectHealthDock"), tr("Project Health"), project_health_panel_, this);
   scopes_dock_ = makeDock(QStringLiteral("scopesDock"), tr("Scopes"), scopes_widget_, this);
   scopes_dock_->setAccessibleName(tr("Scopes"));
 
@@ -952,10 +955,12 @@ void EditorWindow::createPanels() {
   addDockWidget(Qt::BottomDockWidgetArea, mixer_dock_);
   addDockWidget(Qt::RightDockWidgetArea, captions_dock_);
   addDockWidget(Qt::RightDockWidgetArea, deliver_dock_);
+  addDockWidget(Qt::RightDockWidgetArea, project_health_dock_);
   addDockWidget(Qt::BottomDockWidgetArea, scopes_dock_);
   tabifyDockWidget(inspector_dock_, effects_dock_);
   tabifyDockWidget(effects_dock_, captions_dock_);
   tabifyDockWidget(captions_dock_, deliver_dock_);
+  tabifyDockWidget(deliver_dock_, project_health_dock_);
 }
 
 void EditorWindow::connectScopesDock() {
@@ -971,6 +976,17 @@ void EditorWindow::connectScopesDock() {
       toggle->setChecked(visible);
     }
   });
+  if (project_health_dock_ != nullptr) {
+    if (auto* health = action(QStringLiteral("projectHealth"))) {
+      connect(health, &QAction::toggled, project_health_dock_, &QWidget::setVisible);
+    }
+    connect(project_health_dock_, &QDockWidget::visibilityChanged, this, [this](const bool visible) {
+      if (auto* toggle = action(QStringLiteral("projectHealth"))) {
+        const QSignalBlocker blocker(toggle);
+        toggle->setChecked(visible);
+      }
+    });
+  }
 }
 
 void EditorWindow::createActions() {
@@ -1194,6 +1210,9 @@ void EditorWindow::createActions() {
       create(QStringLiteral("scopes"), tr("Scopes"),
              tr("Show Rec.709 waveform, vectorscope, and histogram"), QKeySequence{tr("Shift+3")});
   scopes->setCheckable(true);
+  auto* project_health = create(QStringLiteral("projectHealth"), tr("Project Health"),
+                                tr("Show missing media, proxy, cache, and job issues"));
+  project_health->setCheckable(true);
   auto* safeGuides = create(QStringLiteral("safeGuides"), tr("Safe Guides"),
                             tr("Show title and action safe guides"));
   safeGuides->setCheckable(true);
@@ -1568,6 +1587,7 @@ void EditorWindow::createMenus() {
   view->addAction(action(QStringLiteral("sourceMonitor")));
   view->addAction(action(QStringLiteral("precisionTrim")));
   view->addAction(action(QStringLiteral("scopes")));
+  view->addAction(action(QStringLiteral("projectHealth")));
   view->addAction(action(QStringLiteral("safeGuides")));
   view->addAction(action(QStringLiteral("viewerClipInfo")));
   view->addAction(action(QStringLiteral("viewerSourceTimecode")));

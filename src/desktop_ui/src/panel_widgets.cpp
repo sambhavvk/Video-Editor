@@ -3735,4 +3735,53 @@ bool DeliverPanelWidget::useExportRange() const {
   return use_export_range_ != nullptr && use_export_range_->isChecked();
 }
 
+ProjectHealthPanelWidget::ProjectHealthPanelWidget(QWidget* parent) : QWidget(parent) {
+  setObjectName(QStringLiteral("projectHealthPanel"));
+  setAccessibleName(tr("Project health"));
+  auto* layout = new QVBoxLayout(this);
+  layout->setContentsMargins(8, 8, 8, 8);
+  list_ = new QListWidget(this);
+  list_->setObjectName(QStringLiteral("projectHealthList"));
+  list_->setAccessibleName(tr("Project health issues"));
+  layout->addWidget(list_, 1);
+  auto* buttons = new QHBoxLayout();
+  repair_ = new QPushButton(tr("Repair selected"), this);
+  repair_->setObjectName(QStringLiteral("projectHealthRepair"));
+  auto* refresh = new QPushButton(tr("Refresh"), this);
+  refresh->setObjectName(QStringLiteral("projectHealthRefresh"));
+  buttons->addWidget(repair_);
+  buttons->addWidget(refresh);
+  buttons->addStretch(1);
+  layout->addLayout(buttons);
+  connect(repair_, &QPushButton::clicked, this, [this] {
+    const QString issue_id = selectedIssueId();
+    if (!issue_id.isEmpty()) {
+      emit repairRequested(issue_id);
+    }
+  });
+  connect(refresh, &QPushButton::clicked, this, &ProjectHealthPanelWidget::refreshRequested);
+  connect(list_, &QListWidget::itemSelectionChanged, this, [this] {
+    repair_->setEnabled(!selectedIssueId().isEmpty());
+  });
+}
+
+void ProjectHealthPanelWidget::setIssues(const QVector<ProjectHealthIssueView>& issues) {
+  list_->clear();
+  for (const ProjectHealthIssueView& issue : issues) {
+    auto* item = new QListWidgetItem(
+        tr("%1 · %2").arg(issue.category, issue.summary));
+    item->setData(Qt::UserRole, issue.issueId);
+    item->setToolTip(issue.repairLabel);
+    list_->addItem(item);
+  }
+  repair_->setEnabled(!selectedIssueId().isEmpty());
+}
+
+QString ProjectHealthPanelWidget::selectedIssueId() const {
+  if (list_->currentItem() == nullptr) {
+    return {};
+  }
+  return list_->currentItem()->data(Qt::UserRole).toString();
+}
+
 } // namespace video_editor::desktop_ui

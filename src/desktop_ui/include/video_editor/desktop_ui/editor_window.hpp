@@ -35,6 +35,7 @@ class AudioMixerWidget;
 class CaptionsPanelWidget;
 class CommandPalette;
 class DeliverPanelWidget;
+class ProjectHealthPanelWidget;
 class EffectsPanelWidget;
 class InspectorWidget;
 class MediaBinWidget;
@@ -99,6 +100,9 @@ public:
   }
   [[nodiscard]] DeliverPanelWidget* deliverPanel() const noexcept {
     return deliver_panel_;
+  }
+  [[nodiscard]] ProjectHealthPanelWidget* projectHealthPanel() const noexcept {
+    return project_health_panel_;
   }
   [[nodiscard]] ScopeWidget* scopesWidget() const noexcept {
     return scopes_widget_;
@@ -373,6 +377,7 @@ private:
   AudioMixerWidget* audio_mixer_{nullptr};
   CaptionsPanelWidget* captions_panel_{nullptr};
   DeliverPanelWidget* deliver_panel_{nullptr};
+  ProjectHealthPanelWidget* project_health_panel_{nullptr};
   ScopeWidget* scopes_widget_{nullptr};
   CacheBrowserDialog* cache_browser_{nullptr};
   RestorePointsDialog* restore_points_dialog_{nullptr};
@@ -384,6 +389,7 @@ private:
   QDockWidget* mixer_dock_{nullptr};
   QDockWidget* captions_dock_{nullptr};
   QDockWidget* deliver_dock_{nullptr};
+  QDockWidget* project_health_dock_{nullptr};
   QDockWidget* scopes_dock_{nullptr};
 
   CommandPalette* command_palette_{nullptr};

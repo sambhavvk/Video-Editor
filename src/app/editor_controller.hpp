@@ -497,6 +497,8 @@ private:
   void refreshRestorePointsDialog();
   [[nodiscard]] bool createNamedRestorePoint(const QString& name, bool silent = false);
   [[nodiscard]] bool restoreNamedRestorePoint(const QString& id);
+  void refreshProjectHealthPanel();
+  void handleProjectHealthRepair(const QString& issueId);
   void finishProxyJob(const std::string& asset_id, const ProxyOutcome& outcome);
   void finishVideoExport(const VideoExportOutcome& outcome);
   void clearExportCheckpoint();

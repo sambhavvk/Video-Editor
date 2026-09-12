@@ -292,6 +292,10 @@ Use **File > Restore Points…** to create named checkpoints, browse recovery se
 with a preview of revision and sequence context. Restoring can save the current state as a safety
 restore point first.
 
+Open **View > Project Health** to review offline media, proxy gaps, cache pressure, and failed
+background/export jobs after transient notifications disappear. Select an issue and choose
+**Repair selected** to relink, create a proxy, manage cache, or retry an export.
+
 The render engine requests active video/title clips and composes supported crop, position, scale,
 anchor, rotation, opacity, the five premultiplied blend modes, supported clip color/crop/blur
 effects, and Cross Dissolve/Dip to Black transitions on a compatible D3D11 (Windows) or Vulkan

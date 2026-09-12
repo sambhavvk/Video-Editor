@@ -58,6 +58,13 @@ enum class PreviewQualityPreset : std::uint8_t {
   Quarter,
 };
 
+struct ProjectHealthIssueView {
+  QString issueId;
+  QString category;
+  QString summary;
+  QString repairLabel;
+};
+
 struct RestorePointView {
   QString id;
   QString name;
