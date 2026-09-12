@@ -581,7 +581,11 @@ void MediaBinWidget::rebuildTable() {
     name->setToolTip(item.filePath);
     table_->setItem(row, kMediaNameColumn, name);
     table_->setItem(row, 2, new QTableWidgetItem(item.durationText));
-    table_->setItem(row, kMediaFormatColumn, new QTableWidgetItem(item.formatText));
+    auto* format_item = new QTableWidgetItem(item.formatText);
+    if (!item.colorInterpretation.isEmpty()) {
+      format_item->setToolTip(item.colorInterpretation);
+    }
+    table_->setItem(row, kMediaFormatColumn, format_item);
 
     QString status_text;
     QColor status_color{164, 193, 168};

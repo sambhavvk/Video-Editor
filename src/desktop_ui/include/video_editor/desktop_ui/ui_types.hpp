@@ -81,6 +81,7 @@ struct MediaItemView {
   QString filePath;
   QString durationText;
   QString formatText;
+  QString colorInterpretation;
   QString metadataTitle;
   QString binId;
   QStringList tags;

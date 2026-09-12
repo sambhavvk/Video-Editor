@@ -817,6 +817,23 @@ render::PreviewScale previewScaleFromPreset(const desktop_ui::PreviewQualityPres
   return render::PreviewScale::Half;
 }
 
+QString describeSdrInterpretation(const media::ColorDescription& color) {
+  const QString matrix = QString::fromStdString(color.matrix).trimmed();
+  const QString range = QString::fromStdString(color.range).trimmed();
+  const bool matrix_unknown =
+      matrix.isEmpty() || matrix.compare(QStringLiteral("unknown"), Qt::CaseInsensitive) == 0 ||
+      matrix.compare(QStringLiteral("unspecified"), Qt::CaseInsensitive) == 0;
+  const bool range_unknown =
+      range.isEmpty() || range.compare(QStringLiteral("unknown"), Qt::CaseInsensitive) == 0 ||
+      range.compare(QStringLiteral("unspecified"), Qt::CaseInsensitive) == 0;
+  if (matrix_unknown && range_unknown) {
+    return QObject::tr("Rec.709 SDR · limited range (default when metadata is missing)");
+  }
+  return QObject::tr("Rec.709 SDR · %1 · %2")
+      .arg(matrix_unknown ? QObject::tr("matrix assumed bt709") : matrix,
+           range_unknown ? QObject::tr("range assumed limited") : range);
+}
+
 desktop_ui::PreviewQualityPreset loadStoredPreviewQuality(const QSettings& settings) {
   const int stored = settings.value(QStringLiteral("preview/qualityScale"),
                                     static_cast<int>(desktop_ui::PreviewQualityPreset::Half))
@@ -9698,6 +9715,19 @@ void EditorController::refreshMediaView() {
       format += QStringLiteral(" %1×%2").arg(asset.width).arg(asset.height);
     }
     const auto* record = findImported(imported_assets_, asset.id.toString());
+    QString color_interpretation;
+    if (record != nullptr && record->descriptor.best_video_stream >= 0 &&
+        record->descriptor.best_video_stream <
+            static_cast<int>(record->descriptor.streams.size())) {
+      const media::StreamDescriptor& stream =
+          record->descriptor.streams.at(static_cast<std::size_t>(record->descriptor.best_video_stream));
+      if (stream.video.has_value()) {
+        color_interpretation = describeSdrInterpretation(stream.video->color);
+      }
+    }
+    if (color_interpretation.isEmpty() && asset.has_video) {
+      color_interpretation = describeSdrInterpretation({});
+    }
     const bool proxy_available =
         record != nullptr && record->proxy.has_value() && record->proxy->complete;
     const bool proxy_recommended =
@@ -9717,6 +9747,7 @@ void EditorController::refreshMediaView() {
         .filePath = qStringFromPath(pathFromUtf8String(asset.source_uri)),
         .durationText = durationText(asset.duration),
         .formatText = format.trimmed(),
+        .colorInterpretation = color_interpretation,
         .metadataTitle = display_title.isEmpty()
                              ? (title == media_metadata_titles_.end() ? QString{}
                                                                       : title->second)
@@ -10026,7 +10057,7 @@ void EditorController::refreshTimelineView() {
   const edit::Time display_time = playheadTime() + sequence->start_time;
   window_.programViewer()->setTimecode(timecodeText(timelineValue(display_time), sequence->frame_rate));
   window_.setSequenceFormatStatus(
-      tr("%1×%2 · %3 fps")
+      tr("%1×%2 · %3 fps · Rec.709 SDR limited export")
           .arg(sequence->width)
           .arg(sequence->height)
           .arg(QString::number(static_cast<double>(sequence->frame_rate.numerator()) /
