@@ -75,9 +75,21 @@ bool multicamVideoClipVisible(const Project& project, EntityId sequence_id, cons
   if (group == nullptr) {
     return true;
   }
-  const MulticamAngle* active =
-      findMulticamAngle(*group, activeMulticamAngleId(*group, time));
-  return active != nullptr && active->clip_id == clip.id;
+  const EntityId active_id = activeMulticamAngleId(*group, time);
+  const MulticamAngle* active = findMulticamAngle(*group, active_id);
+  if (active == nullptr) {
+    return false;
+  }
+  const Sequence* sequence = findSequence(project, sequence_id);
+  if (sequence == nullptr) {
+    return false;
+  }
+  const Clip* active_clip = findClip(*sequence, active->clip_id);
+  if (active_clip == nullptr || !active_clip->enabled ||
+      !active_clip->timeline_range.contains(time)) {
+    return false;
+  }
+  return active->clip_id == clip.id;
 }
 
 bool multicamAudioClipAudible(const Project& project, const Sequence& sequence,

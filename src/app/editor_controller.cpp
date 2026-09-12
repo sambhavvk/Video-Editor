@@ -1619,6 +1619,13 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::removeActiveMulticamGroup);
   connect(window_.inspector(), &desktop_ui::InspectorWidget::multicamCutToAngleRequested, this,
           &EditorController::recordMulticamSwitchAtPlayhead);
+  connect(&window_, &desktop_ui::EditorWindow::createMulticamGroupRequested, this,
+          &EditorController::createMulticamGroupFromSelection);
+  for (int index = 1; index <= 4; ++index) {
+    const QString action_id = QStringLiteral("multicamCutAngle%1").arg(index);
+    connect(window_.action(action_id), &QAction::triggered, this,
+            [this, index]() { cutToMulticamAngleByIndex(index); });
+  }
   connect(&window_, &desktop_ui::EditorWindow::setClipEnabledRequested, this,
           [this](const bool enabled) {
             if (!active_clip_id_.has_value()) {
@@ -5090,8 +5097,8 @@ void EditorController::createMulticamGroupFromSelection() {
     }
     selected_clips.push_back(clip);
   }
-  if (selected_clips.size() != 2) {
-    window_.showTransientMessage(tr("Select exactly two video clips to create a multicam group"));
+  if (selected_clips.size() < 2 || selected_clips.size() > 4) {
+    window_.showTransientMessage(tr("Select two to four video clips to create a multicam group"));
     return;
   }
   std::sort(selected_clips.begin(), selected_clips.end(),
@@ -5107,7 +5114,7 @@ void EditorController::createMulticamGroupFromSelection() {
   for (std::size_t index = 0; index < selected_clips.size(); ++index) {
     edit::MulticamAngle angle;
     angle.clip_id = selected_clips[index]->id;
-    angle.label = index == 0 ? "Angle 1" : "Angle 2";
+    angle.label = tr("Angle %1").arg(static_cast<int>(index + 1)).toStdString();
     angle.sync_offset = selected_clips[index]->timeline_range.start - sync_reference;
     group.angles.push_back(angle);
   }
@@ -5115,7 +5122,7 @@ void EditorController::createMulticamGroupFromSelection() {
   group.audio_master_angle_id = group.angles.front().id;
   if (apply({.operation = edit::CreateMulticamGroupCommand{.group = std::move(group)}},
             tr("Could not create multicam group"))) {
-    window_.showTransientMessage(tr("Multicam group created for two angles"));
+    window_.showTransientMessage(tr("Multicam group created for %1 angles").arg(selected_clips.size()));
     refreshViews();
   }
 }
@@ -5270,6 +5277,23 @@ void EditorController::recordMulticamSwitchAtPlayhead(const QString& angleIdText
     window_.showTransientMessage(tr("Multicam switch recorded at the playhead"));
     refreshViews();
   }
+}
+
+void EditorController::cutToMulticamAngleByIndex(const int index) {
+  const edit::Sequence* sequence = currentSequence();
+  const auto project = editor_->projectAt(editor_->revision());
+  if (sequence == nullptr || project == nullptr || !active_clip_id_.has_value() || index < 1) {
+    return;
+  }
+  const edit::MulticamGroup* group = edit::findMulticamGroupForClip(*project, *active_clip_id_);
+  if (group == nullptr) {
+    return;
+  }
+  const std::size_t angle_index = static_cast<std::size_t>(index - 1);
+  if (angle_index >= group->angles.size()) {
+    return;
+  }
+  recordMulticamSwitchAtPlayhead(QString::fromStdString(group->angles[angle_index].id.toString()));
 }
 
 void EditorController::setClipEnabledFromTimeline(const QString& clipIdText, const bool enabled) {

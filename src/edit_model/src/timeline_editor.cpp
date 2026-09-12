@@ -361,8 +361,9 @@ constexpr int kMaximumAssetRating = 5;
     return error(EditErrorCode::InvalidArgument,
                  "multicam group name must be non-empty valid UTF-8 and at most 256 bytes");
   }
-  if (group.angles.size() != 2) {
-    return error(EditErrorCode::InvalidArgument, "multicam group must contain exactly two angles");
+  if (group.angles.size() < 2 || group.angles.size() > 4) {
+    return error(EditErrorCode::InvalidArgument,
+                 "multicam group must contain between two and four angles");
   }
   std::unordered_set<EntityId> angle_ids;
   std::unordered_set<EntityId> clip_ids;
@@ -2980,6 +2981,43 @@ struct PlannedClip final {
             found->switches.erase(switch_found);
             return std::nullopt;
           },
+          [&](const UpdateMulticamSwitchCommand& command) -> std::optional<EditError> {
+            if (command.group_id.isNil() || command.switch_id.isNil() ||
+                command.angle_id.isNil()) {
+              return error(EditErrorCode::InvalidArgument,
+                           "multicam group, switch, and angle ids cannot be nil");
+            }
+            if (command.time.isNegative()) {
+              return error(EditErrorCode::InvalidArgument, "multicam switch time cannot be negative");
+            }
+            const auto found = std::find_if(
+                project.multicam_groups.begin(), project.multicam_groups.end(),
+                [&](const MulticamGroup& group) { return group.id == command.group_id; });
+            if (found == project.multicam_groups.end()) {
+              return error(EditErrorCode::EntityNotFound, "multicam group was not found");
+            }
+            MulticamGroup candidate = *found;
+            const auto switch_found = std::find_if(
+                candidate.switches.begin(), candidate.switches.end(),
+                [&](const MulticamSwitch& entry) { return entry.id == command.switch_id; });
+            if (switch_found == candidate.switches.end()) {
+              return error(EditErrorCode::EntityNotFound, "multicam switch was not found");
+            }
+            switch_found->time = command.time;
+            switch_found->angle_id = command.angle_id;
+            std::stable_sort(candidate.switches.begin(), candidate.switches.end(),
+                             [](const MulticamSwitch& lhs, const MulticamSwitch& rhs) {
+                               if (lhs.time == rhs.time) {
+                                 return lhs.id < rhs.id;
+                               }
+                               return lhs.time < rhs.time;
+                             });
+            if (const auto issue = validateMulticamGroup(project, candidate)) {
+              return issue;
+            }
+            *found = std::move(candidate);
+            return std::nullopt;
+          },
           [&](const SetClipEnabledCommand& command) -> std::optional<EditError> {
             auto* sequence = mutableSequence(project, command.sequence_id);
             if (sequence == nullptr) {
@@ -3138,6 +3176,8 @@ std::string commandName(const EditCommand& command) {
           return "Record multicam switch";
         if constexpr (std::is_same_v<T, RemoveMulticamSwitchCommand>)
           return "Remove multicam switch";
+        if constexpr (std::is_same_v<T, UpdateMulticamSwitchCommand>)
+          return "Update multicam switch";
         return "Edit";
       },
       command.operation);
@@ -3279,6 +3319,8 @@ std::string commandType(const EditCommand& command) {
           return "record_multicam_switch";
         if constexpr (std::is_same_v<T, RemoveMulticamSwitchCommand>)
           return "remove_multicam_switch";
+        if constexpr (std::is_same_v<T, UpdateMulticamSwitchCommand>)
+          return "update_multicam_switch";
         return "unknown";
       },
       command.operation);

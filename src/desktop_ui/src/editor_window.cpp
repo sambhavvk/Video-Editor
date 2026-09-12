@@ -443,6 +443,8 @@ QString EditorWindow::commandUnavailableReason(const QAction* action) const {
   if (id == QStringLiteral("sequenceSettings") || id == QStringLiteral("duplicateSequence") ||
       id == QStringLiteral("createAspectRatioVariants") ||
       id == QStringLiteral("createMulticamGroup") ||
+      id == QStringLiteral("multicamCutAngle1") || id == QStringLiteral("multicamCutAngle2") ||
+      id == QStringLiteral("multicamCutAngle3") || id == QStringLiteral("multicamCutAngle4") ||
       id == QStringLiteral("gotoTimecode") || id == QStringLiteral("playAround") ||
       id == QStringLiteral("defaultTransition") || id == QStringLiteral("selectAtPlayhead") ||
       id == QStringLiteral("seekPreviousEdit") || id == QStringLiteral("seekNextEdit") ||
@@ -1108,6 +1110,14 @@ void EditorWindow::createActions() {
          tr("Create independent landscape and vertical sequence copies"));
   create(QStringLiteral("createMulticamGroup"), tr("Create Multicam Group…"),
          tr("Group two selected video clips into a manually synchronized multicam set"));
+  create(QStringLiteral("multicamCutAngle1"), tr("Cut to Multicam Angle 1"),
+         tr("Record a multicam switch to angle 1 at the playhead"), QKeySequence{tr("Ctrl+1")});
+  create(QStringLiteral("multicamCutAngle2"), tr("Cut to Multicam Angle 2"),
+         tr("Record a multicam switch to angle 2 at the playhead"), QKeySequence{tr("Ctrl+2")});
+  create(QStringLiteral("multicamCutAngle3"), tr("Cut to Multicam Angle 3"),
+         tr("Record a multicam switch to angle 3 at the playhead"), QKeySequence{tr("Ctrl+3")});
+  create(QStringLiteral("multicamCutAngle4"), tr("Cut to Multicam Angle 4"),
+         tr("Record a multicam switch to angle 4 at the playhead"), QKeySequence{tr("Ctrl+4")});
   create(QStringLiteral("gotoTimecode"), tr("Go to Timecode"), tr("Seek to a typed timecode"),
          QKeySequence{tr("Ctrl+G")});
   create(QStringLiteral("toggleLoopPlayback"), tr("Toggle Loop Playback"),
