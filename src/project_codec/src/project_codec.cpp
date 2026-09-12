@@ -756,6 +756,18 @@ void encodeSmartQuery(const edit::SmartQuery& value, wire::SmartQuery* output) {
   }
 }
 
+void encodeSubclip(const edit::Subclip& value, wire::Subclip* output, std::string_view path,
+                   IdRegistry& ids) {
+  encodeId(value.id, output->mutable_id(), childPath(path, "id"), &ids);
+  encodeId(value.source_asset_id, output->mutable_source_asset_id(),
+           childPath(path, "source_asset_id"));
+  encodeRange(value.source_range, output->mutable_source_range());
+  output->set_name(value.name);
+  if (!value.notes.empty()) {
+    output->set_notes(value.notes);
+  }
+}
+
 void encodeSavedMediaView(const edit::SavedMediaView& value, wire::SavedMediaView* output,
                           std::string_view path, IdRegistry& ids) {
   encodeId(value.id, output->mutable_id(), childPath(path, "id"), &ids);
@@ -830,6 +842,10 @@ void encodeProject(const edit::Project& value, wire::Project* output) {
   for (std::size_t index = 0; index < value.multicam_groups.size(); ++index) {
     encodeMulticamGroup(value.multicam_groups[index], output->add_multicam_groups(),
                         indexedPath("project", "multicam_groups", index), ids);
+  }
+  for (std::size_t index = 0; index < value.subclips.size(); ++index) {
+    encodeSubclip(value.subclips[index], output->add_subclips(),
+                  indexedPath("project", "subclips", index), ids);
   }
   for (std::size_t index = 0; index < value.saved_media_views.size(); ++index) {
     encodeSavedMediaView(value.saved_media_views[index], output->add_saved_media_views(),
@@ -1193,6 +1209,10 @@ void reject_v7_fields_in_declared_older(const wire::ProjectSnapshot& snapshot) {
       fail(CodecErrorCode::InvalidField, childPath(asset_path, "production_preferred_take"),
            "declared schema older than v7 cannot contain production metadata");
     }
+  }
+  if (!snapshot.project().subclips().empty()) {
+    fail(CodecErrorCode::InvalidField, indexedPath("project", "subclips", 0),
+         "declared schema older than v7 cannot contain subclips");
   }
   if (!snapshot.project().saved_media_views().empty()) {
     fail(CodecErrorCode::InvalidField, indexedPath("project", "saved_media_views", 0),
@@ -1941,6 +1961,23 @@ decodeMetadata(const google::protobuf::RepeatedPtrField<wire::StringEntry>& entr
   return result;
 }
 
+[[nodiscard]] edit::Subclip decodeSubclip(const wire::Subclip& value, std::string_view path,
+                                          IdRegistry& ids) {
+  requirePresent(value.has_id(), childPath(path, "id"));
+  requirePresent(value.has_source_asset_id(), childPath(path, "source_asset_id"));
+  requirePresent(value.has_source_range(), childPath(path, "source_range"));
+  edit::Subclip result;
+  result.id = decodeId(value.id(), childPath(path, "id"), &ids);
+  result.source_asset_id =
+      decodeId(value.source_asset_id(), childPath(path, "source_asset_id"));
+  result.source_range = decodeRange(value.source_range(), childPath(path, "source_range"));
+  result.name = value.name();
+  if (value.has_notes()) {
+    result.notes = value.notes();
+  }
+  return result;
+}
+
 [[nodiscard]] edit::SavedMediaView decodeSavedMediaView(const wire::SavedMediaView& value,
                                                         std::string_view path, IdRegistry& ids) {
   requirePresent(value.has_id(), childPath(path, "id"));
@@ -2051,6 +2088,11 @@ decodeMetadata(const google::protobuf::RepeatedPtrField<wire::StringEntry>& entr
   for (const auto& group : value.multicam_groups()) {
     result.multicam_groups.push_back(
         decodeMulticamGroup(group, indexedPath("project", "multicam_groups", index++), ids));
+  }
+  index = 0;
+  for (const auto& subclip : value.subclips()) {
+    result.subclips.push_back(
+        decodeSubclip(subclip, indexedPath("project", "subclips", index++), ids));
   }
   index = 0;
   for (const auto& view : value.saved_media_views()) {

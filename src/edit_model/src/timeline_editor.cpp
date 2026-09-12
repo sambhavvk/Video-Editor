@@ -942,6 +942,27 @@ validateTransition(const Project& project, const Sequence& sequence, const Trans
       return issue;
     }
   }
+  for (const auto& subclip : project.subclips) {
+    if (!addId(subclip.id)) {
+      return error(EditErrorCode::DuplicateId, "project contains a duplicate or nil subclip id");
+    }
+    if (subclip.source_asset_id.isNil()) {
+      return error(EditErrorCode::InvalidArgument, "subclip source asset id cannot be nil");
+    }
+    const Asset* asset = findAsset(project, subclip.source_asset_id);
+    if (asset == nullptr) {
+      return error(EditErrorCode::EntityNotFound, "subclip references a source asset that does not exist");
+    }
+    if (subclip.source_range.duration.isZero() || subclip.source_range.duration.isNegative()) {
+      return error(EditErrorCode::InvalidArgument, "subclip source range must be positive");
+    }
+    if (subclip.source_range.end() > asset->duration) {
+      return error(EditErrorCode::InvalidArgument, "subclip source range exceeds source asset duration");
+    }
+    if (!validUtf8(subclip.name) || !validUtf8(subclip.notes)) {
+      return error(EditErrorCode::InvalidArgument, "subclip text must be valid UTF-8");
+    }
+  }
   for (const auto& view : project.saved_media_views) {
     if (!addId(view.id)) {
       return error(EditErrorCode::DuplicateId,
@@ -2895,6 +2916,134 @@ struct PlannedClip final {
             project.active_media_view_id = command.view_id;
             return std::nullopt;
           },
+          [&](const CreateSubclipCommand& command) -> std::optional<EditError> {
+            if (command.subclip.id.isNil()) {
+              return error(EditErrorCode::InvalidArgument, "subclip id cannot be nil");
+            }
+            if (findSubclip(project, command.subclip.id) != nullptr) {
+              return error(EditErrorCode::DuplicateId, "a subclip with the same id already exists");
+            }
+            if (command.subclip.source_asset_id.isNil()) {
+              return error(EditErrorCode::InvalidArgument, "subclip source asset id cannot be nil");
+            }
+            const Asset* asset = findAsset(project, command.subclip.source_asset_id);
+            if (asset == nullptr) {
+              return error(EditErrorCode::EntityNotFound, "subclip source asset was not found");
+            }
+            if (command.subclip.source_range.duration.isZero() ||
+                command.subclip.source_range.duration.isNegative()) {
+              return error(EditErrorCode::InvalidArgument, "subclip source range must be positive");
+            }
+            if (command.subclip.source_range.end() > asset->duration) {
+              return error(EditErrorCode::InvalidArgument,
+                           "subclip source range exceeds the source asset duration");
+            }
+            Subclip subclip = command.subclip;
+            if (subclip.name.empty()) {
+              subclip.name = asset->name;
+            }
+            if (!validUtf8(subclip.name) || !validUtf8(subclip.notes)) {
+              return error(EditErrorCode::InvalidArgument, "subclip text must be valid UTF-8");
+            }
+            project.subclips.push_back(subclip);
+            return std::nullopt;
+          },
+          [&](const RemoveSubclipCommand& command) -> std::optional<EditError> {
+            if (command.subclip_id.isNil()) {
+              return error(EditErrorCode::InvalidArgument, "subclip id cannot be nil");
+            }
+            const auto found =
+                std::find_if(project.subclips.begin(), project.subclips.end(),
+                             [&](const Subclip& subclip) { return subclip.id == command.subclip_id; });
+            if (found == project.subclips.end()) {
+              return error(EditErrorCode::EntityNotFound, "subclip was not found");
+            }
+            project.subclips.erase(found);
+            return std::nullopt;
+          },
+          [&](const UpdateSubclipNotesCommand& command) -> std::optional<EditError> {
+            if (command.subclip_id.isNil()) {
+              return error(EditErrorCode::InvalidArgument, "subclip id cannot be nil");
+            }
+            const auto found =
+                std::find_if(project.subclips.begin(), project.subclips.end(),
+                             [&](const Subclip& subclip) { return subclip.id == command.subclip_id; });
+            if (found == project.subclips.end()) {
+              return error(EditErrorCode::EntityNotFound, "subclip was not found");
+            }
+            if (!validUtf8(command.notes)) {
+              return error(EditErrorCode::InvalidArgument, "subclip notes must be valid UTF-8");
+            }
+            found->notes = command.notes;
+            return std::nullopt;
+          },
+          [&](const AssembleSelectsSequenceCommand& command) -> std::optional<EditError> {
+            if (command.subclip_ids.empty()) {
+              return error(EditErrorCode::InvalidArgument,
+                           "selects assembly requires at least one subclip");
+            }
+            Sequence sequence;
+            sequence.name = command.sequence_name.empty() ? "Selects" : command.sequence_name;
+            Track video_track;
+            video_track.kind = TrackKind::Video;
+            video_track.name = "V1";
+            Track audio_track;
+            audio_track.kind = TrackKind::Audio;
+            audio_track.name = "A1";
+            sequence.tracks.push_back(video_track);
+            sequence.tracks.push_back(audio_track);
+            Time cursor;
+            for (const EntityId& subclip_id : command.subclip_ids) {
+              const Subclip* subclip = findSubclip(project, subclip_id);
+              if (subclip == nullptr) {
+                return error(EditErrorCode::EntityNotFound, "selects subclip was not found");
+              }
+              const Asset* asset = findAsset(project, subclip->source_asset_id);
+              if (asset == nullptr) {
+                return error(EditErrorCode::EntityNotFound, "selects source asset was not found");
+              }
+              if (sequence.width == 0 && asset->has_video) {
+                sequence.width = asset->width;
+                sequence.height = asset->height;
+                if (asset->nominal_frame_rate) {
+                  sequence.frame_rate = *asset->nominal_frame_rate;
+                }
+              }
+              const TimeRange timeline_range{cursor, subclip->source_range.duration};
+              if (asset->has_video) {
+                Clip clip;
+                clip.asset_id = asset->id;
+                clip.kind = ClipKind::Video;
+                clip.name = subclip->name;
+                clip.source_range = subclip->source_range;
+                clip.timeline_range = timeline_range;
+                if (const auto issue =
+                        insertClip(project, sequence, sequence.tracks.front(), clip,
+                                   InsertMode::RejectOverlap)) {
+                  return issue;
+                }
+              }
+              if (asset->has_audio) {
+                Clip clip;
+                clip.asset_id = asset->id;
+                clip.kind = ClipKind::Audio;
+                clip.name = subclip->name;
+                clip.source_range = subclip->source_range;
+                clip.timeline_range = timeline_range;
+                if (const auto issue = insertClip(project, sequence, sequence.tracks.back(), clip,
+                                                  InsertMode::RejectOverlap)) {
+                  return issue;
+                }
+              }
+              cursor = cursor + subclip->source_range.duration;
+            }
+            if (sequence.width == 0) {
+              sequence.width = 1920;
+              sequence.height = 1080;
+            }
+            project.sequences.push_back(sequence);
+            return std::nullopt;
+          },
           [&](const SetSmartQueryCommand& command) -> std::optional<EditError> {
             if (command.bin_id.isNil()) {
               return error(EditErrorCode::InvalidArgument, "bin id cannot be nil");
@@ -3303,6 +3452,14 @@ std::string commandName(const EditCommand& command) {
           return "Remove media view";
         if constexpr (std::is_same_v<T, SetActiveMediaViewCommand>)
           return "Set active media view";
+        if constexpr (std::is_same_v<T, CreateSubclipCommand>)
+          return "Create subclip";
+        if constexpr (std::is_same_v<T, RemoveSubclipCommand>)
+          return "Remove subclip";
+        if constexpr (std::is_same_v<T, UpdateSubclipNotesCommand>)
+          return "Update subclip notes";
+        if constexpr (std::is_same_v<T, AssembleSelectsSequenceCommand>)
+          return "Assemble selects sequence";
         if constexpr (std::is_same_v<T, ReplaceClipMediaCommand>)
           return "Replace clip media";
         if constexpr (std::is_same_v<T, SetClipNameCommand>)
@@ -3452,6 +3609,14 @@ std::string commandType(const EditCommand& command) {
           return "remove_saved_media_view";
         if constexpr (std::is_same_v<T, SetActiveMediaViewCommand>)
           return "set_active_media_view";
+        if constexpr (std::is_same_v<T, CreateSubclipCommand>)
+          return "create_subclip";
+        if constexpr (std::is_same_v<T, RemoveSubclipCommand>)
+          return "remove_subclip";
+        if constexpr (std::is_same_v<T, UpdateSubclipNotesCommand>)
+          return "update_subclip_notes";
+        if constexpr (std::is_same_v<T, AssembleSelectsSequenceCommand>)
+          return "assemble_selects_sequence";
         if constexpr (std::is_same_v<T, ReplaceClipMediaCommand>)
           return "replace_clip_media";
         if constexpr (std::is_same_v<T, SetClipNameCommand>)

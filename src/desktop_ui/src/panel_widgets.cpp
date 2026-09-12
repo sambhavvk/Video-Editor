@@ -659,7 +659,8 @@ bool MediaBinWidget::itemMatchesSearch(const MediaItemView& item, const QString&
   if (trimmed.toInt() > 0 && item.rating == trimmed.toInt()) {
     return true;
   }
-  if (item.scene.contains(trimmed, Qt::CaseInsensitive) ||
+  if (item.subclipNotes.contains(trimmed, Qt::CaseInsensitive) ||
+      item.scene.contains(trimmed, Qt::CaseInsensitive) ||
       item.shot.contains(trimmed, Qt::CaseInsensitive) ||
       item.take.contains(trimmed, Qt::CaseInsensitive) ||
       item.camera.contains(trimmed, Qt::CaseInsensitive) ||

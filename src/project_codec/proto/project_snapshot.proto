@@ -314,6 +314,14 @@ message SmartQuery {
   optional bool preferred_take_only = 10;
 }
 
+message Subclip {
+  EntityId id = 1;
+  EntityId source_asset_id = 2;
+  TimeRange source_range = 3;
+  string name = 4;
+  string notes = 5;
+}
+
 message SavedMediaView {
   EntityId id = 1;
   string name = 2;
@@ -361,6 +369,7 @@ message Project {
   repeated StringEntry metadata = 5;
   repeated MediaBin bins = 6;
   repeated MulticamGroup multicam_groups = 7;
+  repeated Subclip subclips = 10;
   repeated SavedMediaView saved_media_views = 8;
   optional EntityId active_media_view_id = 9;
 }

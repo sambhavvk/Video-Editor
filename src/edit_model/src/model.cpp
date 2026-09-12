@@ -67,6 +67,12 @@ bool assetMatchesSmartQuery(const Asset& asset, const SmartQuery& query) noexcep
   return true;
 }
 
+const Subclip* findSubclip(const Project& project, EntityId id) noexcept {
+  const auto found = std::find_if(project.subclips.begin(), project.subclips.end(),
+                                  [id](const Subclip& subclip) { return subclip.id == id; });
+  return found == project.subclips.end() ? nullptr : &*found;
+}
+
 const Asset* findAsset(const Project& project, EntityId id) noexcept {
   const auto found = std::find_if(project.assets.begin(), project.assets.end(),
                                   [id](const Asset& asset) { return asset.id == id; });

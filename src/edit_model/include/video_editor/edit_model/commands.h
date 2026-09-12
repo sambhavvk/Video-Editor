@@ -323,6 +323,20 @@ struct RemoveSavedMediaViewCommand final {
 struct SetActiveMediaViewCommand final {
   std::optional<EntityId> view_id;
 };
+struct CreateSubclipCommand final {
+  Subclip subclip;
+};
+struct RemoveSubclipCommand final {
+  EntityId subclip_id;
+};
+struct UpdateSubclipNotesCommand final {
+  EntityId subclip_id;
+  std::string notes;
+};
+struct AssembleSelectsSequenceCommand final {
+  std::string sequence_name;
+  std::vector<EntityId> subclip_ids;
+};
 struct SetSmartQueryCommand final {
   EntityId bin_id;
   SmartQuery query;
@@ -398,7 +412,9 @@ using EditOperation = std::variant<
     ApplyCaptionChangeSetCommand, ApplyTimelineCutChangeSetCommand, RelinkAssetCommand,
     CreateBinCommand, RenameBinCommand, MoveBinCommand, RemoveBinCommand, SetAssetBinCommand,
     SetAssetMetadataCommand, SetSmartQueryCommand, UpsertSavedMediaViewCommand,
-    RemoveSavedMediaViewCommand, SetActiveMediaViewCommand, ReplaceClipMediaCommand,
+    RemoveSavedMediaViewCommand, SetActiveMediaViewCommand, CreateSubclipCommand,
+    RemoveSubclipCommand, UpdateSubclipNotesCommand, AssembleSelectsSequenceCommand,
+    ReplaceClipMediaCommand,
     SetClipNameCommand,
     SetClipLinkedGroupCommand, SetClipEnabledCommand, SetSequenceNameCommand,
     SetSequenceStartTimeCommand, CreateMulticamGroupCommand, RemoveMulticamGroupCommand,

@@ -110,6 +110,8 @@ struct MediaItemView {
   QString audioRoll;
   QString sourceTimecode;
   bool preferredTake{false};
+  bool isSubclip{false};
+  QString subclipNotes;
   QImage thumbnail;
   bool offline{false};
   bool contentChanged{false};

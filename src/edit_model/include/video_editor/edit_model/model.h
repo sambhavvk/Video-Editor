@@ -121,6 +121,15 @@ struct ProductionMetadata final {
   friend bool operator==(const ProductionMetadata&, const ProductionMetadata&) = default;
 };
 
+struct Subclip final {
+  EntityId id{EntityId::generate()};
+  EntityId source_asset_id{};
+  TimeRange source_range{};
+  std::string name;
+  std::string notes;
+  friend bool operator==(const Subclip&, const Subclip&) = default;
+};
+
 struct SavedMediaView final {
   EntityId id{EntityId::generate()};
   std::string name;
@@ -331,6 +340,7 @@ struct Project final {
   std::vector<Sequence> sequences;
   std::vector<MediaBin> bins;
   std::vector<MulticamGroup> multicam_groups;
+  std::vector<Subclip> subclips;
   std::vector<SavedMediaView> saved_media_views;
   std::optional<EntityId> active_media_view_id;
   std::map<std::string, std::string, std::less<>> metadata;
@@ -340,6 +350,7 @@ struct Project final {
 [[nodiscard]] bool assetMatchesSmartQuery(const Asset& asset, const SmartQuery& query) noexcept;
 
 [[nodiscard]] const Asset* findAsset(const Project& project, EntityId id) noexcept;
+[[nodiscard]] const Subclip* findSubclip(const Project& project, EntityId id) noexcept;
 [[nodiscard]] const MediaBin* findBin(const Project& project, EntityId id) noexcept;
 [[nodiscard]] const MulticamGroup* findMulticamGroup(const Project& project,
                                                        EntityId id) noexcept;

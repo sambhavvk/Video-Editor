@@ -10677,6 +10677,25 @@ void EditorController::refreshMediaView() {
         .proxyGenerating = proxy_jobs_.contains(asset.id.toString()),
     });
   }
+  for (const edit::Subclip& subclip : project->subclips) {
+    const edit::Asset* asset = edit::findAsset(*project, subclip.source_asset_id);
+    if (asset == nullptr) {
+      continue;
+    }
+    const auto* record = findImported(imported_assets_, asset->id.toString());
+    items.push_back({
+        .id = QString::fromStdString(subclip.id.toString()),
+        .displayName = QString::fromStdString(subclip.name),
+        .filePath = qStringFromPath(pathFromUtf8String(asset->source_uri)),
+        .durationText = durationText(subclip.source_range.duration),
+        .formatText = tr("Subclip"),
+        .metadataTitle = QString::fromStdString(subclip.name),
+        .notes = QString::fromStdString(subclip.notes),
+        .isSubclip = true,
+        .subclipNotes = QString::fromStdString(subclip.notes),
+        .offline = record == nullptr || record->availability == assets::AssetAvailability::Missing,
+    });
+  }
   window_.setMediaItems(items);
 }
 
