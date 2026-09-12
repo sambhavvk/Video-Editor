@@ -2977,6 +2977,41 @@ struct PlannedClip final {
             found->notes = command.notes;
             return std::nullopt;
           },
+          [&](const CreateSequenceVersionCommand& command) -> std::optional<EditError> {
+            if (command.version.id.isNil() || command.version.sequence_id.isNil()) {
+              return error(EditErrorCode::InvalidArgument, "sequence version ids cannot be nil");
+            }
+            if (command.version.name.empty() || !validUtf8(command.version.name)) {
+              return error(EditErrorCode::InvalidArgument,
+                           "sequence version name must be non-empty UTF-8");
+            }
+            if (findSequence(project, command.sequence_snapshot.id) != nullptr) {
+              return error(EditErrorCode::DuplicateId, "version sequence id already exists");
+            }
+            project.sequences.push_back(command.sequence_snapshot);
+            project.sequence_versions.push_back(command.version);
+            return std::nullopt;
+          },
+          [&](const AddReviewNoteCommand& command) -> std::optional<EditError> {
+            if (command.note.id.isNil()) {
+              return error(EditErrorCode::InvalidArgument, "review note id cannot be nil");
+            }
+            if (!validUtf8(command.note.body) || !validUtf8(command.note.author)) {
+              return error(EditErrorCode::InvalidArgument, "review note text must be valid UTF-8");
+            }
+            project.review_notes.push_back(command.note);
+            return std::nullopt;
+          },
+          [&](const ResolveReviewNoteCommand& command) -> std::optional<EditError> {
+            const auto found =
+                std::find_if(project.review_notes.begin(), project.review_notes.end(),
+                             [&](const ReviewNote& note) { return note.id == command.note_id; });
+            if (found == project.review_notes.end()) {
+              return error(EditErrorCode::EntityNotFound, "review note was not found");
+            }
+            found->resolved = command.resolved;
+            return std::nullopt;
+          },
           [&](const SetAssetAudioMonitoringCommand& command) -> std::optional<EditError> {
             if (command.asset_id.isNil()) {
               return error(EditErrorCode::InvalidArgument, "asset id cannot be nil");
@@ -3480,6 +3515,12 @@ std::string commandName(const EditCommand& command) {
           return "Remove subclip";
         if constexpr (std::is_same_v<T, UpdateSubclipNotesCommand>)
           return "Update subclip notes";
+        if constexpr (std::is_same_v<T, CreateSequenceVersionCommand>)
+          return "Create sequence version";
+        if constexpr (std::is_same_v<T, AddReviewNoteCommand>)
+          return "Add review note";
+        if constexpr (std::is_same_v<T, ResolveReviewNoteCommand>)
+          return "Resolve review note";
         if constexpr (std::is_same_v<T, SetAssetAudioMonitoringCommand>)
           return "Set audio monitoring";
         if constexpr (std::is_same_v<T, AssembleSelectsSequenceCommand>)
@@ -3639,6 +3680,12 @@ std::string commandType(const EditCommand& command) {
           return "remove_subclip";
         if constexpr (std::is_same_v<T, UpdateSubclipNotesCommand>)
           return "update_subclip_notes";
+        if constexpr (std::is_same_v<T, CreateSequenceVersionCommand>)
+          return "create_sequence_version";
+        if constexpr (std::is_same_v<T, AddReviewNoteCommand>)
+          return "add_review_note";
+        if constexpr (std::is_same_v<T, ResolveReviewNoteCommand>)
+          return "resolve_review_note";
         if constexpr (std::is_same_v<T, SetAssetAudioMonitoringCommand>)
           return "set_asset_audio_monitoring";
         if constexpr (std::is_same_v<T, AssembleSelectsSequenceCommand>)

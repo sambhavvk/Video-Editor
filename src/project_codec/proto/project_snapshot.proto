@@ -322,6 +322,24 @@ message SmartQuery {
   optional bool preferred_take_only = 10;
 }
 
+message NamedSequenceVersion {
+  EntityId id = 1;
+  string name = 2;
+  EntityId sequence_id = 3;
+  int64 created_utc_ms = 4;
+}
+
+message ReviewNote {
+  EntityId id = 1;
+  EntityId sequence_version_id = 2;
+  optional EntityId asset_id = 3;
+  optional TimeRange source_range = 4;
+  string author = 5;
+  string body = 6;
+  bool resolved = 7;
+  bool needs_reconciliation = 8;
+}
+
 message Subclip {
   EntityId id = 1;
   EntityId source_asset_id = 2;
@@ -378,6 +396,8 @@ message Project {
   repeated MediaBin bins = 6;
   repeated MulticamGroup multicam_groups = 7;
   repeated Subclip subclips = 10;
+  repeated NamedSequenceVersion sequence_versions = 11;
+  repeated ReviewNote review_notes = 12;
   repeated SavedMediaView saved_media_views = 8;
   optional EntityId active_media_view_id = 9;
 }

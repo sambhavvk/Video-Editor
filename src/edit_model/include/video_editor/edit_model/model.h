@@ -136,6 +136,26 @@ struct Subclip final {
   friend bool operator==(const Subclip&, const Subclip&) = default;
 };
 
+struct NamedSequenceVersion final {
+  EntityId id{EntityId::generate()};
+  std::string name;
+  EntityId sequence_id{};
+  std::int64_t created_utc_ms{0};
+  friend bool operator==(const NamedSequenceVersion&, const NamedSequenceVersion&) = default;
+};
+
+struct ReviewNote final {
+  EntityId id{EntityId::generate()};
+  EntityId sequence_version_id{};
+  std::optional<EntityId> asset_id;
+  std::optional<TimeRange> source_range;
+  std::string author;
+  std::string body;
+  bool resolved{false};
+  bool needs_reconciliation{false};
+  friend bool operator==(const ReviewNote&, const ReviewNote&) = default;
+};
+
 struct SavedMediaView final {
   EntityId id{EntityId::generate()};
   std::string name;
@@ -350,6 +370,8 @@ struct Project final {
   std::vector<MediaBin> bins;
   std::vector<MulticamGroup> multicam_groups;
   std::vector<Subclip> subclips;
+  std::vector<NamedSequenceVersion> sequence_versions;
+  std::vector<ReviewNote> review_notes;
   std::vector<SavedMediaView> saved_media_views;
   std::optional<EntityId> active_media_view_id;
   std::map<std::string, std::string, std::less<>> metadata;

@@ -767,6 +767,32 @@ void encodeSmartQuery(const edit::SmartQuery& value, wire::SmartQuery* output) {
   }
 }
 
+void encodeNamedSequenceVersion(const edit::NamedSequenceVersion& value,
+                                wire::NamedSequenceVersion* output, std::string_view path,
+                                IdRegistry& ids) {
+  encodeId(value.id, output->mutable_id(), childPath(path, "id"), &ids);
+  output->set_name(value.name);
+  encodeId(value.sequence_id, output->mutable_sequence_id(), childPath(path, "sequence_id"));
+  output->set_created_utc_ms(value.created_utc_ms);
+}
+
+void encodeReviewNote(const edit::ReviewNote& value, wire::ReviewNote* output,
+                      std::string_view path, IdRegistry& ids) {
+  encodeId(value.id, output->mutable_id(), childPath(path, "id"), &ids);
+  encodeId(value.sequence_version_id, output->mutable_sequence_version_id(),
+           childPath(path, "sequence_version_id"));
+  if (value.asset_id) {
+    encodeId(*value.asset_id, output->mutable_asset_id(), childPath(path, "asset_id"));
+  }
+  if (value.source_range) {
+    encodeRange(*value.source_range, output->mutable_source_range());
+  }
+  output->set_author(value.author);
+  output->set_body(value.body);
+  output->set_resolved(value.resolved);
+  output->set_needs_reconciliation(value.needs_reconciliation);
+}
+
 void encodeSubclip(const edit::Subclip& value, wire::Subclip* output, std::string_view path,
                    IdRegistry& ids) {
   encodeId(value.id, output->mutable_id(), childPath(path, "id"), &ids);
@@ -857,6 +883,14 @@ void encodeProject(const edit::Project& value, wire::Project* output) {
   for (std::size_t index = 0; index < value.subclips.size(); ++index) {
     encodeSubclip(value.subclips[index], output->add_subclips(),
                   indexedPath("project", "subclips", index), ids);
+  }
+  for (std::size_t index = 0; index < value.sequence_versions.size(); ++index) {
+    encodeNamedSequenceVersion(value.sequence_versions[index], output->add_sequence_versions(),
+                               indexedPath("project", "sequence_versions", index), ids);
+  }
+  for (std::size_t index = 0; index < value.review_notes.size(); ++index) {
+    encodeReviewNote(value.review_notes[index], output->add_review_notes(),
+                     indexedPath("project", "review_notes", index), ids);
   }
   for (std::size_t index = 0; index < value.saved_media_views.size(); ++index) {
     encodeSavedMediaView(value.saved_media_views[index], output->add_saved_media_views(),
@@ -1984,6 +2018,37 @@ decodeMetadata(const google::protobuf::RepeatedPtrField<wire::StringEntry>& entr
   return result;
 }
 
+[[nodiscard]] edit::NamedSequenceVersion decodeNamedSequenceVersion(
+    const wire::NamedSequenceVersion& value, std::string_view path, IdRegistry& ids) {
+  requirePresent(value.has_id(), childPath(path, "id"));
+  edit::NamedSequenceVersion result;
+  result.id = decodeId(value.id(), childPath(path, "id"), &ids);
+  result.name = value.name();
+  result.sequence_id = decodeId(value.sequence_id(), childPath(path, "sequence_id"));
+  result.created_utc_ms = value.created_utc_ms();
+  return result;
+}
+
+[[nodiscard]] edit::ReviewNote decodeReviewNote(const wire::ReviewNote& value,
+                                                std::string_view path, IdRegistry& ids) {
+  requirePresent(value.has_id(), childPath(path, "id"));
+  edit::ReviewNote result;
+  result.id = decodeId(value.id(), childPath(path, "id"), &ids);
+  result.sequence_version_id =
+      decodeId(value.sequence_version_id(), childPath(path, "sequence_version_id"));
+  if (value.has_asset_id()) {
+    result.asset_id = decodeId(value.asset_id(), childPath(path, "asset_id"));
+  }
+  if (value.has_source_range()) {
+    result.source_range = decodeRange(value.source_range(), childPath(path, "source_range"));
+  }
+  result.author = value.author();
+  result.body = value.body();
+  result.resolved = value.resolved();
+  result.needs_reconciliation = value.needs_reconciliation();
+  return result;
+}
+
 [[nodiscard]] edit::Subclip decodeSubclip(const wire::Subclip& value, std::string_view path,
                                           IdRegistry& ids) {
   requirePresent(value.has_id(), childPath(path, "id"));
@@ -1995,9 +2060,7 @@ decodeMetadata(const google::protobuf::RepeatedPtrField<wire::StringEntry>& entr
       decodeId(value.source_asset_id(), childPath(path, "source_asset_id"));
   result.source_range = decodeRange(value.source_range(), childPath(path, "source_range"));
   result.name = value.name();
-  if (value.has_notes()) {
-    result.notes = value.notes();
-  }
+  result.notes = value.notes();
   return result;
 }
 
@@ -2116,6 +2179,17 @@ decodeMetadata(const google::protobuf::RepeatedPtrField<wire::StringEntry>& entr
   for (const auto& subclip : value.subclips()) {
     result.subclips.push_back(
         decodeSubclip(subclip, indexedPath("project", "subclips", index++), ids));
+  }
+  index = 0;
+  for (const auto& version : value.sequence_versions()) {
+    result.sequence_versions.push_back(
+        decodeNamedSequenceVersion(version, indexedPath("project", "sequence_versions", index++),
+                                   ids));
+  }
+  index = 0;
+  for (const auto& note : value.review_notes()) {
+    result.review_notes.push_back(
+        decodeReviewNote(note, indexedPath("project", "review_notes", index++), ids));
   }
   index = 0;
   for (const auto& view : value.saved_media_views()) {

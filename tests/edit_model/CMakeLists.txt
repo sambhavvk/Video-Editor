@@ -14,6 +14,8 @@ add_executable(video_editor_edit_model_tests
   f01_production_metadata_test.cpp
   f02_subclips_test.cpp
   f03_audio_channels_test.cpp
+  v01_sequence_versions_test.cpp
+  v02_review_notes_test.cpp
   time_test.cpp
   title_transition_test.cpp
   track_audio_state_test.cpp

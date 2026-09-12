@@ -24,6 +24,7 @@ add_library(video_editor_edit_model STATIC
   src/edit_points.cpp
   src/entity_id.cpp
   src/model.cpp
+  src/sequence_compare.cpp
   src/snapping.cpp
   src/time.cpp
   src/timeline_editor.cpp

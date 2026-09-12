@@ -333,6 +333,17 @@ struct UpdateSubclipNotesCommand final {
   EntityId subclip_id;
   std::string notes;
 };
+struct CreateSequenceVersionCommand final {
+  NamedSequenceVersion version;
+  Sequence sequence_snapshot;
+};
+struct AddReviewNoteCommand final {
+  ReviewNote note;
+};
+struct ResolveReviewNoteCommand final {
+  EntityId note_id;
+  bool resolved{true};
+};
 struct SetAssetAudioMonitoringCommand final {
   EntityId asset_id;
   std::uint32_t left_channel{0};
@@ -418,7 +429,8 @@ using EditOperation = std::variant<
     CreateBinCommand, RenameBinCommand, MoveBinCommand, RemoveBinCommand, SetAssetBinCommand,
     SetAssetMetadataCommand, SetSmartQueryCommand, UpsertSavedMediaViewCommand,
     RemoveSavedMediaViewCommand, SetActiveMediaViewCommand, CreateSubclipCommand,
-    RemoveSubclipCommand, UpdateSubclipNotesCommand, SetAssetAudioMonitoringCommand,
+    RemoveSubclipCommand, UpdateSubclipNotesCommand, CreateSequenceVersionCommand,
+    AddReviewNoteCommand, ResolveReviewNoteCommand, SetAssetAudioMonitoringCommand,
     AssembleSelectsSequenceCommand,
     ReplaceClipMediaCommand,
     SetClipNameCommand,
