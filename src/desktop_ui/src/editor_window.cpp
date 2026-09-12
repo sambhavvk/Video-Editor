@@ -37,6 +37,7 @@
 #include <QSettings>
 #include <QShortcut>
 #include <QSignalBlocker>
+#include <QSizePolicy>
 #include <QSplitter>
 #include <QStatusBar>
 #include <QStyle>
@@ -227,8 +228,11 @@ QString EditorWindow::applyShortcutBinding(const QString& commandId, const QKeyS
                                            bool replaceConflicts) {
   const auto error = ShortcutBindings::applyBinding(settings_, actions_, shortcut_defaults_,
                                                     commandId, shortcut, replaceConflicts, this);
-  if (error.isEmpty() && command_palette_ != nullptr) {
-    command_palette_->setActions(actions_.values());
+  if (error.isEmpty()) {
+    if (command_palette_ != nullptr) {
+      command_palette_->setActions(actions_.values());
+    }
+    syncTimelineToolActions();
   }
   return error;
 }
@@ -238,6 +242,7 @@ void EditorWindow::resetShortcutBinding(const QString& commandId) {
   if (command_palette_ != nullptr) {
     command_palette_->setActions(actions_.values());
   }
+  syncTimelineToolActions();
 }
 
 void EditorWindow::setProjectDisplayName(const QString& displayName) {
@@ -645,47 +650,97 @@ void EditorWindow::createCentralArea() {
   precision_trim_->setObjectName(QStringLiteral("precisionTrimPanel"));
   precision_trim_->setAccessibleName(tr("Precision trim controls"));
   precision_trim_->setFrameShape(QFrame::StyledPanel);
-  auto* trimLayout = new QHBoxLayout(precision_trim_);
-  trimLayout->setContentsMargins(10, 5, 10, 5);
+  auto* rows = new QVBoxLayout(precision_trim_);
+  rows->setContentsMargins(10, 4, 10, 4);
+  rows->setSpacing(2);
+  auto* toolsRow = new QHBoxLayout();
+  toolsRow->setContentsMargins(0, 0, 0, 0);
+  toolsRow->setSpacing(4);
+  auto* editRow = new QHBoxLayout();
+  editRow->setContentsMargins(0, 0, 0, 0);
+  editRow->setSpacing(4);
+  rows->addLayout(toolsRow);
+  rows->addLayout(editRow);
   auto* trimLabel = new QLabel(tr("Precision Trim"), precision_trim_);
   QFont trimFont = trimLabel->font();
   trimFont.setWeight(QFont::DemiBold);
   trimLabel->setFont(trimFont);
-  trimLayout->addWidget(trimLabel);
-  trimLayout->addSpacing(12);
+  toolsRow->addWidget(trimLabel);
+  precision_tool_status_ = new QLabel(tr("Select (V)"), precision_trim_);
+  precision_tool_status_->setObjectName(QStringLiteral("precisionToolStatus"));
+  precision_tool_status_->setAccessibleName(precision_tool_status_->text());
+  precision_tool_status_->setAccessibleDescription(tr("Active precision trim tool"));
+  toolsRow->addWidget(precision_tool_status_);
+  toolsRow->addSpacing(8);
   for (const auto* id :
        {"tool.select", "tool.rippleTrim", "tool.overwriteTrim", "tool.roll", "tool.slip",
         "tool.slide", "tool.razor", "tool.pen", "tool.hand", "tool.zoom"}) {
     auto* mode = makeActionButton(action(QString::fromLatin1(id)), precision_trim_);
     mode->setObjectName(QStringLiteral("precision.%1").arg(QString::fromLatin1(id)));
     mode->setToolButtonStyle(Qt::ToolButtonIconOnly);
-    trimLayout->addWidget(mode);
+    toolsRow->addWidget(mode);
   }
-  trimLayout->addSpacing(8);
-  const auto addNudgeButton = [trimLayout, this](const char* suffix, const QString& label,
-                                                 const QString& accessibleName) {
+  toolsRow->addStretch();
+  const auto addNudgeButton = [editRow, this](const char* suffix, const QString& label,
+                                              const QString& accessibleName) {
     auto* button = new QToolButton(precision_trim_);
     button->setObjectName(QStringLiteral("precision.nudge.%1").arg(QString::fromLatin1(suffix)));
     button->setText(label);
     button->setAccessibleName(accessibleName);
     button->setToolButtonStyle(Qt::ToolButtonTextOnly);
     button->setAutoRaise(true);
-    trimLayout->addWidget(button);
+    button->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
+    editRow->addWidget(button);
   };
-  addNudgeButton("minus10", tr("−10"), tr("Nudge selected clip earlier by ten frames"));
   addNudgeButton("minus1", tr("−1"), tr("Nudge selected clip earlier by one frame"));
   addNudgeButton("plus1", tr("+1"), tr("Nudge selected clip later by one frame"));
-  addNudgeButton("plus10", tr("+10"), tr("Nudge selected clip later by ten frames"));
-  trimLayout->addSpacing(8);
+  auto* nudgeMore = new QToolButton(precision_trim_);
+  nudgeMore->setObjectName(QStringLiteral("precision.nudgeMore"));
+  nudgeMore->setText(tr("Nudge"));
+  nudgeMore->setAccessibleName(tr("Additional nudge amounts"));
+  nudgeMore->setToolButtonStyle(Qt::ToolButtonTextOnly);
+  nudgeMore->setAutoRaise(true);
+  nudgeMore->setPopupMode(QToolButton::InstantPopup);
+  nudgeMore->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
+  auto* nudgeMenu = new QMenu(nudgeMore);
+  nudgeMenu->setObjectName(QStringLiteral("precisionNudgeMenu"));
+  const auto addNudgeAction = [nudgeMenu, this](const char* suffix, const QString& label,
+                                                int frames) {
+    auto* item = nudgeMenu->addAction(label);
+    item->setObjectName(QStringLiteral("precision.nudge.%1").arg(QString::fromLatin1(suffix)));
+    connect(item, &QAction::triggered, this, [this, frames] {
+      timeline_->nudgeActiveClipByFrames(frames, TimelineWidget::EditIntent::Normal);
+    });
+  };
+  addNudgeAction("minus10", tr("Earlier 10 frames"), -10);
+  addNudgeAction("plus10", tr("Later 10 frames"), 10);
+  nudgeMore->setMenu(nudgeMenu);
+  editRow->addWidget(nudgeMore);
   auto* split = makeActionButton(action(QStringLiteral("splitClip")), precision_trim_);
   split->setObjectName(QStringLiteral("precision.splitClip"));
   split->setToolButtonStyle(Qt::ToolButtonTextOnly);
-  trimLayout->addWidget(split);
-  trimLayout->addStretch();
-  auto* hint = new QLabel(tr("Alt+←/→ nudge · Shift=10 · Ctrl=ripple · V/C/P/H/Z/R/W/N/Y/U tools"),
-                          precision_trim_);
-  hint->setProperty("muted", true);
-  trimLayout->addWidget(hint);
+  split->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
+  editRow->addWidget(split);
+  auto* helpMore = new QToolButton(precision_trim_);
+  helpMore->setObjectName(QStringLiteral("precision.helpMore"));
+  helpMore->setText(tr("Shortcuts"));
+  helpMore->setAccessibleName(tr("Precision trim keyboard shortcuts"));
+  helpMore->setToolButtonStyle(Qt::ToolButtonTextOnly);
+  helpMore->setAutoRaise(true);
+  helpMore->setPopupMode(QToolButton::InstantPopup);
+  helpMore->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
+  auto* helpMenu = new QMenu(helpMore);
+  helpMenu->setObjectName(QStringLiteral("precisionHelpMenu"));
+  const auto addHelpLine = [helpMenu](const QString& text) {
+    auto* line = helpMenu->addAction(text);
+    line->setObjectName(QStringLiteral("precision.helpLine"));
+  };
+  addHelpLine(tr("Alt+←/→ nudge · Shift=10 · Ctrl=ripple"));
+  addHelpLine(tr("Ctrl+ripple while dragging"));
+  addHelpLine(tr("V/C/P/H/Z/R/W/N/Y/U tool shortcuts"));
+  helpMore->setMenu(helpMenu);
+  editRow->addWidget(helpMore);
+  editRow->addStretch();
   precision_trim_->hide();
   timelineLayout->addWidget(precision_trim_);
 
@@ -1195,6 +1250,7 @@ void EditorWindow::showKeyboardShortcutsPreferences() {
     if (command_palette_ != nullptr) {
       command_palette_->setActions(actions_.values());
     }
+    syncTimelineToolActions();
   });
   dialog.exec();
 }
@@ -1578,10 +1634,8 @@ void EditorWindow::connectControllerSurface() {
       });
     }
   };
-  bindNudge("precision.nudge.minus10", -10);
   bindNudge("precision.nudge.minus1", -1);
   bindNudge("precision.nudge.plus1", 1);
-  bindNudge("precision.nudge.plus10", 10);
   connect(action(QStringLiteral("previousFrame")), &QAction::triggered, this, [this] {
     if (sourceMonitorHasFocus()) {
       emit sourceStepFrameRequested(-1);
@@ -1942,42 +1996,62 @@ void EditorWindow::syncTimelineToolActions() {
   check("tool.trackSelectForward", mode == TimelineWidget::ToolMode::TrackSelectForward);
 
   QString name = tr("Select");
+  const char* active_id = "tool.select";
   switch (mode) {
   case TimelineWidget::ToolMode::RippleTrim:
     name = tr("Ripple Trim");
+    active_id = "tool.rippleTrim";
     break;
   case TimelineWidget::ToolMode::OverwriteTrim:
     name = tr("Overwrite Trim");
+    active_id = "tool.overwriteTrim";
     break;
   case TimelineWidget::ToolMode::Roll:
     name = tr("Roll");
+    active_id = "tool.roll";
     break;
   case TimelineWidget::ToolMode::Slip:
     name = tr("Slip");
+    active_id = "tool.slip";
     break;
   case TimelineWidget::ToolMode::Slide:
     name = tr("Slide");
+    active_id = "tool.slide";
     break;
   case TimelineWidget::ToolMode::TrackSelectForward:
     name = tr("Track Select");
+    active_id = "tool.trackSelectForward";
     break;
   case TimelineWidget::ToolMode::Razor:
     name = tr("Razor");
+    active_id = "tool.razor";
     break;
   case TimelineWidget::ToolMode::Pen:
     name = tr("Pen");
+    active_id = "tool.pen";
     break;
   case TimelineWidget::ToolMode::Hand:
     name = tr("Hand");
+    active_id = "tool.hand";
     break;
   case TimelineWidget::ToolMode::Zoom:
     name = tr("Zoom");
+    active_id = "tool.zoom";
     break;
   case TimelineWidget::ToolMode::Select:
     break;
   }
+  QString shortcut;
+  if (auto* tool_action = action(QString::fromLatin1(active_id))) {
+    shortcut = tool_action->shortcut().toString(QKeySequence::NativeText);
+  }
+  const QString status = shortcut.isEmpty() ? name : QStringLiteral("%1 (%2)").arg(name, shortcut);
   if (tool_label_ != nullptr) {
     tool_label_->setText(tr("Tool: %1").arg(name));
+  }
+  if (precision_tool_status_ != nullptr) {
+    precision_tool_status_->setText(status);
+    precision_tool_status_->setAccessibleName(status);
   }
 }
 

@@ -61,6 +61,7 @@ private slots:
   void sourceTransportMatchesProgramShuttle();
   void viewerFocusAndInsertControlsAreVisible();
   void compactLayoutAndWorkspaceReset();
+  void precisionToolbarShowsActiveToolShortcut();
   void markInOutActionsTargetFocusedViewer();
   void remapsAndPersistsShortcutBindings();
   void mediaBinShowsProxyLifecycle();
@@ -543,6 +544,76 @@ void EditorWindowTest::compactLayoutAndWorkspaceReset() {
   QVERIFY(QTest::qWaitForWindowExposed(&restored));
   QVERIFY(restored.mediaBin()->isVisible());
   QVERIFY(restored.inspector()->isVisible());
+}
+
+void EditorWindowTest::precisionToolbarShowsActiveToolShortcut() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  auto settings = temporarySettings(directory);
+  EditorWindow window(settings.get());
+  window.setPrecisionTrimVisible(true);
+  window.show();
+  QVERIFY(QTest::qWaitForWindowExposed(&window));
+  QCoreApplication::processEvents();
+
+  auto* panel = window.findChild<QWidget*>(QStringLiteral("precisionTrimPanel"));
+  QVERIFY(panel != nullptr);
+  auto* status = panel->findChild<QLabel*>(QStringLiteral("precisionToolStatus"));
+  QVERIFY(status != nullptr);
+  QVERIFY(status->text().contains(QStringLiteral("Select")));
+  QVERIFY(status->text().contains(QStringLiteral("V")));
+  QCOMPARE(status->accessibleName(), status->text());
+
+  auto* razor = panel->findChild<QToolButton*>(QStringLiteral("precision.tool.razor"));
+  QVERIFY(razor != nullptr);
+  QTest::mouseClick(razor, Qt::LeftButton);
+  QVERIFY(status->text().contains(QStringLiteral("Razor")));
+  QVERIFY(status->text().contains(QStringLiteral("C")));
+  QCOMPARE(status->accessibleName(), status->text());
+
+  auto* nudgeMore = panel->findChild<QToolButton*>(QStringLiteral("precision.nudgeMore"));
+  auto* helpMore = panel->findChild<QToolButton*>(QStringLiteral("precision.helpMore"));
+  QVERIFY(nudgeMore != nullptr);
+  QVERIFY(helpMore != nullptr);
+  QVERIFY(panel->findChild<QToolButton*>(QStringLiteral("precision.nudge.minus10")) == nullptr);
+
+  auto* helpMenu = helpMore->menu();
+  QVERIFY(helpMenu != nullptr);
+  QVERIFY(!helpMenu->actions().isEmpty());
+  bool nudgeDocumentsRipple = false;
+  for (auto* item : helpMenu->actions()) {
+    QVERIFY(item->isEnabled());
+    if (item->text().contains(QStringLiteral("nudge"), Qt::CaseInsensitive) &&
+        item->text().contains(QStringLiteral("Ctrl"), Qt::CaseInsensitive)) {
+      nudgeDocumentsRipple = true;
+    }
+  }
+  QVERIFY(nudgeDocumentsRipple);
+
+  QVERIFY(window
+              .applyShortcutBinding(QStringLiteral("tool.razor"),
+                                    QKeySequence{QStringLiteral("Shift+C")})
+              .isEmpty());
+  QVERIFY(status->text().contains(QStringLiteral("Razor")));
+  QVERIFY(status->text().contains(QStringLiteral("Shift+C")));
+  QCOMPARE(status->accessibleName(), status->text());
+
+  window.resize(980, 680);
+  QCoreApplication::processEvents();
+  QVERIFY(panel->minimumSizeHint().width() <= panel->width());
+  QVERIFY(nudgeMore->width() >= nudgeMore->sizeHint().width());
+  QVERIFY(helpMore->width() >= helpMore->sizeHint().width());
+
+  window.setTimelineView(
+      10'000, 1'000, {{QStringLiteral("video-1"), QStringLiteral("Video 1"), TrackKind::Video}},
+      {{QStringLiteral("clip-a"), QStringLiteral("Clip A"), 0, 1'000, 2'000, QColor{}, true}});
+  QSignalSpy commits(window.timeline(), &TimelineWidget::clipEditCommitted);
+  auto* nudgeMenu = nudgeMore->menu();
+  QVERIFY(nudgeMenu != nullptr);
+  auto* laterTen = nudgeMenu->findChild<QAction*>(QStringLiteral("precision.nudge.plus10"));
+  QVERIFY(laterTen != nullptr);
+  laterTen->trigger();
+  QCOMPARE(commits.count(), 1);
 }
 
 void EditorWindowTest::markInOutActionsTargetFocusedViewer() {

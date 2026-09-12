@@ -321,6 +321,7 @@ private:
   MarkerListWidget* marker_list_{nullptr};
   QWidget* source_container_{nullptr};
   QFrame* precision_trim_{nullptr};
+  QLabel* precision_tool_status_{nullptr};
   QTabBar* sequence_tab_bar_{nullptr};
   QSplitter* viewer_timeline_splitter_{nullptr};
   CompactTier compact_tier_{CompactTier::Normal};
