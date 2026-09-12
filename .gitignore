@@ -9,7 +9,7 @@ compile_commands.json
 
 # Generated sources
 /generated/
-
+.cursor/
 # Editors and operating systems
 .idea/
 .vscode/
