@@ -29,6 +29,7 @@ endif()
 add_library(video_editor_interchange STATIC
   src/otio.cpp
   src/otio_handoff.cpp
+  src/travel_kit.cpp
 )
 add_library(VideoEditor::Interchange ALIAS video_editor_interchange)
 add_library(video_editor::interchange ALIAS video_editor_interchange)
@@ -40,7 +41,7 @@ target_include_directories(video_editor_interchange
     $<INSTALL_INTERFACE:include>
 )
 target_link_libraries(video_editor_interchange
-  PUBLIC VideoEditor::EditModel
+  PUBLIC VideoEditor::EditModel VideoEditor::ProjectCodec
   PRIVATE Qt6::Core
 )
 set_target_properties(video_editor_interchange PROPERTIES
