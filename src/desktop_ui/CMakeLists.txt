@@ -22,6 +22,7 @@ add_library(video_editor_desktop_ui STATIC
     include/video_editor/desktop_ui/keyframe_curve_widget.hpp
     include/video_editor/desktop_ui/shortcut_bindings.hpp
     include/video_editor/desktop_ui/panel_widgets.hpp
+    include/video_editor/desktop_ui/restore_points_dialog.hpp
     include/video_editor/desktop_ui/program_output_window.hpp
     include/video_editor/desktop_ui/program_viewer.hpp
     include/video_editor/desktop_ui/scope_widget.hpp
@@ -36,6 +37,7 @@ add_library(video_editor_desktop_ui STATIC
     src/keyframe_curve_widget.cpp
     src/shortcut_bindings.cpp
     src/panel_widgets.cpp
+    src/restore_points_dialog.cpp
     src/program_output_window.cpp
     src/program_viewer.cpp
     src/scope_widget.cpp

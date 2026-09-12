@@ -58,6 +58,16 @@ enum class PreviewQualityPreset : std::uint8_t {
   Quarter,
 };
 
+struct RestorePointView {
+  QString id;
+  QString name;
+  QString createdText;
+  QString sequenceName;
+  QString revisionText;
+  QString sourceLabel;
+  QString previewText;
+};
+
 struct MediaItemView {
   QString id;
   QString displayName;

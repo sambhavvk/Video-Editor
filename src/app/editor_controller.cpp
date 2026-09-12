@@ -3,6 +3,7 @@
 #include "media_reconstruction.hpp"
 #include "path_utils.hpp"
 #include "project_recent_paths.hpp"
+#include "restore_points.hpp"
 #include "timecode_util.hpp"
 #include "session_event_log.hpp"
 #include "worker_host_session.hpp"
@@ -1791,6 +1792,25 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::saveAssetMetadata);
   connect(&window_, &desktop_ui::EditorWindow::manageMediaCacheRequested, this,
           &EditorController::showMediaCacheBrowser);
+  connect(&window_, &desktop_ui::EditorWindow::manageRestorePointsRequested, this,
+          &EditorController::showRestorePointsDialog);
+  if (auto* dialog = window_.restorePointsDialog(); dialog != nullptr) {
+    connect(dialog, &desktop_ui::RestorePointsDialog::createRestorePointRequested, this,
+            [this](const QString& name) {
+              if (createNamedRestorePoint(name)) {
+                refreshRestorePointsDialog();
+              }
+            });
+    connect(dialog, &desktop_ui::RestorePointsDialog::restorePointRequested, this,
+            [this](const QString& id) {
+              if (restoreNamedRestorePoint(id)) {
+                if (auto* points_dialog = window_.restorePointsDialog();
+                    points_dialog != nullptr) {
+                  points_dialog->accept();
+                }
+              }
+            });
+  }
   if (auto* browser = window_.cacheBrowser(); browser != nullptr) {
     connect(browser, &desktop_ui::CacheBrowserDialog::budgetChanged, this,
             &EditorController::handleCacheBudgetChanged);
@@ -11929,6 +11949,140 @@ void EditorController::clearMediaCache() {
   }
   refreshCacheInventory();
   refreshViews();
+}
+
+void EditorController::showRestorePointsDialog() {
+  refreshRestorePointsDialog();
+}
+
+void EditorController::refreshRestorePointsDialog() {
+  auto* dialog = window_.restorePointsDialog();
+  if (dialog == nullptr) {
+    return;
+  }
+  QVector<desktop_ui::RestorePointView> views;
+  const auto format_time = [](const std::int64_t utc_ms) {
+    return QLocale().toString(
+        QDateTime::fromMSecsSinceEpoch(utc_ms, QTimeZone::UTC).toLocalTime(),
+        QLocale::ShortFormat);
+  };
+  for (const RestorePointEntry& entry : loadNamedRestorePoints(recoveryDirectory())) {
+    desktop_ui::RestorePointView view;
+    view.id = QString::fromStdString(entry.id);
+    view.name = QString::fromStdString(entry.name);
+    view.createdText = format_time(entry.created_utc_ms);
+    view.sequenceName = QString::fromStdString(entry.sequence_name);
+    view.revisionText = QString::number(entry.revision);
+    view.sourceLabel = tr("Named checkpoint");
+    view.previewText =
+        tr("Restore revision %1 of sequence \"%2\" from %3.")
+            .arg(view.revisionText, view.sequenceName, view.createdText);
+    views.push_back(std::move(view));
+  }
+  try {
+    const store::RecoveryCatalog catalog = store::scan_recovery_directory(recoveryDirectory());
+    for (const store::RecoveryCandidate& candidate : catalog.candidates) {
+      if (!candidate.valid_project_database || !candidate.recovery_recommended ||
+          candidate.working_database == working_path_) {
+        continue;
+      }
+      desktop_ui::RestorePointView view;
+      view.id = QStringLiteral("recovery:") + qStringFromPath(candidate.working_database);
+      view.name = tr("Recovered session");
+      view.createdText = format_time(candidate.heartbeat_utc_ms);
+      view.sequenceName = tr("Project");
+      view.revisionText = QString::number(candidate.head_revision);
+      view.sourceLabel = candidate.clean_close ? tr("Unsaved edits") : tr("Unclean close");
+      view.previewText =
+          candidate.head_revision != candidate.saved_revision
+              ? tr("Open committed edits newer than the last saved checkpoint (revision %1).")
+                    .arg(view.revisionText)
+              : tr("Open the last committed state from an unclean shutdown (revision %1).")
+                    .arg(view.revisionText);
+      views.push_back(std::move(view));
+    }
+  } catch (...) {
+  }
+  dialog->setRestorePoints(views);
+}
+
+bool EditorController::createNamedRestorePoint(const QString& name, const bool silent) {
+  if (store_ == nullptr || editor_ == nullptr) {
+    if (!silent) {
+      window_.showTransientMessage(tr("Open a project before creating restore points"));
+    }
+    return false;
+  }
+  try {
+    const std::filesystem::path directory = restorePointsDirectory(recoveryDirectory());
+    std::filesystem::create_directories(directory);
+    const auto revision = store_->metadata().head_revision;
+    const std::filesystem::path destination =
+        makeRestorePointCheckpointPath(directory, name, revision);
+    store_->checkpoint_to(destination, revision);
+    RestorePointEntry entry;
+    entry.id = edit::EntityId::generate().toString();
+    entry.name = name.toStdString();
+    entry.checkpoint = destination;
+    entry.revision = revision;
+    if (const edit::Sequence* sequence = currentSequence()) {
+      entry.sequence_name = sequence->name;
+    }
+    entry.created_utc_ms = QDateTime::currentMSecsSinceEpoch();
+    appendNamedRestorePoint(recoveryDirectory(), entry);
+    if (!silent) {
+      window_.showTransientMessage(tr("Restore point \"%1\" created").arg(name));
+    }
+    return true;
+  } catch (const std::exception& exception) {
+    if (!silent) {
+      showError(tr("Could not create restore point"), QString::fromUtf8(exception.what()));
+    }
+    return false;
+  }
+}
+
+bool EditorController::restoreNamedRestorePoint(const QString& id) {
+  if (id.startsWith(QStringLiteral("recovery:"))) {
+    const std::filesystem::path working =
+        pathFromQString(id.mid(QStringLiteral("recovery:").size()));
+    if (dirty_) {
+      const auto answer =
+          QMessageBox::question(&window_, tr("Restore recovery session"),
+                                tr("The current project has unsaved changes. Create a restore point "
+                                   "of the current state before opening the recovery session?"),
+                                QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel,
+                                QMessageBox::Yes);
+      if (answer == QMessageBox::Cancel) {
+        return false;
+      }
+      if (answer == QMessageBox::Yes) {
+        (void)createNamedRestorePoint(tr("Before recovery restore"), true);
+      }
+    }
+    return loadWorkingRecovery(working);
+  }
+  const std::optional<RestorePointEntry> entry =
+      findRestorePoint(recoveryDirectory(), id.toStdString());
+  if (!entry.has_value()) {
+    window_.showTransientMessage(tr("That restore point is no longer available"));
+    return false;
+  }
+  if (dirty_) {
+    const auto answer =
+        QMessageBox::question(&window_, tr("Restore project state"),
+                              tr("The current project has unsaved changes. Create a restore point "
+                                 "of the current state before restoring?"),
+                              QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel,
+                              QMessageBox::Yes);
+    if (answer == QMessageBox::Cancel) {
+      return false;
+    }
+    if (answer == QMessageBox::Yes) {
+      (void)createNamedRestorePoint(tr("Before restore"), true);
+    }
+  }
+  return loadCheckpoint(entry->checkpoint);
 }
 
 } // namespace video_editor::app

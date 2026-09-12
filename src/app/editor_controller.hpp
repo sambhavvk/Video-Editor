@@ -493,6 +493,10 @@ private:
   void setAssetBin(const QString& assetId, const QString& binId);
   void migrateCacheMetadataToProject();
   void showMediaCacheBrowser();
+  void showRestorePointsDialog();
+  void refreshRestorePointsDialog();
+  [[nodiscard]] bool createNamedRestorePoint(const QString& name, bool silent = false);
+  [[nodiscard]] bool restoreNamedRestorePoint(const QString& id);
   void finishProxyJob(const std::string& asset_id, const ProxyOutcome& outcome);
   void finishVideoExport(const VideoExportOutcome& outcome);
   void clearExportCheckpoint();

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 #include "editor_controller.hpp"
+#include "restore_points.hpp"
 #include "project_recent_paths.hpp"
 #include "media_reconstruction.hpp"
 #include "path_utils.hpp"
@@ -233,6 +234,7 @@ private slots:
   void trackVisibilityPresetIsolatesAndRestores();
   void previewQualityPersistsAndUpdatesProgramTitle();
   void backgroundJobsPauseDuringPlayback();
+  void namedRestorePointsPersistManifest();
 
 private:
   std::unique_ptr<QTemporaryDir> application_data_;
@@ -2217,6 +2219,24 @@ void EditorControllerTest::trackVisibilityPresetIsolatesAndRestores() {
     QVERIFY(track.visible);
   }
   QVERIFY(!restore->isEnabled());
+}
+
+void EditorControllerTest::namedRestorePointsPersistManifest() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const std::filesystem::path recovery = directory.path().toStdString();
+  video_editor::app::RestorePointEntry entry;
+  entry.id = "restore-1";
+  entry.name = "Before export";
+  entry.checkpoint = recovery / "restore-points" / "before-export.veproj";
+  entry.revision = 12;
+  entry.sequence_name = "Main";
+  entry.created_utc_ms = 1'700'000'000'000;
+  video_editor::app::appendNamedRestorePoint(recovery, entry);
+  const auto loaded = video_editor::app::loadNamedRestorePoints(recovery);
+  QCOMPARE(loaded.size(), std::size_t{1});
+  QCOMPARE(loaded.front().name, entry.name);
+  QCOMPARE(loaded.front().revision, entry.revision);
 }
 
 void EditorControllerTest::backgroundJobsPauseDuringPlayback() {

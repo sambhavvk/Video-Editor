@@ -10,6 +10,8 @@ add_library(video_editor_app_controller
   path_utils.hpp
   project_recent_paths.cpp
   project_recent_paths.hpp
+  restore_points.cpp
+  restore_points.hpp
   session_event_log.cpp
   session_event_log.hpp
   timecode_util.cpp

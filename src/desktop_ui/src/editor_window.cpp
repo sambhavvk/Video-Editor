@@ -933,6 +933,7 @@ void EditorWindow::createPanels() {
   deliver_panel_->setExportEnabled(false);
   scopes_widget_ = new ScopeWidget(this);
   cache_browser_ = new CacheBrowserDialog(this);
+  restore_points_dialog_ = new RestorePointsDialog(this);
   export_dialog_ = new ExportDialog(this);
 
   media_dock_ = makeDock(QStringLiteral("mediaDock"), tr("Media Bin"), media_bin_, this);
@@ -1007,6 +1008,8 @@ void EditorWindow::createActions() {
          tr("Export the current sequence as OpenTimelineIO JSON"));
   create(QStringLiteral("manageMediaCache"), tr("Manage Media Cache…"),
          tr("Review cache use and set the media cache budget"));
+  create(QStringLiteral("manageRestorePoints"), tr("Restore Points…"),
+         tr("Create, browse, and restore named project checkpoints"));
   auto* exportAction = create(QStringLiteral("export"), tr("Export Video…"),
                               tr("Export the current sequence"), QKeySequence{tr("Ctrl+E")});
   exportAction->setIcon(style()->standardIcon(QStyle::SP_DialogSaveButton));
@@ -1490,6 +1493,7 @@ void EditorWindow::createMenus() {
   file->addAction(action(QStringLiteral("exportOtio")));
   file->addSeparator();
   file->addAction(action(QStringLiteral("manageMediaCache")));
+  file->addAction(action(QStringLiteral("manageRestorePoints")));
   file->addAction(action(QStringLiteral("export")));
   file->addAction(action(QStringLiteral("grabFrame")));
   file->addSeparator();
@@ -1740,6 +1744,12 @@ void EditorWindow::connectControllerSurface() {
   connect(action(QStringLiteral("manageMediaCache")), &QAction::triggered, this, [this] {
     emit manageMediaCacheRequested();
     cache_browser_->exec();
+  });
+  connect(action(QStringLiteral("manageRestorePoints")), &QAction::triggered, this, [this] {
+    emit manageRestorePointsRequested();
+    if (restore_points_dialog_ != nullptr) {
+      restore_points_dialog_->exec();
+    }
   });
   connect(program_viewer_, &ProgramViewer::filesDropped, this,
           [this](const QStringList&) { emit importMediaRequested(); });

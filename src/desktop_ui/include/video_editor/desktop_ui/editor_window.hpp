@@ -7,6 +7,7 @@
 #include "video_editor/desktop_ui/cache_browser_dialog.hpp"
 #include "video_editor/desktop_ui/export_dialog.hpp"
 #include "video_editor/desktop_ui/program_viewer.hpp"
+#include "video_editor/desktop_ui/restore_points_dialog.hpp"
 #include "video_editor/desktop_ui/ui_types.hpp"
 
 #include <QHash>
@@ -105,6 +106,9 @@ public:
   [[nodiscard]] CacheBrowserDialog* cacheBrowser() const noexcept {
     return cache_browser_;
   }
+  [[nodiscard]] RestorePointsDialog* restorePointsDialog() const noexcept {
+    return restore_points_dialog_;
+  }
   [[nodiscard]] QSettings* settings() const noexcept {
     return settings_;
   }
@@ -168,6 +172,7 @@ signals:
   void exportOtioRequested();
   void importOtioRequested();
   void manageMediaCacheRequested();
+  void manageRestorePointsRequested();
   void exportConfirmed(const QString& destination, const QString& presetId);
   void undoRequested();
   void redoRequested();
@@ -370,6 +375,7 @@ private:
   DeliverPanelWidget* deliver_panel_{nullptr};
   ScopeWidget* scopes_widget_{nullptr};
   CacheBrowserDialog* cache_browser_{nullptr};
+  RestorePointsDialog* restore_points_dialog_{nullptr};
   ExportDialog* export_dialog_{nullptr};
 
   QDockWidget* media_dock_{nullptr};
