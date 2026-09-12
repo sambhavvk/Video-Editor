@@ -15,6 +15,7 @@
 #include "video_editor/audio_engine/miniaudio_output_device.h"
 #include "video_editor/audio_engine/output_latency_calibration.h"
 #include "video_editor/audio_engine/realtime_buffer_policy.h"
+#include "video_editor/audio_engine/shuttle_pitch_correct.h"
 #include "video_editor/audio_render/loudness_normalize.h"
 #include "video_editor/audio_render/music_ducking.h"
 #include "video_editor/audio_render/original_audio_registry.h"
@@ -1352,7 +1353,11 @@ public:
                                 edit::TimelineSnapshot snapshot, const std::int64_t endSample,
                                 const double transport_rate, const std::int64_t origin_sample)
       : renderer_(std::move(renderer)), snapshot_(std::move(snapshot)), end_sample_(endSample),
-        transport_rate_(transport_rate), origin_sample_(origin_sample) {}
+        transport_rate_(transport_rate), origin_sample_(origin_sample) {
+    if (audio::shuttle_pitch_correction_supported(transport_rate_)) {
+      pitch_corrector_.reset(transport_rate_, audio::kPlaybackAudioFormat.channels);
+    }
+  }
 
   audio::PlaybackRenderResult render(const audio::PlaybackRenderRequest& request) override {
     if (request.cancellation.stop_requested()) {
@@ -1364,7 +1369,10 @@ public:
     if (isUnityPlaybackRate(transport_rate_)) {
       return renderUnity(request);
     }
-    return renderShuttle(request);
+    if (audio::shuttle_pitch_correction_supported(transport_rate_)) {
+      return renderShuttlePitchCorrected(request);
+    }
+    return renderShuttleResampled(request);
   }
 
 private:
@@ -1399,7 +1407,49 @@ private:
     return audio::PlaybackRenderResult::ready(std::move(block));
   }
 
-  audio::PlaybackRenderResult renderShuttle(const audio::PlaybackRenderRequest& request) {
+  audio::PlaybackRenderResult renderShuttlePitchCorrected(
+      const audio::PlaybackRenderRequest& request) {
+    const std::int64_t first = timelineSample(request.start_sample);
+    const std::int64_t last =
+        timelineSample(request.start_sample + static_cast<std::int64_t>(request.sample_count) - 1);
+    if (first >= end_sample_) {
+      return audio::PlaybackRenderResult::end_of_stream();
+    }
+    const std::int64_t render_start = std::max<std::int64_t>(first, 0);
+    const std::int64_t render_end = std::min(last + 1, end_sample_);
+    audio::AudioBlock output(audio::kPlaybackAudioFormat, request.start_sample,
+                             request.sample_count);
+    output.clear();
+    if (render_end <= render_start) {
+      return audio::PlaybackRenderResult::ready(std::move(output));
+    }
+    auto rendered = renderer_->render(
+        snapshot_, {.start_sample = render_start,
+                    .sample_count = static_cast<std::size_t>(render_end - render_start),
+                    .cancellation = request.cancellation});
+    if (!rendered) {
+      const auto& error = rendered.error();
+      if (error.code == audio_render::AudioRenderErrorCode::Cancelled) {
+        return audio::PlaybackRenderResult::cancelled(error.message);
+      }
+      return audio::PlaybackRenderResult::failure(error.message);
+    }
+    const audio::AudioBlock source = std::move(rendered).value();
+    if (source.start_sample() != render_start ||
+        source.frame_count() != static_cast<std::size_t>(render_end - render_start) ||
+        source.format().channels != audio::kPlaybackAudioFormat.channels) {
+      return audio::PlaybackRenderResult::failure(
+          "timeline audio renderer returned a block outside the requested 48 kHz stereo range");
+    }
+    try {
+      pitch_corrector_.stretch(source, output);
+    } catch (const std::exception& exception) {
+      return audio::PlaybackRenderResult::failure(exception.what());
+    }
+    return audio::PlaybackRenderResult::ready(std::move(output));
+  }
+
+  audio::PlaybackRenderResult renderShuttleResampled(const audio::PlaybackRenderRequest& request) {
     const std::int64_t first = timelineSample(request.start_sample);
     const std::int64_t last =
         timelineSample(request.start_sample + static_cast<std::int64_t>(request.sample_count) - 1);
@@ -1454,6 +1504,7 @@ private:
   std::int64_t end_sample_{0};
   double transport_rate_{1.0};
   std::int64_t origin_sample_{0};
+  audio::ShuttlePitchCorrector pitch_corrector_;
 };
 
 } // namespace

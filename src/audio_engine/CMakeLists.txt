@@ -14,6 +14,7 @@ add_library(video_editor_audio_engine
   src/output_latency_calibration.cpp
   src/playback_meter.cpp
   src/realtime_playback.cpp
+  src/shuttle_pitch_correct.cpp
   src/spsc_audio_ring.cpp)
 
 add_library(video_editor::audio_engine ALIAS video_editor_audio_engine)

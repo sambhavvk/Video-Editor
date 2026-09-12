@@ -21,7 +21,8 @@ often and keep the original media files available.
   Its playhead uses a latency-compensated audio-master position, not the end of the submitted device
   buffer; the remaining latency is reported as uncertainty. Otherwise it clearly falls back to
   silent timer-driven video. J/K/L shuttle at 0.5×, 1×, 2×, 4×, and 8× (including reverse) keeps
-  audible audio when the output device is available; pitch is not preserved. Device choice is
+  audible audio when the output device is available; forward 0.5×–8× shuttle preserves pitch,
+  while reverse shuttle stays resampled. Device choice is
   persisted; one-second background polling pauses safely on loss and reopens a returned selected or
   system-default endpoint while playback is still intended.
 - Creator presets export FOSS VP9/Opus WebM, not H.264/AAC. On Windows the exporter can select
@@ -348,7 +349,8 @@ requested frame wins.
 If the adapter is not compiled, the default device cannot open/start, the renderer cannot prefill,
 or the device later stops, the application reports the reason and continues with silent
 timer-driven video. J/K/L shuttle at 0.5×, 2×, 4×, and 8× (including reverse) stays audible when
-the output device is available; audio is resampled, not pitch-preserved. An underrun inserts silence while
+the output device is available; forward shuttle uses pitch-preserving preview stretch, while reverse
+shuttle stays resampled. An underrun inserts silence while
 the master counter continues and reports a local warning; this prevents a backwards clock jump but
 does not make the present build a release-grade A/V-sync reference. Accelerated one-hour zero-xrun and
 two-hour less-than-one-frame drift simulations pass, but the stricter 10 ms requirement and the
