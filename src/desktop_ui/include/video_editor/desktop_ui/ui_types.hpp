@@ -58,6 +58,16 @@ enum class PreviewQualityPreset : std::uint8_t {
   Quarter,
 };
 
+struct DeliveryRecipeSnapshot {
+  QString preset_id;
+  QString destination;
+  int resolution_index{0};
+  int frame_rate_index{0};
+  int caption_mode_index{0};
+  bool use_export_range{false};
+  bool prefer_hardware{false};
+};
+
 struct ProjectHealthIssueView {
   QString issueId;
   QString category;

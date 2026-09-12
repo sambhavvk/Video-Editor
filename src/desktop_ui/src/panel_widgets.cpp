@@ -16,6 +16,8 @@
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QInputDialog>
+#include <QLineEdit>
 #include <QHash>
 #include <QHeaderView>
 #include <QIcon>
@@ -3427,7 +3429,39 @@ DeliverPanelWidget::DeliverPanelWidget(QWidget* parent) : QWidget(parent) {
   export_button_->setIcon(style()->standardIcon(QStyle::SP_DialogSaveButton));
   export_button_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
   export_button_->setMinimumHeight(38);
+  auto* recipe_row = new QHBoxLayout;
+  saved_recipes_ = new QComboBox(this);
+  saved_recipes_->setObjectName(QStringLiteral("savedDeliveryRecipes"));
+  saved_recipes_->setAccessibleName(tr("Saved delivery recipes"));
+  save_recipe_ = new QPushButton(tr("Save recipe…"), this);
+  save_recipe_->setObjectName(QStringLiteral("saveDeliveryRecipe"));
+  queue_recipe_ = new QPushButton(tr("Queue recipe"), this);
+  queue_recipe_->setObjectName(QStringLiteral("queueDeliveryRecipe"));
+  recipe_row->addWidget(saved_recipes_, 1);
+  recipe_row->addWidget(save_recipe_);
+  recipe_row->addWidget(queue_recipe_);
+  layout->addLayout(recipe_row);
+
   layout->addWidget(export_button_);
+
+  connect(save_recipe_, &QPushButton::clicked, this, [this] {
+    bool accepted = false;
+    const QString name =
+        QInputDialog::getText(this, tr("Save delivery recipe"), tr("Recipe name:"),
+                              QLineEdit::Normal, tr("Master delivery"), &accepted);
+    if (accepted && !name.trimmed().isEmpty()) {
+      emit saveDeliveryRecipeRequested(name.trimmed());
+    }
+  });
+  connect(queue_recipe_, &QPushButton::clicked, this, [this] {
+    const QString id = selectedRecipeId();
+    if (!id.isEmpty()) {
+      emit queueDeliveryRecipeRequested(id);
+    }
+  });
+  connect(saved_recipes_, &QComboBox::currentIndexChanged, this, [this](const int index) {
+    queue_recipe_->setEnabled(index > 0);
+  });
 
   connect(browse_button_, &QToolButton::clicked, this,
           &DeliverPanelWidget::destinationBrowseRequested);
@@ -3793,6 +3827,47 @@ bool DeliverPanelWidget::preferHardwareEncoder() const {
 
 bool DeliverPanelWidget::useExportRange() const {
   return use_export_range_ != nullptr && use_export_range_->isChecked();
+}
+
+DeliveryRecipeSnapshot DeliverPanelWidget::captureRecipeSnapshot() const {
+  return {.preset_id = selectedPresetId(),
+          .destination = destinationPath(),
+          .resolution_index = resolution_->currentIndex(),
+          .frame_rate_index = frame_rate_->currentIndex(),
+          .caption_mode_index = caption_mode_->currentIndex(),
+          .use_export_range = useExportRange(),
+          .prefer_hardware = preferHardwareEncoder()};
+}
+
+void DeliverPanelWidget::applyRecipeSnapshot(const DeliveryRecipeSnapshot& snapshot) {
+  const int preset_index = preset_->findData(snapshot.preset_id);
+  if (preset_index >= 0) {
+    preset_->setCurrentIndex(preset_index);
+  }
+  setDestinationPath(snapshot.destination);
+  resolution_->setCurrentIndex(snapshot.resolution_index);
+  frame_rate_->setCurrentIndex(snapshot.frame_rate_index);
+  caption_mode_->setCurrentIndex(snapshot.caption_mode_index);
+  use_export_range_->setChecked(snapshot.use_export_range);
+  hardware_encoder_->setChecked(snapshot.prefer_hardware);
+  refreshDeliveryOverview();
+}
+
+void DeliverPanelWidget::setSavedRecipes(const QVector<QPair<QString, QString>>& recipes) {
+  const QSignalBlocker blocker(saved_recipes_);
+  saved_recipes_->clear();
+  saved_recipes_->addItem(tr("Select a saved recipe…"), QString());
+  for (const auto& recipe : recipes) {
+    saved_recipes_->addItem(recipe.second, recipe.first);
+  }
+  queue_recipe_->setEnabled(false);
+}
+
+QString DeliverPanelWidget::selectedRecipeId() const {
+  if (saved_recipes_ == nullptr || saved_recipes_->currentIndex() <= 0) {
+    return {};
+  }
+  return saved_recipes_->currentData().toString();
 }
 
 ProjectHealthPanelWidget::ProjectHealthPanelWidget(QWidget* parent) : QWidget(parent) {

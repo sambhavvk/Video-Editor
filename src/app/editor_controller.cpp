@@ -3,6 +3,7 @@
 #include "media_reconstruction.hpp"
 #include "path_utils.hpp"
 #include "project_recent_paths.hpp"
+#include "delivery_recipes.hpp"
 #include "restore_points.hpp"
 #include "timecode_util.hpp"
 #include "session_event_log.hpp"
@@ -1594,6 +1595,11 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::cancelVideoExport);
   connect(window_.deliverPanel(), &desktop_ui::DeliverPanelWidget::cancelQueuedExportRequested, this,
           &EditorController::cancelQueuedExport);
+  connect(window_.deliverPanel(), &desktop_ui::DeliverPanelWidget::saveDeliveryRecipeRequested, this,
+          &EditorController::saveDeliveryRecipe);
+  connect(window_.deliverPanel(), &desktop_ui::DeliverPanelWidget::queueDeliveryRecipeRequested,
+          this, &EditorController::queueDeliveryRecipe);
+  refreshDeliveryRecipes();
   connect(window_.deliverPanel(), &desktop_ui::DeliverPanelWidget::destinationBrowseRequested, this,
           [this] {
             bool numeric = false;
@@ -12165,6 +12171,70 @@ void EditorController::handleProjectHealthRepair(const QString& issueId) {
     refreshProjectHealthPanel();
     refreshExportJobViews();
   }
+}
+
+void EditorController::refreshDeliveryRecipes() {
+  if (window_.deliverPanel() == nullptr) {
+    return;
+  }
+  QVector<QPair<QString, QString>> recipes;
+  for (const DeliveryRecipeEntry& entry : loadDeliveryRecipes(windowSettings(window_))) {
+    recipes.push_back({entry.id, entry.name});
+  }
+  window_.deliverPanel()->setSavedRecipes(recipes);
+}
+
+void EditorController::saveDeliveryRecipe(const QString& name) {
+  if (window_.deliverPanel() == nullptr) {
+    return;
+  }
+  const desktop_ui::DeliveryRecipeSnapshot snapshot =
+      window_.deliverPanel()->captureRecipeSnapshot();
+  if (snapshot.destination.isEmpty()) {
+    window_.showTransientMessage(tr("Choose a destination before saving a delivery recipe"));
+    return;
+  }
+  DeliveryRecipeEntry entry;
+  entry.id = QString::fromStdString(edit::EntityId::generate().toString());
+  entry.name = name;
+  entry.preset_id = snapshot.preset_id;
+  entry.primary_destination = snapshot.destination;
+  entry.resolution_index = snapshot.resolution_index;
+  entry.frame_rate_index = snapshot.frame_rate_index;
+  entry.caption_mode_index = snapshot.caption_mode_index;
+  entry.use_export_range = snapshot.use_export_range;
+  entry.prefer_hardware = snapshot.prefer_hardware;
+  appendDeliveryRecipe(windowSettings(window_), entry);
+  refreshDeliveryRecipes();
+  window_.showTransientMessage(tr("Saved delivery recipe \"%1\"").arg(name));
+}
+
+void EditorController::queueDeliveryRecipe(const QString& recipeId) {
+  const std::optional<DeliveryRecipeEntry> recipe =
+      findDeliveryRecipe(windowSettings(window_), recipeId);
+  if (!recipe.has_value() || window_.deliverPanel() == nullptr) {
+    window_.showTransientMessage(tr("That delivery recipe is no longer available"));
+    return;
+  }
+  desktop_ui::DeliveryRecipeSnapshot snapshot;
+  snapshot.preset_id = recipe->preset_id;
+  snapshot.destination = recipe->primary_destination;
+  snapshot.resolution_index = recipe->resolution_index;
+  snapshot.frame_rate_index = recipe->frame_rate_index;
+  snapshot.caption_mode_index = recipe->caption_mode_index;
+  snapshot.use_export_range = recipe->use_export_range;
+  snapshot.prefer_hardware = recipe->prefer_hardware;
+  window_.deliverPanel()->applyRecipeSnapshot(snapshot);
+  QStringList destinations{recipe->primary_destination};
+  destinations.append(recipe->extra_destinations);
+  for (const QString& destination : destinations) {
+    if (destination.isEmpty()) {
+      continue;
+    }
+    (void)startVideoExport(pathFromQString(destination), recipe->preset_id, false);
+  }
+  window_.showTransientMessage(
+      tr("Queued %1 export job(s) from recipe \"%2\"").arg(destinations.size()).arg(recipe->name));
 }
 
 bool EditorController::restoreNamedRestorePoint(const QString& id) {

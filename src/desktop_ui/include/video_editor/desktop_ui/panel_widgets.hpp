@@ -491,6 +491,10 @@ public:
   void loadPlatformPresets();
   void setEncoderCapabilities(const QString& summary);
   [[nodiscard]] QString deliveryOverviewText() const;
+  [[nodiscard]] DeliveryRecipeSnapshot captureRecipeSnapshot() const;
+  void applyRecipeSnapshot(const DeliveryRecipeSnapshot& snapshot);
+  void setSavedRecipes(const QVector<QPair<QString, QString>>& recipes);
+  [[nodiscard]] QString selectedRecipeId() const;
   void setDestinationPath(const QString& path);
   [[nodiscard]] QString destinationPath() const;
   [[nodiscard]] QString captionModeKey() const;
@@ -512,6 +516,8 @@ signals:
   void destinationBrowseRequested();
   void cancelRequested();
   void cancelQueuedExportRequested(const QString& jobId);
+  void saveDeliveryRecipeRequested(const QString& name);
+  void queueDeliveryRecipeRequested(const QString& recipeId);
 
 private:
   void refreshExportJobSelection();
@@ -537,6 +543,9 @@ private:
   QLabel* encoder_summary_{nullptr};
   QLabel* delivery_overview_{nullptr};
   QLabel* preset_notes_{nullptr};
+  QComboBox* saved_recipes_{nullptr};
+  QPushButton* save_recipe_{nullptr};
+  QPushButton* queue_recipe_{nullptr};
   bool export_enabled_{false};
   bool selected_preset_available_{true};
   bool hardware_vp9_available_{false};

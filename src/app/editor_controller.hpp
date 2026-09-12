@@ -499,6 +499,9 @@ private:
   [[nodiscard]] bool restoreNamedRestorePoint(const QString& id);
   void refreshProjectHealthPanel();
   void handleProjectHealthRepair(const QString& issueId);
+  void refreshDeliveryRecipes();
+  void saveDeliveryRecipe(const QString& name);
+  void queueDeliveryRecipe(const QString& recipeId);
   void finishProxyJob(const std::string& asset_id, const ProxyOutcome& outcome);
   void finishVideoExport(const VideoExportOutcome& outcome);
   void clearExportCheckpoint();

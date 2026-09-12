@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 #include "editor_controller.hpp"
+#include "delivery_recipes.hpp"
 #include "restore_points.hpp"
 #include "project_recent_paths.hpp"
 #include "media_reconstruction.hpp"
@@ -235,6 +236,7 @@ private slots:
   void previewQualityPersistsAndUpdatesProgramTitle();
   void backgroundJobsPauseDuringPlayback();
   void namedRestorePointsPersistManifest();
+  void deliveryRecipesPersistInSettings();
 
 private:
   std::unique_ptr<QTemporaryDir> application_data_;
@@ -2219,6 +2221,22 @@ void EditorControllerTest::trackVisibilityPresetIsolatesAndRestores() {
     QVERIFY(track.visible);
   }
   QVERIFY(!restore->isEnabled());
+}
+
+void EditorControllerTest::deliveryRecipesPersistInSettings() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  QSettings settings(directory.filePath(QStringLiteral("delivery-recipes.ini")), QSettings::IniFormat);
+  video_editor::app::DeliveryRecipeEntry entry;
+  entry.id = QStringLiteral("recipe-1");
+  entry.name = QStringLiteral("YouTube master");
+  entry.preset_id = QStringLiteral("1");
+  entry.primary_destination = QStringLiteral("/tmp/master.webm");
+  video_editor::app::appendDeliveryRecipe(settings, entry);
+  const auto loaded = video_editor::app::loadDeliveryRecipes(settings);
+  QCOMPARE(loaded.size(), std::size_t{1});
+  QCOMPARE(loaded.front().name, entry.name);
+  QCOMPARE(loaded.front().primary_destination, entry.primary_destination);
 }
 
 void EditorControllerTest::namedRestorePointsPersistManifest() {

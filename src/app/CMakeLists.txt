@@ -12,6 +12,8 @@ add_library(video_editor_app_controller
   project_recent_paths.hpp
   restore_points.cpp
   restore_points.hpp
+  delivery_recipes.cpp
+  delivery_recipes.hpp
   session_event_log.cpp
   session_event_log.hpp
   timecode_util.cpp
