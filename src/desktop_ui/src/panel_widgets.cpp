@@ -3041,9 +3041,23 @@ CaptionsPanelWidget::CaptionsPanelWidget(QWidget* parent) : QWidget(parent) {
   auto* reviewGroup = new QGroupBox(tr("Review suggestions"), this);
   reviewGroup->setObjectName(QStringLiteral("captionReviewGroup"));
   auto* reviewLayout = new QVBoxLayout(reviewGroup);
+  auto* reviewOptions = new QFormLayout;
+  review_breathing_room_ = new QSpinBox(reviewGroup);
+  review_breathing_room_->setObjectName(QStringLiteral("captionReviewBreathingRoom"));
+  review_breathing_room_->setAccessibleName(tr("Breathing room around proposed cuts"));
+  review_breathing_room_->setRange(0, 500);
+  review_breathing_room_->setSuffix(tr(" ms"));
+  review_breathing_room_->setValue(5);
+  reviewOptions->addRow(tr("Breathing room"), review_breathing_room_);
+  review_protect_range_ = new QCheckBox(tr("Protect program In/Out range"), reviewGroup);
+  review_protect_range_->setObjectName(QStringLiteral("captionReviewProtectRange"));
+  review_protect_range_->setAccessibleName(tr("Keep the program In/Out range protected from cuts"));
+  reviewOptions->addRow(QString{}, review_protect_range_);
+  reviewLayout->addLayout(reviewOptions);
   review_ = new QListWidget(reviewGroup);
   review_->setObjectName(QStringLiteral("captionReviewList"));
   review_->setAccessibleName(tr("Caption and silence proposals"));
+  review_->setToolTip(tr("Double-click a proposal to audition before and after the cut."));
   reviewLayout->addWidget(review_);
   auto* reviewButtons = new QHBoxLayout;
   apply_review_ = new QPushButton(tr("Apply selected"), reviewGroup);
@@ -3140,6 +3154,16 @@ CaptionsPanelWidget::CaptionsPanelWidget(QWidget* parent) : QWidget(parent) {
     }
     emit reviewProposalToggled(id, item->checkState() == Qt::Checked);
   });
+  connect(review_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem* item) {
+    if (item != nullptr) {
+      emit auditionProposalRequested(item->data(Qt::UserRole).toString());
+    }
+  });
+  const auto emitReviewOptions = [this] { emit reviewOptionsChanged(this->reviewOptions()); };
+  connect(review_breathing_room_, &QSpinBox::valueChanged, this,
+          [emitReviewOptions](int) { emitReviewOptions(); });
+  connect(review_protect_range_, &QCheckBox::toggled, this,
+          [emitReviewOptions](bool) { emitReviewOptions(); });
   connect(apply_review_, &QPushButton::clicked, this, &CaptionsPanelWidget::applyReviewRequested);
   connect(discard_review_, &QPushButton::clicked, this,
           &CaptionsPanelWidget::discardReviewRequested);
@@ -3407,6 +3431,18 @@ void CaptionsPanelWidget::setReviewProposals(const QVector<CaptionProposalView>&
     item->setCheckState(proposal.selected ? Qt::Checked : Qt::Unchecked);
   }
   apply_review_->setEnabled(!proposals_.isEmpty());
+}
+
+void CaptionsPanelWidget::setReviewOptions(const CaptionReviewOptionsView& options) {
+  const QSignalBlocker breathingBlocker(review_breathing_room_);
+  const QSignalBlocker protectBlocker(review_protect_range_);
+  review_breathing_room_->setValue(std::clamp(options.breathingRoomMs, 0, 500));
+  review_protect_range_->setChecked(options.protectProgramRange);
+}
+
+CaptionReviewOptionsView CaptionsPanelWidget::reviewOptions() const {
+  return {.breathingRoomMs = review_breathing_room_->value(),
+          .protectProgramRange = review_protect_range_->isChecked()};
 }
 
 void CaptionsPanelWidget::setAssembledPassages(const QVector<TranscriptPassageView>& passages) {

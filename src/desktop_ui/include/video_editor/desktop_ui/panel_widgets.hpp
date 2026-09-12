@@ -389,6 +389,8 @@ public:
   void setTranscriptionOptions(const TranscriptionOptionsView& options);
   void setCaptionStyle(const CaptionStyleView& style);
   void setReviewProposals(const QVector<CaptionProposalView>& proposals);
+  void setReviewOptions(const CaptionReviewOptionsView& options);
+  [[nodiscard]] CaptionReviewOptionsView reviewOptions() const;
   void setAssembledPassages(const QVector<TranscriptPassageView>& passages);
   [[nodiscard]] QStringList selectedWordIds() const;
   [[nodiscard]] int currentCaptionRow() const;
@@ -414,6 +416,8 @@ signals:
   void captionTimingEdited(const QString& captionId, qint64 start, qint64 end);
   void captionStyleEdited(const QString& captionId, const CaptionStyleView& style);
   void reviewProposalToggled(const QString& proposalId, bool selected);
+  void reviewOptionsChanged(const CaptionReviewOptionsView& options);
+  void auditionProposalRequested(const QString& proposalId);
   void applyReviewRequested();
   void discardReviewRequested();
   void addPassageFromSelectionRequested();
@@ -462,6 +466,8 @@ private:
   QListWidget* review_{nullptr};
   QPushButton* apply_review_{nullptr};
   QPushButton* discard_review_{nullptr};
+  QSpinBox* review_breathing_room_{nullptr};
+  QCheckBox* review_protect_range_{nullptr};
   QGroupBox* passages_group_{nullptr};
   QListWidget* passages_{nullptr};
   QLabel* spelling_hint_{nullptr};

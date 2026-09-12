@@ -153,6 +153,26 @@ void explainUnavailable(desktop_ui::EditorWindow& window, const char* location,
 }
 
 constexpr double kUncertainWordProbability = 0.75;
+
+[[nodiscard]] edit::Time breathingPaddingTime(const std::uint32_t timescale, const int ms) {
+  if (ms <= 0) {
+    return edit::Time{};
+  }
+  return edit::Time(static_cast<std::int64_t>(ms) * 48, 1'000)
+      .rescaledTo(timescale, edit::RoundingMode::NearestTiesEven);
+}
+
+[[nodiscard]] edit::TimeRange insetCutRange(const edit::TimeRange& range, const edit::Time padding) {
+  if (range.empty() || padding.isZero()) {
+    return range;
+  }
+  const edit::Time start = range.start + padding;
+  const edit::Time end = range.end() - padding;
+  if (end <= start) {
+    return {};
+  }
+  return edit::TimeRange(start, end - start);
+}
 // #endregion
 
 QSettings& windowSettings(desktop_ui::EditorWindow& window) {
@@ -1620,6 +1640,10 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::applyCaptionReview);
   connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::discardReviewRequested, this,
           &EditorController::discardCaptionReview);
+  connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::reviewOptionsChanged, this,
+          &EditorController::updateCaptionReviewOptions);
+  connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::auditionProposalRequested,
+          this, &EditorController::auditionCaptionProposal);
   connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::addPassageFromSelectionRequested,
           this, &EditorController::addPassageFromSelection);
   connect(window_.captionsPanel(), &desktop_ui::CaptionsPanelWidget::removePassageRequested, this,
@@ -6573,6 +6597,7 @@ void EditorController::startTranscription(const desktop_ui::TranscriptionOptions
   caption_proposals_.clear();
   proposal_cut_ranges_.clear();
   proposal_caption_indices_.clear();
+  caption_raw_silence_ranges_.clear();
   window_.captionsPanel()->setReviewProposals({});
   window_.captionsPanel()->setTranscriptionState(desktop_ui::TranscriptionState::Running,
                                                  tr("Transcribing selected audio…"), 0);
@@ -6758,6 +6783,9 @@ void EditorController::handleTranscriptionEvent(const jobs::v1::WorkerEvent& eve
     for (const auto& word : addition.words) {
       if (!isFiller(QString::fromStdString(word.text)))
         continue;
+      if (overlapsProtectedCaptionCut(word.range)) {
+        continue;
+      }
       caption_proposals_.push_back(
           {.id = QString::fromStdString(word.id.toString()),
            .kind = QStringLiteral("Transcript filler"),
@@ -6881,9 +6909,42 @@ void EditorController::captionAnalysisFinished() {
     window_.showTransientMessage(tr("Measured silence unavailable: %1").arg(outcome.error));
     return;
   }
+  caption_raw_silence_ranges_ = outcome.silence_ranges;
+  regenerateCaptionReviewProposals();
+}
+
+void EditorController::updateCaptionReviewOptions(
+    const desktop_ui::CaptionReviewOptionsView& options) {
+  caption_review_options_ = options;
+  regenerateCaptionReviewProposals();
+}
+
+void EditorController::regenerateCaptionReviewProposals() {
   const edit::Sequence* sequence = currentSequence();
-  if (sequence == nullptr)
+  if (sequence == nullptr) {
     return;
+  }
+  QVector<desktop_ui::CaptionProposalView> retained;
+  QVector<edit::TimeRange> retainedCuts;
+  QVector<int> retainedCaptionIndices;
+  retained.reserve(caption_proposals_.size());
+  retainedCuts.reserve(caption_proposals_.size());
+  retainedCaptionIndices.reserve(caption_proposals_.size());
+  for (qsizetype index = 0; index < caption_proposals_.size(); ++index) {
+    if (caption_proposals_.at(index).kind == QStringLiteral("Measured silence")) {
+      continue;
+    }
+    retained.push_back(caption_proposals_.at(index));
+    retainedCuts.push_back(proposal_cut_ranges_.value(index));
+    retainedCaptionIndices.push_back(proposal_caption_indices_.value(index));
+  }
+  caption_proposals_ = std::move(retained);
+  proposal_cut_ranges_ = std::move(retainedCuts);
+  proposal_caption_indices_ = std::move(retainedCaptionIndices);
+
+  const edit::Time padding =
+      breathingPaddingTime(transcription_clip_range_.start.timescale(),
+                           caption_review_options_.breathingRoomMs);
   const std::int64_t clipStartSample =
       transcription_clip_range_.start
           .rescaledTo(audio_render::kTimelineAudioSampleRate, edit::RoundingMode::NearestTiesEven)
@@ -6892,14 +6953,17 @@ void EditorController::captionAnalysisFinished() {
       transcription_clip_range_.end()
           .rescaledTo(audio_render::kTimelineAudioSampleRate, edit::RoundingMode::NearestTiesEven)
           .value();
-  constexpr std::int64_t kSilencePaddingSamples = 240; // 5 ms safe cut padding.
-  for (const auto& silence : outcome.silence_ranges) {
+  for (const auto& silence : caption_raw_silence_ranges_) {
     const audio_render::SilenceRange padded{
-        std::max(clipStartSample, silence.start_sample + kSilencePaddingSamples),
-        std::min(clipEndSample, silence.end_sample - kSilencePaddingSamples)};
-    if (padded.end_sample <= padded.start_sample)
+        std::max(clipStartSample, silence.start_sample),
+        std::min(clipEndSample, silence.end_sample)};
+    if (padded.end_sample <= padded.start_sample) {
       continue;
-    const edit::TimeRange range = padded.time_range();
+    }
+    edit::TimeRange range = insetCutRange(padded.time_range(), padding);
+    if (range.empty() || overlapsProtectedCaptionCut(range)) {
+      continue;
+    }
     caption_proposals_.push_back(
         {.id = QStringLiteral("silence-%1-%2").arg(silence.start_sample).arg(silence.end_sample),
          .kind = QStringLiteral("Measured silence"),
@@ -6913,6 +6977,49 @@ void EditorController::captionAnalysisFinished() {
     proposal_caption_indices_.push_back(-1);
   }
   window_.captionsPanel()->setReviewProposals(caption_proposals_);
+  window_.captionsPanel()->setReviewOptions(caption_review_options_);
+}
+
+bool EditorController::overlapsProtectedCaptionCut(const edit::TimeRange& cut) const {
+  if (!caption_review_options_.protectProgramRange ||
+      (!program_mark_in_.has_value() && !program_mark_out_.has_value())) {
+    return false;
+  }
+  const edit::Time protected_start =
+      program_mark_in_.has_value() ? timelineTime(*program_mark_in_) : edit::Time{};
+  const edit::Sequence* sequence = currentSequence();
+  const edit::Time protected_end =
+      program_mark_out_.has_value()
+          ? timelineTime(*program_mark_out_)
+          : (sequence != nullptr ? edit::sequenceDuration(*sequence) : cut.end());
+  return cut.start < protected_end && cut.end() > protected_start;
+}
+
+void EditorController::auditionCaptionProposal(const QString& proposalId) {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    return;
+  }
+  for (qsizetype index = 0; index < caption_proposals_.size(); ++index) {
+    if (caption_proposals_.at(index).id != proposalId) {
+      continue;
+    }
+    const edit::TimeRange cut = proposal_cut_ranges_.value(index);
+    if (cut.empty()) {
+      window_.showTransientMessage(tr("Select a timeline-cut proposal to audition"));
+      return;
+    }
+    const qint64 preroll = static_cast<qint64>(caption_review_options_.breathingRoomMs) * 48 +
+                           96'000; // breathing room plus two seconds
+    const qint64 postroll = preroll;
+    const qint64 start = std::max<qint64>(0, toUiTime(cut.start) - preroll);
+    play_around_end_ =
+        std::min(toUiTime(cut.end()) + postroll, toUiTime(edit::sequenceDuration(*sequence)));
+    seek(start);
+    setPlaybackRate(1.0);
+    return;
+  }
+  window_.showTransientMessage(tr("Proposal is no longer available; regenerate the transcript"));
 }
 
 void EditorController::applyCaptionReview() {
@@ -6936,8 +7043,12 @@ void EditorController::applyCaptionReview() {
       selected.push_back(pending_caption_additions_.at(static_cast<std::size_t>(captionIndex)));
     }
     const edit::TimeRange cut = proposal_cut_ranges_.value(index);
-    if (!cut.empty())
+    if (!cut.empty()) {
+      if (overlapsProtectedCaptionCut(cut)) {
+        continue;
+      }
       selectedRanges.push_back(cut);
+    }
   }
   std::sort(selectedRanges.begin(), selectedRanges.end(),
             [](const edit::TimeRange& left, const edit::TimeRange& right) {
@@ -6954,6 +7065,7 @@ void EditorController::applyCaptionReview() {
   }
   if (selected.empty() && merged.empty())
     return;
+  const std::string gesture = "caption-review:" + edit::EntityId::generate().toString();
   std::vector<edit::EditCommand> commands;
   if (!merged.empty()) {
     const auto snapshot = editor_->snapshot(sequence->id, editor_->revision());
@@ -6966,7 +7078,7 @@ void EditorController::applyCaptionReview() {
       window_.showTransientMessage(tr("Could not build the selected timeline cut proposal."));
       return;
     }
-    commands.push_back({.operation = *proposal.value().timeline_cuts, .coalescing_key = {}});
+    commands.push_back({.operation = *proposal.value().timeline_cuts, .coalescing_key = gesture});
     auto changes = proposal.value().caption_changes;
     for (const auto& caption : selected) {
       const auto mapped = caption_service::mapCaptionThroughCuts(caption, merged);
@@ -6974,19 +7086,20 @@ void EditorController::applyCaptionReview() {
         changes.added.push_back(*mapped);
     }
     if (!changes.added.empty() || !changes.updated.empty() || !changes.removed.empty()) {
-      commands.push_back({.operation = std::move(changes), .coalescing_key = {}});
+      commands.push_back({.operation = std::move(changes), .coalescing_key = gesture});
     }
   } else if (!selected.empty()) {
     edit::ApplyCaptionChangeSetCommand changes;
     changes.sequence_id = sequence->id;
     changes.added = std::move(selected);
-    commands.push_back({.operation = std::move(changes), .coalescing_key = {}});
+    commands.push_back({.operation = std::move(changes), .coalescing_key = gesture});
   }
   if (applyBatch(std::move(commands), tr("Could not apply caption review suggestions"))) {
     pending_caption_additions_.clear();
     caption_proposals_.clear();
     proposal_cut_ranges_.clear();
     proposal_caption_indices_.clear();
+    caption_raw_silence_ranges_.clear();
     window_.captionsPanel()->setReviewProposals({});
   }
 }
@@ -6996,6 +7109,7 @@ void EditorController::discardCaptionReview() {
   caption_proposals_.clear();
   proposal_cut_ranges_.clear();
   proposal_caption_indices_.clear();
+  caption_raw_silence_ranges_.clear();
   window_.captionsPanel()->setReviewProposals({});
   window_.showTransientMessage(tr("Transcript suggestions discarded"));
 }

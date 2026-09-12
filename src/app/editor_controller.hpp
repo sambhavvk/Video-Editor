@@ -294,6 +294,10 @@ private slots:
   void cancelTranscription();
   void applyCaptionReview();
   void discardCaptionReview();
+  void updateCaptionReviewOptions(const desktop_ui::CaptionReviewOptionsView& options);
+  void auditionCaptionProposal(const QString& proposalId);
+  void regenerateCaptionReviewProposals();
+  [[nodiscard]] bool overlapsProtectedCaptionCut(const edit::TimeRange& cut) const;
   void addPassageFromSelection();
   void removePassage(const QString& passageId);
   void movePassage(const QString& passageId, int delta);
@@ -808,6 +812,8 @@ private:
   QVector<desktop_ui::CaptionProposalView> caption_proposals_;
   QVector<edit::TimeRange> proposal_cut_ranges_;
   QVector<int> proposal_caption_indices_;
+  desktop_ui::CaptionReviewOptionsView caption_review_options_{};
+  std::vector<audio_render::SilenceRange> caption_raw_silence_ranges_;
   std::vector<edit::Caption> pending_caption_additions_;
   std::vector<AssembledPassage> assembled_passages_;
   std::stop_source caption_analysis_stop_source_;

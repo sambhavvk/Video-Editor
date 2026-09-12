@@ -402,6 +402,11 @@ struct TranscriptPassageView final {
   qint64 timelineEnd{0};
 };
 
+struct CaptionReviewOptionsView final {
+  int breathingRoomMs{5};
+  bool protectProgramRange{false};
+};
+
 struct CaptionProposalView final {
   QString id;
   QString kind;
