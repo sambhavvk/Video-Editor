@@ -2,7 +2,9 @@
 #include "multicam_sync.hpp"
 
 #include <algorithm>
+#include <exception>
 #include <limits>
+#include <string>
 
 namespace video_editor::app {
 namespace {
@@ -14,7 +16,12 @@ namespace {
     return std::nullopt;
   }
   try {
-    return std::stoll(found->second);
+    std::size_t consumed = 0;
+    const auto parsed = std::stoll(found->second, &consumed);
+    if (consumed != found->second.size()) {
+      return std::nullopt;
+    }
+    return parsed;
   } catch (const std::exception&) {
     return std::nullopt;
   }
@@ -35,7 +42,11 @@ MulticamTimecodeSyncProposal proposeMulticamTimecodeSync(const edit::Project& pr
                                                          const edit::Time sync_reference) {
   MulticamTimecodeSyncProposal result;
   result.sync_reference = sync_reference;
-  std::optional<std::int64_t> reference_microseconds;
+  struct AngleClock final {
+    std::size_t index{0};
+    edit::Time clock{};
+  };
+  std::vector<AngleClock> clocks;
   for (const edit::MulticamAngle& angle : group.angles) {
     MulticamSyncProposal proposal;
     proposal.angle_id = angle.id;
@@ -62,36 +73,27 @@ MulticamTimecodeSyncProposal proposeMulticamTimecodeSync(const edit::Project& pr
       continue;
     }
     proposal.has_timecode = true;
-    if (!reference_microseconds.has_value() ||
-        *timecode < *reference_microseconds) {
-      reference_microseconds = timecode;
-    }
+    clocks.push_back(AngleClock{
+        .index = result.angles.size(),
+        .clock = edit::Time(*timecode, 1'000'000) + clip->source_range.start,
+    });
     result.angles.push_back(proposal);
   }
 
-  if (!reference_microseconds.has_value()) {
+  if (clocks.empty()) {
     result.requires_manual_choice = true;
     return result;
   }
 
-  for (MulticamSyncProposal& proposal : result.angles) {
-    if (!proposal.has_timecode) {
-      continue;
+  edit::Time earliest = clocks.front().clock;
+  for (const AngleClock& entry : clocks) {
+    if (entry.clock < earliest) {
+      earliest = entry.clock;
     }
-    const edit::MulticamAngle* angle = edit::findMulticamAngle(group, proposal.angle_id);
-    const edit::Clip* clip =
-        angle == nullptr ? nullptr : edit::findClip(sequence, angle->clip_id);
-    if (clip == nullptr) {
-      continue;
-    }
-    const edit::Asset* asset = edit::findAsset(project, clip->asset_id);
-    const auto timecode = asset == nullptr ? std::nullopt : assetTimecodeMicroseconds(*asset);
-    if (!timecode.has_value()) {
-      continue;
-    }
-    proposal.sync_offset =
-        clip->timeline_range.start - sync_reference -
-        edit::Time(*timecode - *reference_microseconds, 1'000'000);
+  }
+  for (const AngleClock& entry : clocks) {
+    MulticamSyncProposal& proposal = result.angles[entry.index];
+    proposal.sync_offset = entry.clock - earliest;
     proposal.note = "timecode aligned to earliest source clock";
   }
   return result;

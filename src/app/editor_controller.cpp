@@ -105,6 +105,7 @@
 #include <system_error>
 #include <unordered_set>
 #include <utility>
+#include <variant>
 
 namespace video_editor::app {
 
@@ -306,6 +307,68 @@ struct LinkedAvEnds final {
             name.contains(QStringLiteral(" fx")));
   }
   return false;
+}
+
+[[nodiscard]] const edit::MulticamGroup*
+multicamGroupForContext(const edit::Project& project, const edit::Sequence& sequence,
+                        const std::optional<edit::EntityId>& active_clip_id,
+                        const edit::Time playhead) {
+  const auto accepts = [&](const edit::MulticamGroup* group) {
+    return group != nullptr && group->sequence_id == sequence.id;
+  };
+  if (active_clip_id.has_value()) {
+    if (const edit::MulticamGroup* group =
+            edit::findMulticamGroupForClip(project, *active_clip_id);
+        accepts(group)) {
+      return group;
+    }
+    const edit::Clip* clip = edit::findClip(sequence, *active_clip_id);
+    if (clip != nullptr && clip->linked_group.has_value()) {
+      const auto ends = linkedAvEnds(sequence, clip->linked_group);
+      if (ends.video != nullptr) {
+        if (const edit::MulticamGroup* group =
+                edit::findMulticamGroupForClip(project, ends.video->id);
+            accepts(group)) {
+          return group;
+        }
+      }
+      if (ends.audio != nullptr) {
+        if (const edit::MulticamGroup* group =
+                edit::findMulticamGroupForClip(project, ends.audio->id);
+            accepts(group)) {
+          return group;
+        }
+      }
+    }
+  }
+  const edit::MulticamGroup* fallback = nullptr;
+  for (const edit::MulticamGroup& group : project.multicam_groups) {
+    if (group.sequence_id != sequence.id) {
+      continue;
+    }
+    if (fallback == nullptr) {
+      fallback = &group;
+    }
+    for (const edit::MulticamAngle& angle : group.angles) {
+      const edit::Clip* clip = edit::findClip(sequence, angle.clip_id);
+      if (clip != nullptr && clip->timeline_range.contains(playhead)) {
+        return &group;
+      }
+    }
+  }
+  return fallback;
+}
+
+[[nodiscard]] std::size_t clipTrackIndex(const edit::Sequence& sequence,
+                                         const edit::EntityId clip_id) {
+  for (std::size_t index = 0; index < sequence.tracks.size(); ++index) {
+    for (const edit::Clip& clip : sequence.tracks[index].clips) {
+      if (clip.id == clip_id) {
+        return index;
+      }
+    }
+  }
+  return sequence.tracks.size();
 }
 
 } // namespace
@@ -5108,14 +5171,29 @@ void EditorController::createMulticamGroupFromSelection() {
     return;
   }
   std::sort(selected_clips.begin(), selected_clips.end(),
-            [](const edit::Clip* lhs, const edit::Clip* rhs) { return lhs->id < rhs->id; });
+            [&](const edit::Clip* lhs, const edit::Clip* rhs) {
+              const std::size_t left_track = clipTrackIndex(*sequence, lhs->id);
+              const std::size_t right_track = clipTrackIndex(*sequence, rhs->id);
+              if (left_track != right_track) {
+                return left_track < right_track;
+              }
+              if (lhs->timeline_range.start != rhs->timeline_range.start) {
+                return lhs->timeline_range.start < rhs->timeline_range.start;
+              }
+              return lhs->id < rhs->id;
+            });
   edit::Time sync_reference = selected_clips.front()->timeline_range.start;
   for (const edit::Clip* clip : selected_clips) {
     sync_reference = std::min(sync_reference, clip->timeline_range.start);
   }
   edit::MulticamGroup group;
   group.sequence_id = sequence->id;
-  group.name = sequence->name + " multicam";
+  const std::string suffix = " multicam";
+  if (sequence->name.size() + suffix.size() <= 256) {
+    group.name = sequence->name + suffix;
+  } else {
+    group.name = "Multicam";
+  }
   group.sync_reference = sync_reference;
   for (std::size_t index = 0; index < selected_clips.size(); ++index) {
     edit::MulticamAngle angle;
@@ -5136,12 +5214,13 @@ void EditorController::createMulticamGroupFromSelection() {
 void EditorController::removeActiveMulticamGroup() {
   const edit::Sequence* sequence = currentSequence();
   const auto project = editor_->projectAt(editor_->revision());
-  if (sequence == nullptr || project == nullptr || !active_clip_id_.has_value()) {
+  if (sequence == nullptr || project == nullptr) {
     explainUnavailable(window_, "editor_controller.cpp:removeActiveMulticamGroup",
                        tr("Select a clip in a multicam group before removing it"));
     return;
   }
-  const edit::MulticamGroup* group = edit::findMulticamGroupForClip(*project, *active_clip_id_);
+  const edit::MulticamGroup* group =
+      multicamGroupForContext(*project, *sequence, active_clip_id_, playheadTime());
   if (group == nullptr) {
     window_.showTransientMessage(tr("The active clip is not part of a multicam group"));
     return;
@@ -5156,10 +5235,11 @@ void EditorController::removeActiveMulticamGroup() {
 void EditorController::setMulticamSyncToPlayhead() {
   const edit::Sequence* sequence = currentSequence();
   const auto project = editor_->projectAt(editor_->revision());
-  if (sequence == nullptr || project == nullptr || !active_clip_id_.has_value()) {
+  if (sequence == nullptr || project == nullptr) {
     return;
   }
-  const edit::MulticamGroup* group = edit::findMulticamGroupForClip(*project, *active_clip_id_);
+  const edit::MulticamGroup* group =
+      multicamGroupForContext(*project, *sequence, active_clip_id_, playheadTime());
   if (group == nullptr) {
     return;
   }
@@ -5185,10 +5265,11 @@ void EditorController::setMulticamSyncToPlayhead() {
 void EditorController::resyncMulticamClips() {
   const edit::Sequence* sequence = currentSequence();
   const auto project = editor_->projectAt(editor_->revision());
-  if (sequence == nullptr || project == nullptr || !active_clip_id_.has_value()) {
+  if (sequence == nullptr || project == nullptr) {
     return;
   }
-  const edit::MulticamGroup* group = edit::findMulticamGroupForClip(*project, *active_clip_id_);
+  const edit::MulticamGroup* group =
+      multicamGroupForContext(*project, *sequence, active_clip_id_, playheadTime());
   if (group == nullptr) {
     return;
   }
@@ -5235,12 +5316,14 @@ void EditorController::resyncMulticamClips() {
 }
 
 void EditorController::setMulticamActiveAngle(const QString& angleIdText) {
+  const edit::Sequence* sequence = currentSequence();
   const auto project = editor_->projectAt(editor_->revision());
   const auto angle_id = parseId(angleIdText);
-  if (project == nullptr || !active_clip_id_.has_value() || !angle_id.has_value()) {
+  if (sequence == nullptr || project == nullptr || !angle_id.has_value()) {
     return;
   }
-  const edit::MulticamGroup* group = edit::findMulticamGroupForClip(*project, *active_clip_id_);
+  const edit::MulticamGroup* group =
+      multicamGroupForContext(*project, *sequence, active_clip_id_, playheadTime());
   if (group == nullptr) {
     return;
   }
@@ -5250,12 +5333,14 @@ void EditorController::setMulticamActiveAngle(const QString& angleIdText) {
 }
 
 void EditorController::setMulticamAudioMaster(const QString& angleIdText) {
+  const edit::Sequence* sequence = currentSequence();
   const auto project = editor_->projectAt(editor_->revision());
   const auto angle_id = parseId(angleIdText);
-  if (project == nullptr || !active_clip_id_.has_value() || !angle_id.has_value()) {
+  if (sequence == nullptr || project == nullptr || !angle_id.has_value()) {
     return;
   }
-  const edit::MulticamGroup* group = edit::findMulticamGroupForClip(*project, *active_clip_id_);
+  const edit::MulticamGroup* group =
+      multicamGroupForContext(*project, *sequence, active_clip_id_, playheadTime());
   if (group == nullptr) {
     return;
   }
@@ -5268,11 +5353,11 @@ void EditorController::recordMulticamSwitchAtPlayhead(const QString& angleIdText
   const edit::Sequence* sequence = currentSequence();
   const auto project = editor_->projectAt(editor_->revision());
   const auto angle_id = parseId(angleIdText);
-  if (sequence == nullptr || project == nullptr || !active_clip_id_.has_value() ||
-      !angle_id.has_value()) {
+  if (sequence == nullptr || project == nullptr || !angle_id.has_value()) {
     return;
   }
-  const edit::MulticamGroup* group = edit::findMulticamGroupForClip(*project, *active_clip_id_);
+  const edit::MulticamGroup* group =
+      multicamGroupForContext(*project, *sequence, active_clip_id_, playheadTime());
   if (group == nullptr) {
     return;
   }
@@ -5288,10 +5373,11 @@ void EditorController::recordMulticamSwitchAtPlayhead(const QString& angleIdText
 void EditorController::cutToMulticamAngleByIndex(const int index) {
   const edit::Sequence* sequence = currentSequence();
   const auto project = editor_->projectAt(editor_->revision());
-  if (sequence == nullptr || project == nullptr || !active_clip_id_.has_value() || index < 1) {
+  if (sequence == nullptr || project == nullptr || index < 1) {
     return;
   }
-  const edit::MulticamGroup* group = edit::findMulticamGroupForClip(*project, *active_clip_id_);
+  const edit::MulticamGroup* group =
+      multicamGroupForContext(*project, *sequence, active_clip_id_, playheadTime());
   if (group == nullptr) {
     return;
   }
@@ -5305,15 +5391,17 @@ void EditorController::cutToMulticamAngleByIndex(const int index) {
 void EditorController::proposeMulticamTimecodeSync() {
   const edit::Sequence* sequence = currentSequence();
   const auto project = editor_->projectAt(editor_->revision());
-  if (sequence == nullptr || project == nullptr || !active_clip_id_.has_value()) {
+  if (sequence == nullptr || project == nullptr) {
     return;
   }
-  const edit::MulticamGroup* group = edit::findMulticamGroupForClip(*project, *active_clip_id_);
+  const edit::MulticamGroup* group =
+      multicamGroupForContext(*project, *sequence, active_clip_id_, playheadTime());
   if (group == nullptr) {
     return;
   }
   const MulticamTimecodeSyncProposal proposal =
-      video_editor::app::proposeMulticamTimecodeSync(*project, *sequence, *group, playheadTime());
+      video_editor::app::proposeMulticamTimecodeSync(*project, *sequence, *group,
+                                                     group->sync_reference);
   QStringList lines;
   for (const MulticamSyncProposal& angle : proposal.angles) {
     lines.push_back(tr("Angle %1: %2")
@@ -5349,10 +5437,11 @@ void EditorController::proposeMulticamTimecodeSync() {
 void EditorController::proposeMulticamWaveformSync() {
   const edit::Sequence* sequence = currentSequence();
   const auto project = editor_->projectAt(editor_->revision());
-  if (sequence == nullptr || project == nullptr || !active_clip_id_.has_value()) {
+  if (sequence == nullptr || project == nullptr) {
     return;
   }
-  const edit::MulticamGroup* group = edit::findMulticamGroupForClip(*project, *active_clip_id_);
+  const edit::MulticamGroup* group =
+      multicamGroupForContext(*project, *sequence, active_clip_id_, playheadTime());
   if (group == nullptr || group->angles.size() < 2) {
     return;
   }
@@ -5365,8 +5454,29 @@ void EditorController::proposeMulticamWaveformSync() {
   if (reference_clip == nullptr) {
     return;
   }
-  const auto reference_waveform = media_waveforms_.find(reference_clip->asset_id.toString());
-  if (reference_waveform == media_waveforms_.end() || reference_waveform->second.isEmpty()) {
+  const auto waveform_for_clip =
+      [this, sequence](const edit::Clip& clip)
+          -> const QVector<desktop_ui::WaveformBucketView>* {
+        auto found = media_waveforms_.find(clip.asset_id.toString());
+        if (found != media_waveforms_.end() && !found->second.isEmpty()) {
+          return &found->second;
+        }
+        if (!clip.linked_group.has_value()) {
+          return nullptr;
+        }
+        const auto ends = linkedAvEnds(*sequence, clip.linked_group);
+        if (ends.audio == nullptr) {
+          return nullptr;
+        }
+        found = media_waveforms_.find(ends.audio->asset_id.toString());
+        if (found != media_waveforms_.end() && !found->second.isEmpty()) {
+          return &found->second;
+        }
+        return nullptr;
+      };
+  const QVector<desktop_ui::WaveformBucketView>* reference_waveform =
+      waveform_for_clip(*reference_clip);
+  if (reference_waveform == nullptr) {
     window_.showTransientMessage(tr("Waveform data is not ready for the audio master angle"));
     return;
   }
@@ -5374,12 +5484,18 @@ void EditorController::proposeMulticamWaveformSync() {
     std::vector<float> peaks;
     peaks.reserve(static_cast<std::size_t>(buckets.size()));
     for (const desktop_ui::WaveformBucketView& bucket : buckets) {
-      peaks.push_back((bucket.minimum + bucket.maximum) * 0.5F);
+      if (bucket.minimum > bucket.maximum) {
+        peaks.push_back(0.0F);
+        continue;
+      }
+      peaks.push_back(std::max(std::fabs(bucket.minimum), std::fabs(bucket.maximum)));
     }
     return peaks;
   };
-  const std::vector<float> reference_peaks = peaks_from_buckets(reference_waveform->second);
+  const std::vector<float> reference_peaks = peaks_from_buckets(*reference_waveform);
+  const edit::Asset* reference_asset = edit::findAsset(*project, reference_clip->asset_id);
   std::vector<std::pair<edit::EntityId, edit::Time>> offsets;
+  QStringList lines;
   for (const edit::MulticamAngle& angle : group->angles) {
     offsets.emplace_back(angle.id, angle.sync_offset);
   }
@@ -5392,25 +5508,45 @@ void EditorController::proposeMulticamWaveformSync() {
     if (clip == nullptr) {
       continue;
     }
-    const auto candidate_waveform = media_waveforms_.find(clip->asset_id.toString());
-    if (candidate_waveform == media_waveforms_.end() || candidate_waveform->second.isEmpty()) {
+    const QVector<desktop_ui::WaveformBucketView>* candidate_waveform = waveform_for_clip(*clip);
+    if (candidate_waveform == nullptr) {
       continue;
     }
     const auto match = audio_render::matchWaveformOffset(
-        reference_peaks, peaks_from_buckets(candidate_waveform->second), 48'000);
+        reference_peaks, peaks_from_buckets(*candidate_waveform), 1);
     if (!match.has_value()) {
       continue;
     }
+    if (reference_asset == nullptr || reference_peaks.empty() ||
+        reference_asset->duration.isZero()) {
+      continue;
+    }
+    const auto bucket_count = static_cast<std::uint32_t>(
+        std::min(reference_peaks.size(),
+                 static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())));
+    const edit::Time delta = reference_asset->duration.scaled(
+        match->lag_samples, bucket_count, edit::RoundingMode::NearestTiesEven);
     matched = true;
     for (auto& [angle_id, offset] : offsets) {
       if (angle_id == angle.id) {
-        offset = offset + match->offset;
+        offset = offset - delta;
+        lines.push_back(tr("%1: confidence %2")
+                            .arg(QString::fromStdString(angle.label),
+                                 QString::number(match->confidence, 'f', 2)));
         break;
       }
     }
   }
   if (!matched) {
     window_.showTransientMessage(tr("Waveform sync found no confident matches"));
+    return;
+  }
+  const int choice = QMessageBox::question(
+      &window_, tr("Apply waveform sync proposal?"),
+      lines.join('\n') + QChar('\n') +
+          tr("Low-confidence matches were skipped. Apply the remaining offsets?"),
+      QMessageBox::Apply | QMessageBox::Cancel, QMessageBox::Cancel);
+  if (choice != QMessageBox::Apply) {
     return;
   }
   if (apply({.operation = edit::SetMulticamSyncCommand{.group_id = group->id,
@@ -9730,6 +9866,8 @@ void EditorController::persistSnapshot(const std::string_view reason) {
 
 bool EditorController::apply(edit::EditCommand command, const QString& failureContext,
                              const bool persist) {
+  const bool live_multicam_cut =
+      std::holds_alternative<edit::RecordMulticamSwitchCommand>(command.operation);
   const std::string operation = edit::commandName(command);
   const auto result = editor_->apply(std::move(command), editor_->revision());
   if (!result) {
@@ -9737,7 +9875,9 @@ bool EditorController::apply(edit::EditCommand command, const QString& failureCo
     window_.showTransientMessage(timelineEditFailureMessage(failureContext, result.error()));
     return false;
   }
-  stopProgramTransport();
+  if (!live_multicam_cut) {
+    stopProgramTransport();
+  }
   if (persist) {
     try {
       persistSnapshot("edit.command");
@@ -10843,7 +10983,8 @@ void EditorController::refreshInspectorView() {
 
   const auto project = editor_->projectAt(editor_->revision());
   if (project != nullptr) {
-    const edit::MulticamGroup* group = edit::findMulticamGroupForClip(*project, clip->id);
+    const edit::MulticamGroup* group =
+        multicamGroupForContext(*project, *sequence, clip->id, playheadTime());
     if (group != nullptr) {
       desktop_ui::MulticamGroupView view;
       view.id = QString::fromStdString(group->id.toString());

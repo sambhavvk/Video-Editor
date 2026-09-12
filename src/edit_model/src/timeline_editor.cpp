@@ -422,7 +422,35 @@ constexpr int kMaximumAssetRating = 5;
                    "multicam switch references an angle that is not in the group");
     }
   }
+  for (std::size_t index = 0; index < group.switches.size(); ++index) {
+    for (std::size_t other = index + 1; other < group.switches.size(); ++other) {
+      if (group.switches[index].time == group.switches[other].time) {
+        return error(EditErrorCode::InvalidArgument,
+                     "multicam group cannot contain two switches at the same time");
+      }
+    }
+  }
   return std::nullopt;
+}
+
+[[nodiscard]] bool clipParticipatesInMulticam(const Project& project, const Sequence& sequence,
+                                              EntityId clip_id) {
+  if (findMulticamGroupForClip(project, clip_id) != nullptr) {
+    return true;
+  }
+  const Clip* clip = findClip(sequence, clip_id);
+  if (clip == nullptr || !clip->linked_group.has_value()) {
+    return false;
+  }
+  for (const Track& track : sequence.tracks) {
+    for (const Clip& other : track.clips) {
+      if (other.linked_group == clip->linked_group &&
+          findMulticamGroupForClip(project, other.id) != nullptr) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 [[nodiscard]] std::optional<EditError> validateTrackName(std::string_view name) {
@@ -1357,6 +1385,12 @@ struct PlannedClip final {
   }
   const Clip primary = *primary_location->clip;
   const auto selected_ids = linkedClipIds(sequence, primary, command.include_linked);
+  for (const auto id : selected_ids) {
+    if (clipParticipatesInMulticam(project, sequence, id)) {
+      return error(EditErrorCode::AssetInUse,
+                   "cannot split a clip that belongs to a multicam group");
+    }
+  }
   std::unordered_map<EntityId, EntityId> right_ids;
   right_ids.emplace(command.clip_id, command.right_clip_id);
   if (command.right_clip_id.isNil()) {
@@ -1616,6 +1650,13 @@ struct PlannedClip final {
             if (found == project.sequences.end()) {
               return error(EditErrorCode::EntityNotFound, "sequence was not found");
             }
+            const bool group_in_use = std::any_of(
+                project.multicam_groups.begin(), project.multicam_groups.end(),
+                [&](const MulticamGroup& group) { return group.sequence_id == command.sequence_id; });
+            if (group_in_use) {
+              return error(EditErrorCode::AssetInUse,
+                           "cannot remove a sequence that still has a multicam group");
+            }
             project.sequences.erase(found);
             return std::nullopt;
           },
@@ -1807,6 +1848,12 @@ struct PlannedClip final {
             }
             const auto primary = *location->clip;
             const auto selected_ids = linkedClipIds(*sequence, primary, command.include_linked);
+            for (const auto id : selected_ids) {
+              if (clipParticipatesInMulticam(project, *sequence, id)) {
+                return error(EditErrorCode::AssetInUse,
+                             "cannot remove a clip that belongs to a multicam group");
+              }
+            }
             const auto selected = idSet(selected_ids);
             std::unordered_set<EntityId> touched_tracks;
             for (const auto id : selected_ids) {

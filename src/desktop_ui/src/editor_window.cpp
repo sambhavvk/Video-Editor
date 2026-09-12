@@ -1109,7 +1109,7 @@ void EditorWindow::createActions() {
   create(QStringLiteral("createAspectRatioVariants"), tr("Create Aspect-Ratio Copies…"),
          tr("Create independent landscape and vertical sequence copies"));
   create(QStringLiteral("createMulticamGroup"), tr("Create Multicam Group…"),
-         tr("Group two selected video clips into a manually synchronized multicam set"));
+         tr("Group two to four selected video clips into a synchronized multicam set"));
   create(QStringLiteral("multicamCutAngle1"), tr("Cut to Multicam Angle 1"),
          tr("Record a multicam switch to angle 1 at the playhead"), QKeySequence{tr("Ctrl+1")});
   create(QStringLiteral("multicamCutAngle2"), tr("Cut to Multicam Angle 2"),

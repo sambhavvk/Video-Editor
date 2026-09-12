@@ -129,5 +129,29 @@ TEST(MulticamM01Test, RejectsDuplicateClipMembership) {
   EXPECT_FALSE(applyOk(editor, EditCommand{.operation = CreateMulticamGroupCommand{.group = duplicate}}));
 }
 
+TEST(MulticamM01Test, RejectsRemovingGroupedClip) {
+  auto project = makeTwoClipProject();
+  TimelineEditor editor(std::move(project));
+  const auto group = makeGroup(*editor.projectAt(editor.revision()));
+  ASSERT_TRUE(applyOk(editor, EditCommand{.operation = CreateMulticamGroupCommand{.group = group}}));
+  const Sequence& sequence = editor.projectAt(editor.revision())->sequences.front();
+  EXPECT_FALSE(applyOk(editor, EditCommand{.operation = RemoveClipCommand{
+                                               .sequence_id = sequence.id,
+                                               .clip_id = group.angles.front().clip_id}}));
+  EXPECT_NE(findMulticamGroup(*editor.projectAt(editor.revision()), group.id), nullptr);
+}
+
+TEST(MulticamM01Test, RejectsSplittingGroupedClip) {
+  auto project = makeTwoClipProject();
+  TimelineEditor editor(std::move(project));
+  const auto group = makeGroup(*editor.projectAt(editor.revision()));
+  ASSERT_TRUE(applyOk(editor, EditCommand{.operation = CreateMulticamGroupCommand{.group = group}}));
+  const Sequence& sequence = editor.projectAt(editor.revision())->sequences.front();
+  EXPECT_FALSE(applyOk(editor, EditCommand{.operation = SplitClipCommand{
+                                               .sequence_id = sequence.id,
+                                               .clip_id = group.angles.front().clip_id,
+                                               .split_time = Time(40, 1)}}));
+}
+
 } // namespace
 } // namespace video_editor::edit

@@ -4,12 +4,14 @@
 #include "video_editor/edit_model/time.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <span>
 
 namespace video_editor::audio_render {
 
 struct MulticamWaveformMatch final {
+  std::int64_t lag_samples{0};
   edit::Time offset{};
   double confidence{0.0};
 };
