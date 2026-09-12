@@ -81,8 +81,6 @@ signals:
   void togglePlaybackRequested();
   void markInRequested();
   void markOutRequested();
-  void rippleInsertRequested();
-  void overwriteInsertRequested();
   void nativePresentationReady(NativePresentationHandles handles);
   void nativePresentationUnavailable();
   void nativePresentationResized(int width, int height);

@@ -894,9 +894,11 @@ void EditorWindow::createActions() {
   create(QStringLiteral("sourceMarkOut"), tr("Mark Out"),
          tr("Set the out point at the focused monitor playhead"), QKeySequence{Qt::Key_O});
   create(QStringLiteral("sourceRippleInsert"), tr("Insert from Source"),
-         tr("Ripple-insert the marked source range at the program playhead"));
+         tr("Ripple-insert the marked source range at the program playhead"),
+         QKeySequence{Qt::SHIFT | Qt::Key_Comma});
   create(QStringLiteral("sourceOverwriteInsert"), tr("Overwrite from Source"),
-         tr("Overwrite the marked source range at the program playhead"));
+         tr("Overwrite the marked source range at the program playhead"),
+         QKeySequence{Qt::SHIFT | Qt::Key_Period});
   auto* precisionTrim = create(QStringLiteral("precisionTrim"), tr("Precision Trim Controls"),
                                tr("Show precision trim controls"), QKeySequence{tr("T")});
   precisionTrim->setCheckable(true);
@@ -1067,7 +1069,7 @@ void EditorWindow::createActions() {
   });
   connect(forward, &QAction::triggered, this, [this] {
     if (sourceMonitorHasFocus()) {
-      rippleInsertFromSource();
+      emit sourceStepShuttleRequested(1);
       return;
     }
     stepShuttle(1);
@@ -1382,10 +1384,6 @@ void EditorWindow::connectControllerSurface() {
   });
   connect(source_viewer_, &ProgramViewer::markInRequested, this, &EditorWindow::markSourceIn);
   connect(source_viewer_, &ProgramViewer::markOutRequested, this, &EditorWindow::markSourceOut);
-  connect(source_viewer_, &ProgramViewer::rippleInsertRequested, this,
-          &EditorWindow::rippleInsertFromSource);
-  connect(source_viewer_, &ProgramViewer::overwriteInsertRequested, this,
-          &EditorWindow::overwriteInsertFromSource);
   connect(action(QStringLiteral("nestSelectedClips")), &QAction::triggered, this,
           &EditorWindow::nestSelectedClipsRequested);
   connect(sequence_tab_bar_, &QTabBar::currentChanged, this, [this](const int index) {
@@ -1495,7 +1493,7 @@ void EditorWindow::connectControllerSurface() {
   bindNudge("precision.nudge.plus10", 10);
   connect(action(QStringLiteral("previousFrame")), &QAction::triggered, this, [this] {
     if (sourceMonitorHasFocus()) {
-      overwriteInsertFromSource();
+      emit sourceStepFrameRequested(-1);
       return;
     }
     const auto frame = qMax<qint64>(1, timeline_->timeScale() / 30);

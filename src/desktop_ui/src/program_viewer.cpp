@@ -521,16 +521,6 @@ void ProgramViewer::keyPressEvent(QKeyEvent* event) {
       event->accept();
       return;
     }
-    if (event->key() == Qt::Key_L) {
-      emit rippleInsertRequested();
-      event->accept();
-      return;
-    }
-    if (event->key() == Qt::Key_Comma) {
-      emit overwriteInsertRequested();
-      event->accept();
-      return;
-    }
   }
   if (event->key() == Qt::Key_Space) {
     emit togglePlaybackRequested();

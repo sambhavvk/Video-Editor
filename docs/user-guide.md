@@ -32,8 +32,9 @@ often and keep the original media files available.
   immutable revision against an editable −24 through −9 LUFS target.
 - The Inspector and Effects panel author the supported title, transition, speed, effect, and
   keyframe controls described below. The source monitor loads media on double-click. **I**/**O**
-  mark the focused viewer (source range, or program In/Out for loop and export range). **L**
-  ripple-inserts and **Comma** overwrites when the source viewer has focus.
+  mark the focused viewer (source range, or program In/Out for loop and export range). **J** /
+  **K** / **L** shuttle the focused monitor. **Insert from Source** (`Shift+,`) and
+  **Overwrite from Source** (`Shift+.`) edit at the program playhead.
 - Local transcription requires an explicitly downloaded, checksummed multilingual base model and a
   build with the pinned optional `whisper.cpp` backend. Builds without that backend keep manual
   captions available and report transcription as unavailable.
@@ -92,8 +93,9 @@ mapped position. Right-click **Reveal in Files** opens the parent folder in your
 Search filters by name or format.
 The Inspector Asset group edits a cached display title, tags, notes, and rating; an empty title
 falls back to the file name. Double-click an item to load it in the source monitor (shown
-automatically). Mark **I**n / **O**ut on the source playhead, then **L** to ripple-insert or
-**Comma** to overwrite at the program playhead:
+automatically). Mark **I**n / **O**ut on the source playhead, then use **Insert from Source**
+(`Shift+,`) or **Overwrite from Source** (`Shift+.`) at the program playhead. **J** / **K** /
+**L** always shuttle the focused monitor, so auditioning a source no longer inserts clips:
 
 - Video goes to the first unlocked targeted video track.
 - Audio goes to the first unlocked targeted audio track.
@@ -103,8 +105,9 @@ automatically). Mark **I**n / **O**ut on the source playhead, then **L** to ripp
   is rejected when the destination is locked or no targeted track matches.
 - The first inserted video clip derives sequence width, height, and nominal frame rate from the
   asset when those values are available. The sequence audio sample rate remains 48 kHz.
-- Source transport (Space / J / K / Period) is a silent timer and does not open a second audio
-  device. Program J/K/L remain the sequence shuttle when the source monitor does not have focus.
+- Source transport (Space / J / K / L / Comma / Period) is a silent timer and does not open a
+  second audio device. Remap **Insert from Source** or **Overwrite from Source** in
+  **Edit > Keyboard Shortcuts** if you relied on the older `L` / `,` bindings.
 
 The application references the original path. Missing files show **Offline** on the media bin and
 timeline; a fingerprint mismatch shows **Changed**. Right-click **Relink media…** to pick a
@@ -402,9 +405,9 @@ Qt maps standard shortcuts to the platform convention; the table uses Linux spel
 | Ripple / overwrite / roll / slip / slide | `R` / `W` / `N` / `Y` / `U` |
 | Reverse / Stop / Forward | `J` / `K` / `L` |
 | Play or pause | `Space` |
-| Previous / next frame | `,` / `.` (program; `,` overwrites when source has focus) |
+| Previous / next frame | `,` / `.` (focused monitor) |
 | Source / program mark in / out | `I` / `O` (focused viewer) |
-| Ripple insert / overwrite from source | `L` / `,` (source monitor focused) |
+| Insert / overwrite from source | `Shift+,` / `Shift+.` (remappable) |
 | Move playhead one frame | `Left` / `Right` |
 | Move playhead ten frames | `Shift+Left` / `Shift+Right` |
 | Sequence start / end | `Home` / `End` |

@@ -56,6 +56,7 @@ private slots:
   void persistsWorkspaceAndProgressiveControls();
   void precisionTrimPanelControlsTimeline();
   void exposesTransportControllerSignals();
+  void sourceTransportMatchesProgramShuttle();
   void markInOutActionsTargetFocusedViewer();
   void remapsAndPersistsShortcutBindings();
   void mediaBinShowsProxyLifecycle();
@@ -312,6 +313,76 @@ void EditorWindowTest::exposesTransportControllerSignals() {
   QCOMPARE(playback.at(0).at(0).toDouble(), -1.0);
   QCOMPARE(playback.at(1).at(0).toDouble(), -2.0);
   QCOMPARE(playback.at(2).at(0).toDouble(), 0.0);
+}
+
+void EditorWindowTest::sourceTransportMatchesProgramShuttle() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  auto settings = temporarySettings(directory);
+  EditorWindow window(settings.get());
+  window.setSourceMonitorVisible(true);
+  window.show();
+  QVERIFY(QTest::qWaitForWindowExposed(&window));
+  window.sourceViewer()->setFocus(Qt::OtherFocusReason);
+  QTRY_VERIFY(window.sourceMonitorHasFocus());
+
+  QCOMPARE(window.action(QStringLiteral("sourceRippleInsert"))->shortcut(),
+           QKeySequence{Qt::SHIFT | Qt::Key_Comma});
+  QCOMPARE(window.action(QStringLiteral("sourceOverwriteInsert"))->shortcut(),
+           QKeySequence{Qt::SHIFT | Qt::Key_Period});
+  QCOMPARE(window.action(QStringLiteral("previousFrame"))->shortcut(),
+           QKeySequence{Qt::Key_Comma});
+  QCOMPARE(window.action(QStringLiteral("nextFrame"))->shortcut(), QKeySequence{Qt::Key_Period});
+
+  QSignalSpy source_shuttle(&window, &EditorWindow::sourceStepShuttleRequested);
+  QSignalSpy source_frame(&window, &EditorWindow::sourceStepFrameRequested);
+  QSignalSpy ripple_insert(&window, &EditorWindow::sourceRippleInsertRequested);
+  QSignalSpy overwrite_insert(&window, &EditorWindow::sourceOverwriteInsertRequested);
+  QSignalSpy playback(&window, &EditorWindow::playbackRateRequested);
+  QSignalSpy source_in(&window, &EditorWindow::sourceMarkInRequested);
+  QSignalSpy source_out(&window, &EditorWindow::sourceMarkOutRequested);
+
+  QTest::keyClick(window.sourceViewer(), Qt::Key_L);
+  QTest::keyClick(window.sourceViewer(), Qt::Key_J);
+  QTest::keyClick(window.sourceViewer(), Qt::Key_Comma);
+  QTest::keyClick(window.sourceViewer(), Qt::Key_Period);
+
+  QCOMPARE(source_shuttle.count(), 2);
+  QCOMPARE(source_shuttle.at(0).at(0).toInt(), 1);
+  QCOMPARE(source_shuttle.at(1).at(0).toInt(), -1);
+  QCOMPARE(source_frame.count(), 2);
+  QCOMPARE(source_frame.at(0).at(0).toInt(), -1);
+  QCOMPARE(source_frame.at(1).at(0).toInt(), 1);
+  QCOMPARE(ripple_insert.count(), 0);
+  QCOMPARE(overwrite_insert.count(), 0);
+  QCOMPARE(playback.count(), 0);
+
+  QTest::keyClick(window.sourceViewer(), Qt::Key_I);
+  QTest::keyClick(window.sourceViewer(), Qt::Key_O);
+  QCOMPARE(source_in.count(), 1);
+  QCOMPARE(source_out.count(), 1);
+
+  QTest::keyClick(window.sourceViewer(), Qt::Key_Comma, Qt::ShiftModifier);
+  QTest::keyClick(window.sourceViewer(), Qt::Key_Period, Qt::ShiftModifier);
+  QCOMPARE(ripple_insert.count(), 1);
+  QCOMPARE(overwrite_insert.count(), 1);
+
+  window.action(QStringLiteral("sourceRippleInsert"))->trigger();
+  window.action(QStringLiteral("sourceOverwriteInsert"))->trigger();
+  QCOMPARE(ripple_insert.count(), 2);
+  QCOMPARE(overwrite_insert.count(), 2);
+
+  auto* media_search = window.findChild<QLineEdit*>(QStringLiteral("mediaSearch"));
+  QVERIFY(media_search != nullptr);
+  media_search->setFocus(Qt::OtherFocusReason);
+  QTRY_VERIFY(QApplication::focusWidget() == media_search);
+  QTest::keyClicks(media_search, QStringLiteral("hello"));
+  QCOMPARE(ripple_insert.count(), 2);
+  QCOMPARE(overwrite_insert.count(), 2);
+  QCOMPARE(source_shuttle.count(), 2);
+  QCOMPARE(source_frame.count(), 2);
+  QCOMPARE(playback.count(), 0);
+  QCOMPARE(media_search->text(), QStringLiteral("hello"));
 }
 
 void EditorWindowTest::markInOutActionsTargetFocusedViewer() {
