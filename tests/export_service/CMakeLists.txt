@@ -9,7 +9,8 @@ pkg_check_modules(EXPORT_TEST_AVUTIL REQUIRED IMPORTED_TARGET
                   libavutil=${VIDEO_EDITOR_AVUTIL_VERSION})
 
 add_executable(video_editor_export_service_tests
-  export_service_test.cpp)
+  export_service_test.cpp
+  audio_stem_export_test.cpp)
 
 target_link_libraries(
   video_editor_export_service_tests

@@ -12,6 +12,7 @@ pkg_check_modules(EXPORT_AVUTIL REQUIRED IMPORTED_TARGET
 add_library(video_editor_export_service
   src/caption_burn_in.cpp
   src/export_service.cpp
+  src/audio_stem_export.cpp
   src/presets.cpp)
 
 add_library(VideoEditor::ExportService ALIAS video_editor_export_service)
