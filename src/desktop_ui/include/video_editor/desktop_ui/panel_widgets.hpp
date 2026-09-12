@@ -180,6 +180,7 @@ public slots:
   // Title clips show the title controls group; media clips show the speed group.
   void setTitleControlsVisible(bool visible);
   void setSpeedControlsVisible(bool visible);
+  void setLinkedAvSync(const QString& statusText, bool canResync);
   void clearSelection();
 
 signals:
@@ -201,6 +202,7 @@ signals:
                                          const QString& keyframeId, const QPointF& incoming,
                                          const QPointF& outgoing);
   void deleteClipRequested();
+  void resyncLinkedAvRequested();
   void pickWhiteBalanceRequested();
   void effectLutBrowseRequested(const QString& effectId, const QString& parameterId);
   void addTitleRequested();
@@ -216,6 +218,9 @@ private:
 
   QLabel* selection_name_{nullptr};
   QPushButton* delete_clip_{nullptr};
+  QGroupBox* linked_sync_group_{nullptr};
+  QLabel* linked_sync_status_{nullptr};
+  QPushButton* resync_linked_av_{nullptr};
   QGroupBox* asset_group_{nullptr};
   QLineEdit* asset_title_{nullptr};
   QLineEdit* asset_tags_{nullptr};

@@ -957,6 +957,15 @@ void TimelineWidget::paintEvent(QPaintEvent* event) {
       painter.drawText(rect.adjusted(6, 0, -6, -4), Qt::AlignBottom | Qt::AlignRight,
                        clip.speedBadge);
     }
+    if (clip.linkedAvOffsetFrames != 0 && rect.width() > 56) {
+      painter.setFont(QFont{font().family(), std::max(7, font().pointSize() - 2), QFont::DemiBold});
+      painter.setPen(QColor{255, 196, 120});
+      const QString offsetText =
+          QStringLiteral("A/V %1%2f")
+              .arg(clip.linkedAvOffsetFrames > 0 ? QStringLiteral("+") : QString())
+              .arg(clip.linkedAvOffsetFrames);
+      painter.drawText(rect.adjusted(6, 0, -6, -18), Qt::AlignBottom | Qt::AlignRight, offsetText);
+    }
     if (clip.offline && rect.width() > 80) {
       painter.setFont(font());
       painter.drawText(rect.adjusted(8, 4, -8, -5), Qt::AlignLeft | Qt::AlignBottom,

@@ -258,6 +258,7 @@ private slots:
   void duplicateSelectedClips();
   void pasteClipAttributes();
   void replaceClipMediaFromSource(const QString& clipId);
+  void resyncLinkedAvSelection();
   void toggleLinkedSelection();
   void unlinkSelectedClips();
   void setClipEnabledFromTimeline(const QString& clipId, bool enabled);

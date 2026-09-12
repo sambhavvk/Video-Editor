@@ -18,9 +18,11 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QGroupBox>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLabel>
 #include <QListWidget>
 #include <QMessageBox>
 #include <QProcess>
@@ -113,6 +115,34 @@ bool writePlaybackVideo(const QString& path) {
          QFileInfo::exists(path);
 }
 
+bool writeMuxedAv(const QString& path) {
+  const QStringList arguments{
+      QStringLiteral("-hide_banner"),
+      QStringLiteral("-loglevel"),
+      QStringLiteral("error"),
+      QStringLiteral("-nostdin"),
+      QStringLiteral("-y"),
+      QStringLiteral("-f"),
+      QStringLiteral("lavfi"),
+      QStringLiteral("-i"),
+      QStringLiteral("testsrc2=size=64x64:rate=30:duration=2"),
+      QStringLiteral("-f"),
+      QStringLiteral("lavfi"),
+      QStringLiteral("-i"),
+      QStringLiteral("sine=frequency=440:sample_rate=48000:duration=2"),
+      QStringLiteral("-c:v"),
+      QStringLiteral("mpeg4"),
+      QStringLiteral("-q:v"),
+      QStringLiteral("8"),
+      QStringLiteral("-c:a"),
+      QStringLiteral("pcm_s16le"),
+      QStringLiteral("-shortest"),
+      path,
+  };
+  return QProcess::execute(QStringLiteral(VIDEO_EDITOR_APP_TEST_FFMPEG), arguments) == 0 &&
+         QFileInfo::exists(path);
+}
+
 std::size_t audioClipCount(const video_editor::edit::Project& project) {
   if (project.sequences.empty()) {
     return 0;
@@ -198,6 +228,7 @@ private slots:
   void volumeEnvelopeUpsertsAudioVolumeKeyframe();
   void opacityEnvelopeUpsertsVideoOpacityKeyframe();
   void freezeFrameHoldsSourceAtPlayhead();
+  void resyncLinkedAvMovesPartnersInOneUndoStep();
 
 private:
   std::unique_ptr<QTemporaryDir> application_data_;
@@ -1940,6 +1971,140 @@ void EditorControllerTest::freezeFrameHoldsSourceAtPlayhead() {
       static_cast<double>(held->source_range.duration.value()) /
       static_cast<double>(std::max<std::uint32_t>(1, held->source_range.duration.timescale()));
   QVERIFY(source_seconds <= 1.0);
+}
+
+void EditorControllerTest::resyncLinkedAvMovesPartnersInOneUndoStep() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString media_path = directory.filePath(QStringLiteral("linked-av.mkv"));
+  QVERIFY(writeMuxedAv(media_path));
+
+  QSettings settings(directory.filePath(QStringLiteral("linked-av.ini")), QSettings::IniFormat);
+  video_editor::desktop_ui::EditorWindow window(&settings);
+  video_editor::app::EditorController controller(window);
+  controller.importPaths({media_path});
+  QTRY_COMPARE_WITH_TIMEOUT(
+      controller.editor().projectAt(controller.editor().revision())->assets.size(), 1U, 10'000);
+  window.mediaActivated(window.mediaBin()->items().front().id);
+  window.rippleInsertFromSource();
+
+  auto project = controller.editor().projectAt(controller.editor().revision());
+  const auto* sequence = &project->sequences.front();
+  const video_editor::edit::Clip* video = nullptr;
+  const video_editor::edit::Clip* audio = nullptr;
+  int audio_track_index = -1;
+  for (int index = 0; index < static_cast<int>(sequence->tracks.size()); ++index) {
+    const auto& track = sequence->tracks[static_cast<std::size_t>(index)];
+    for (const auto& clip : track.clips) {
+      if (clip.kind == video_editor::edit::ClipKind::Video) {
+        video = &clip;
+      } else if (clip.kind == video_editor::edit::ClipKind::Audio) {
+        audio = &clip;
+        audio_track_index = index;
+      }
+    }
+  }
+  QVERIFY(video != nullptr);
+  QVERIFY(audio != nullptr);
+  QVERIFY(video->linked_group.has_value());
+  QCOMPARE(audio->linked_group, video->linked_group);
+  QCOMPARE(video->timeline_range.start, audio->timeline_range.start);
+  const QString audio_id = QString::fromStdString(audio->id.toString());
+  const QString video_id = QString::fromStdString(video->id.toString());
+
+  auto* linked_selection = window.action(QStringLiteral("toggleLinkedSelection"));
+  QVERIFY(linked_selection != nullptr);
+  QVERIFY(linked_selection->isChecked());
+  linked_selection->trigger();
+  QVERIFY(!linked_selection->isChecked());
+
+  window.timeline()->clipSelectionChanged({audio_id}, audio_id);
+  const qint64 frame_ticks = window.timeline()->frameStep();
+  QVERIFY(frame_ticks > 0);
+  const auto revision_before_move = controller.editor().revision();
+  window.timeline()->clipBatchEditCommitted(
+      {audio_id}, audio_track_index, 3 * frame_ticks, 0,
+      video_editor::desktop_ui::TimelineWidget::EditMode::Move,
+      video_editor::desktop_ui::TimelineWidget::EditIntent::Normal, {});
+  QCOMPARE(controller.editor().revision().value, revision_before_move.value + 1U);
+
+  project = controller.editor().projectAt(controller.editor().revision());
+  sequence = &project->sequences.front();
+  const video_editor::edit::Clip* moved_audio = nullptr;
+  const video_editor::edit::Clip* still_video = nullptr;
+  for (const auto& track : sequence->tracks) {
+    for (const auto& clip : track.clips) {
+      if (QString::fromStdString(clip.id.toString()) == audio_id) {
+        moved_audio = &clip;
+      } else if (QString::fromStdString(clip.id.toString()) == video_id) {
+        still_video = &clip;
+      }
+    }
+  }
+  QVERIFY(moved_audio != nullptr);
+  QVERIFY(still_video != nullptr);
+  QVERIFY(moved_audio->timeline_range.start != still_video->timeline_range.start);
+  const auto offset_audio_start = moved_audio->timeline_range.start;
+  const auto offset_video_start = still_video->timeline_range.start;
+
+  bool saw_offset = false;
+  for (const auto& clip : window.timeline()->clips()) {
+    if (clip.linkedAvOffsetFrames == 3) {
+      saw_offset = true;
+    }
+  }
+  QVERIFY(saw_offset);
+
+  auto* status =
+      window.inspector()->findChild<QLabel*>(QStringLiteral("inspectorLinkedAvSyncStatus"));
+  auto* resync =
+      window.inspector()->findChild<QPushButton*>(QStringLiteral("inspectorResyncLinkedAv"));
+  QVERIFY(status != nullptr);
+  QVERIFY(resync != nullptr);
+  QVERIFY(status->text().contains(QStringLiteral("+3")));
+  QVERIFY(resync->isEnabled());
+
+  const auto revision_before_resync = controller.editor().revision();
+  resync->click();
+  QCOMPARE(controller.editor().revision().value, revision_before_resync.value + 1U);
+
+  project = controller.editor().projectAt(controller.editor().revision());
+  sequence = &project->sequences.front();
+  const video_editor::edit::Clip* resynced_audio = nullptr;
+  const video_editor::edit::Clip* resynced_video = nullptr;
+  for (const auto& track : sequence->tracks) {
+    for (const auto& clip : track.clips) {
+      if (QString::fromStdString(clip.id.toString()) == audio_id) {
+        resynced_audio = &clip;
+      } else if (QString::fromStdString(clip.id.toString()) == video_id) {
+        resynced_video = &clip;
+      }
+    }
+  }
+  QVERIFY(resynced_audio != nullptr);
+  QVERIFY(resynced_video != nullptr);
+  QCOMPARE(resynced_audio->timeline_range.start, resynced_video->timeline_range.start);
+  QCOMPARE(window.statusBar()->currentMessage(),
+           QStringLiteral("Linked clips realigned to the active clip"));
+
+  window.undoRequested();
+  project = controller.editor().projectAt(controller.editor().revision());
+  sequence = &project->sequences.front();
+  const video_editor::edit::Clip* undone_audio = nullptr;
+  const video_editor::edit::Clip* undone_video = nullptr;
+  for (const auto& track : sequence->tracks) {
+    for (const auto& clip : track.clips) {
+      if (QString::fromStdString(clip.id.toString()) == audio_id) {
+        undone_audio = &clip;
+      } else if (QString::fromStdString(clip.id.toString()) == video_id) {
+        undone_video = &clip;
+      }
+    }
+  }
+  QVERIFY(undone_audio != nullptr);
+  QVERIFY(undone_video != nullptr);
+  QCOMPARE(undone_audio->timeline_range.start, offset_audio_start);
+  QCOMPARE(undone_video->timeline_range.start, offset_video_start);
 }
 
 void EditorControllerTest::otioMenuActionsEmitImportExportSignals() {

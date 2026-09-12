@@ -18,6 +18,7 @@
 #include <QCoreApplication>
 #include <QDockWidget>
 #include <QFileInfo>
+#include <QGroupBox>
 #include <QGuiApplication>
 #include <QLabel>
 #include <QLineEdit>
@@ -42,6 +43,7 @@
 #include <QTreeWidget>
 #include <QWheelEvent>
 
+using video_editor::desktop_ui::InspectorWidget;
 using video_editor::desktop_ui::EditorWindow;
 using video_editor::desktop_ui::TimelineClipView;
 using video_editor::desktop_ui::TimelineTrackView;
@@ -93,6 +95,7 @@ private slots:
   void timelineRejectsLockedTrackEditsWithMessage();
   void timelineShowsLinkedCompanionSelection();
   void timelineEmitsTrimPreviewStatusDuringGestures();
+  void inspectorShowsLinkedAvSyncControls();
   void programViewerRestoresProgramFrameAfterTrimCompare();
   void timelineMarkerSnappingExcludesTheDraggedMarker();
   void timelineRefreshCancelsMarkerGesturesAndUsesAuthoritativeSelection();
@@ -2109,6 +2112,35 @@ void EditorWindowTest::timelineEmitsTrimPreviewStatusDuringGestures() {
   sendPointer(timeline, QEvent::MouseMove, {400, 60}, Qt::NoButton, Qt::LeftButton);
   QVERIFY(status.last().at(0).toString().contains(QStringLiteral("Slip")));
   sendPointer(timeline, QEvent::MouseButtonRelease, {400, 60}, Qt::LeftButton, Qt::NoButton);
+}
+
+void EditorWindowTest::inspectorShowsLinkedAvSyncControls() {
+  InspectorWidget inspector;
+  inspector.resize(420, 720);
+  inspector.show();
+  QCoreApplication::processEvents();
+  inspector.setSelectionName(QStringLiteral("Linked clip"));
+  auto* group = inspector.findChild<QGroupBox*>(QStringLiteral("inspectorLinkedAvSyncGroup"));
+  auto* status = inspector.findChild<QLabel*>(QStringLiteral("inspectorLinkedAvSyncStatus"));
+  auto* resync = inspector.findChild<QPushButton*>(QStringLiteral("inspectorResyncLinkedAv"));
+  QVERIFY(group != nullptr);
+  QVERIFY(status != nullptr);
+  QVERIFY(resync != nullptr);
+  QVERIFY(group->isHidden());
+  inspector.setLinkedAvSync(QStringLiteral("Linked audio is +3 frames relative to video."), true);
+  QVERIFY(!group->isHidden());
+  QCOMPARE(status->text(), QStringLiteral("Linked audio is +3 frames relative to video."));
+  QVERIFY(!resync->isHidden());
+  QVERIFY(resync->isEnabled());
+  QSignalSpy resyncSpy(&inspector, &InspectorWidget::resyncLinkedAvRequested);
+  resync->click();
+  QCOMPARE(resyncSpy.count(), 1);
+  inspector.setLinkedAvSync(QStringLiteral("Linked audio and video are aligned."), false);
+  QVERIFY(!group->isHidden());
+  QVERIFY(resync->isHidden());
+  QVERIFY(!resync->isEnabled());
+  inspector.setLinkedAvSync({}, false);
+  QVERIFY(group->isHidden());
 }
 
 void EditorWindowTest::programViewerRestoresProgramFrameAfterTrimCompare() {

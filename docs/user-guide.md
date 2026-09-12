@@ -181,6 +181,9 @@ Other editing operations:
   The Inspector also exposes a **Delete clip** button when a clip is selected.
 - **Ripple Delete** / **Extract** (`'`) removes them and closes each affected track independently.
 - Undo and redo treat a multi-selection or linked operation as one step.
+- When linked audio and video are moved independently, the Inspector **Linked A/V sync** group shows
+  the exact frame offset and **Resync linked clips** realigns partners to the active clip (one undo
+  step). Out-of-sync linked clips also show an `A/V ±Nf` badge on the timeline.
 - **Alt+Left/Right** nudges the selection by one exact sequence frame; add **Shift** for ten frames
   and **Ctrl** for ripple intent. Relative offsets inside a multi-selection are preserved.
 - **Freeze Frame** (`Ctrl+Shift+H`) splits at the playhead if needed and holds that source frame

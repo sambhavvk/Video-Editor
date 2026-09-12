@@ -204,6 +204,7 @@ struct TimelineClipView {
   bool active{false};
   bool linkedCompanion{false};
   QString linkedGroupId;
+  qint64 linkedAvOffsetFrames{0};
   bool offline{false};
   bool proxy{false};
   bool enabled{true};

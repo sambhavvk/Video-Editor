@@ -200,6 +200,38 @@ edit::Sequence duplicateSequenceWithNewIds(const edit::Sequence& source, const s
   return copy;
 }
 
+struct LinkedAvEnds final {
+  const edit::Clip* video{nullptr};
+  const edit::Clip* audio{nullptr};
+};
+
+[[nodiscard]] LinkedAvEnds linkedAvEnds(const edit::Sequence& sequence,
+                                        const std::optional<edit::EntityId>& group) {
+  LinkedAvEnds ends;
+  if (!group.has_value()) {
+    return ends;
+  }
+  for (const edit::Track& track : sequence.tracks) {
+    for (const edit::Clip& member : track.clips) {
+      if (member.linked_group != group) {
+        continue;
+      }
+      if (member.kind == edit::ClipKind::Video) {
+        ends.video = &member;
+      } else if (member.kind == edit::ClipKind::Audio) {
+        ends.audio = &member;
+      }
+    }
+  }
+  return ends;
+}
+
+[[nodiscard]] qint64 linkedAvOffsetFrames(const edit::Sequence& sequence, const edit::Clip& video,
+                                          const edit::Clip& audio) {
+  return sequence.frame_rate.framesAt(audio.timeline_range.start - video.timeline_range.start,
+                                      edit::RoundingMode::NearestTiesEven);
+}
+
 } // namespace
 
 AudioDevicePollDecision
@@ -1399,6 +1431,8 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::toggleLinkedSelection);
   connect(&window_, &desktop_ui::EditorWindow::unlinkClipsRequested, this,
           &EditorController::unlinkSelectedClips);
+  connect(window_.inspector(), &desktop_ui::InspectorWidget::resyncLinkedAvRequested, this,
+          &EditorController::resyncLinkedAvSelection);
   connect(&window_, &desktop_ui::EditorWindow::setClipEnabledRequested, this,
           [this](const bool enabled) {
             if (!active_clip_id_.has_value()) {
@@ -4732,6 +4766,47 @@ void EditorController::unlinkSelectedClips() {
                                                       .linked_group = std::nullopt}});
   }
   (void)applyBatch(commands, tr("Could not unlink clips"));
+}
+
+void EditorController::resyncLinkedAvSelection() {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || !active_clip_id_.has_value()) {
+    explainUnavailable(window_, "editor_controller.cpp:resyncLinkedAvSelection",
+                       tr("Select a linked clip before resyncing"));
+    return;
+  }
+  const edit::Clip* anchor = edit::findClip(*sequence, *active_clip_id_);
+  if (anchor == nullptr || !anchor->linked_group.has_value()) {
+    window_.showTransientMessage(tr("Select a linked audio/video clip to resync"));
+    return;
+  }
+  std::vector<edit::EditCommand> commands;
+  for (const edit::Track& track : sequence->tracks) {
+    for (const edit::Clip& clip : track.clips) {
+      if (clip.id == anchor->id || clip.linked_group != anchor->linked_group) {
+        continue;
+      }
+      if (clip.timeline_range.start == anchor->timeline_range.start) {
+        continue;
+      }
+      commands.push_back(
+          {.operation = edit::MoveClipCommand{.sequence_id = sequence->id,
+                                               .clip_id = clip.id,
+                                               .destination_track_id = track.id,
+                                               .new_start = anchor->timeline_range.start,
+                                               .mode = edit::InsertMode::RejectOverlap,
+                                               .include_linked = false},
+           .coalescing_key = {}});
+    }
+  }
+  if (commands.empty()) {
+    window_.showTransientMessage(tr("Linked clips are already aligned"));
+    return;
+  }
+  if (applyBatch(std::move(commands), tr("Could not resync linked clips"))) {
+    window_.showTransientMessage(tr("Linked clips realigned to the active clip"));
+    refreshViews();
+  }
 }
 
 void EditorController::setClipEnabledFromTimeline(const QString& clipIdText, const bool enabled) {
@@ -9352,6 +9427,21 @@ void EditorController::refreshTimelineView() {
     return;
   }
   timeline_time_scale_ = timelineTimeScale(*sequence);
+  std::unordered_map<edit::EntityId, qint64> linked_av_offset_frames;
+  for (const edit::Track& track : sequence->tracks) {
+    for (const edit::Clip& clip : track.clips) {
+      if (!clip.linked_group.has_value() ||
+          linked_av_offset_frames.contains(*clip.linked_group)) {
+        continue;
+      }
+      const auto ends = linkedAvEnds(*sequence, clip.linked_group);
+      if (ends.video == nullptr || ends.audio == nullptr) {
+        continue;
+      }
+      linked_av_offset_frames.emplace(*clip.linked_group,
+                                      linkedAvOffsetFrames(*sequence, *ends.video, *ends.audio));
+    }
+  }
   pruneTimelineSelection(*sequence);
   std::unordered_set<edit::EntityId> selected_linked_groups;
   if (linked_selection_enabled_) {
@@ -9409,6 +9499,10 @@ void EditorController::refreshTimelineView() {
         if (linked_selection_enabled_ && !view.selected &&
             selected_linked_groups.contains(*clip.linked_group)) {
           view.linkedCompanion = true;
+        }
+        if (const auto offset = linked_av_offset_frames.find(*clip.linked_group);
+            offset != linked_av_offset_frames.end()) {
+          view.linkedAvOffsetFrames = offset->second;
         }
       }
       if (track.kind == edit::TrackKind::Audio) {
@@ -9643,6 +9737,26 @@ void EditorController::refreshInspectorView() {
   }
 
   window_.inspector()->setSelectionName(QString::fromStdString(clip->name));
+  if (clip->linked_group.has_value()) {
+    const auto ends = linkedAvEnds(*sequence, clip->linked_group);
+    if (ends.video != nullptr && ends.audio != nullptr) {
+      const qint64 frames = linkedAvOffsetFrames(*sequence, *ends.video, *ends.audio);
+      if (frames != 0) {
+        window_.inspector()->setLinkedAvSync(
+            tr("Linked audio is %1%2 frames relative to video. Resync moves partners to the "
+               "active clip.")
+                .arg(frames > 0 ? QStringLiteral("+") : QString())
+                .arg(frames),
+            true);
+      } else {
+        window_.inspector()->setLinkedAvSync(tr("Linked audio and video are aligned."), false);
+      }
+    } else {
+      window_.inspector()->setLinkedAvSync({}, false);
+    }
+  } else {
+    window_.inspector()->setLinkedAvSync({}, false);
+  }
   window_.inspector()->setClipCapabilities(clip->kind == edit::ClipKind::Video ||
                                                clip->kind == edit::ClipKind::Title,
                                            clip->kind == edit::ClipKind::Audio);

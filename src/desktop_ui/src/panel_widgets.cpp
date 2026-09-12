@@ -994,6 +994,20 @@ InspectorWidget::InspectorWidget(QWidget* parent) : QWidget(parent) {
                 0.01);
   editorLayout->addWidget(audio);
 
+  linked_sync_group_ = new QGroupBox(tr("Linked A/V sync"), editor);
+  linked_sync_group_->setObjectName(QStringLiteral("inspectorLinkedAvSyncGroup"));
+  auto* linkedLayout = new QVBoxLayout(linked_sync_group_);
+  linked_sync_status_ = new QLabel(linked_sync_group_);
+  linked_sync_status_->setObjectName(QStringLiteral("inspectorLinkedAvSyncStatus"));
+  linked_sync_status_->setWordWrap(true);
+  linkedLayout->addWidget(linked_sync_status_);
+  resync_linked_av_ = new QPushButton(tr("Resync linked clips"), linked_sync_group_);
+  resync_linked_av_->setObjectName(QStringLiteral("inspectorResyncLinkedAv"));
+  connect(resync_linked_av_, &QPushButton::clicked, this, &InspectorWidget::resyncLinkedAvRequested);
+  linkedLayout->addWidget(resync_linked_av_);
+  linked_sync_group_->setVisible(false);
+  editorLayout->addWidget(linked_sync_group_);
+
   auto* titleGroup = new QGroupBox(tr("Title"), editor);
   titleGroup->setObjectName(QStringLiteral("inspectorTitleGroup"));
   title_controls_ = titleGroup;
@@ -1688,9 +1702,25 @@ void InspectorWidget::refreshKeyframeEditor() {
   keyframe_curve_->setSelectedKeyframe(keyframe.id);
 }
 
+void InspectorWidget::setLinkedAvSync(const QString& statusText, const bool canResync) {
+  if (linked_sync_group_ == nullptr) {
+    return;
+  }
+  const bool visible = !statusText.isEmpty();
+  linked_sync_group_->setVisible(visible);
+  if (linked_sync_status_ != nullptr) {
+    linked_sync_status_->setText(statusText);
+  }
+  if (resync_linked_av_ != nullptr) {
+    resync_linked_av_->setVisible(canResync);
+    resync_linked_av_->setEnabled(canResync);
+  }
+}
+
 void InspectorWidget::clearSelection() {
   setEffectParameters({});
   setSelectionName({});
+  setLinkedAvSync({}, false);
   clearAssetMetadata();
 }
 
