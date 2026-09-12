@@ -333,6 +333,12 @@ public:
   void setNormalizationStatus(const QString& status);
   [[nodiscard]] double normalizationTargetLufs() const;
   void setNormalizationTargetLufs(double targetLufs);
+  void setMusicDuckingTracks(const QStringList& trackNames);
+  [[nodiscard]] double musicDuckingThresholdDb() const;
+  [[nodiscard]] double musicDuckingDepthDb() const;
+  [[nodiscard]] int musicDuckingAttackMs() const;
+  [[nodiscard]] int musicDuckingReleaseMs() const;
+  [[nodiscard]] int musicDuckingDialogueTrackIndex() const;
 
 signals:
   void gainEdited(int trackIndex, double decibels);
@@ -349,6 +355,7 @@ signals:
   void normalizationAnalyzeRequested();
   void normalizationApplyRequested();
   void normalizationTargetChanged(double targetLufs);
+  void generateMusicDuckingRequested();
 
 private:
   [[nodiscard]] bool canUpdateStripsInPlace(const QVector<AudioTrackView>& tracks) const;
@@ -371,6 +378,12 @@ private:
   QPushButton* normalization_analyze_{nullptr};
   QPushButton* normalization_apply_{nullptr};
   QDoubleSpinBox* normalization_target_{nullptr};
+  QComboBox* ducking_dialogue_track_{nullptr};
+  QDoubleSpinBox* ducking_threshold_{nullptr};
+  QDoubleSpinBox* ducking_depth_{nullptr};
+  QSpinBox* ducking_attack_{nullptr};
+  QSpinBox* ducking_release_{nullptr};
+  QPushButton* ducking_generate_{nullptr};
   QVector<AudioTrackView> tracks_;
 };
 

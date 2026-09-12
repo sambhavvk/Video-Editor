@@ -2107,6 +2107,43 @@ AudioMixerWidget::AudioMixerWidget(QWidget* parent) : QWidget(parent) {
   connect(normalization_target_, qOverload<double>(&QDoubleSpinBox::valueChanged), this,
           &AudioMixerWidget::normalizationTargetChanged);
 
+  auto* ducking = new QGroupBox(tr("Music ducking"), this);
+  ducking->setObjectName(QStringLiteral("musicDuckingGroup"));
+  auto* duckingForm = new QFormLayout(ducking);
+  ducking_dialogue_track_ = new QComboBox(ducking);
+  ducking_dialogue_track_->setObjectName(QStringLiteral("musicDuckingDialogueTrack"));
+  ducking_threshold_ = new QDoubleSpinBox(ducking);
+  ducking_threshold_->setObjectName(QStringLiteral("musicDuckingThreshold"));
+  ducking_threshold_->setRange(-60.0, 0.0);
+  ducking_threshold_->setValue(-24.0);
+  ducking_threshold_->setSuffix(tr(" dBFS"));
+  ducking_depth_ = new QDoubleSpinBox(ducking);
+  ducking_depth_->setObjectName(QStringLiteral("musicDuckingDepth"));
+  ducking_depth_->setRange(-48.0, 0.0);
+  ducking_depth_->setValue(-12.0);
+  ducking_depth_->setSuffix(tr(" dB"));
+  ducking_attack_ = new QSpinBox(ducking);
+  ducking_attack_->setObjectName(QStringLiteral("musicDuckingAttack"));
+  ducking_attack_->setRange(0, 2'000);
+  ducking_attack_->setValue(120);
+  ducking_attack_->setSuffix(tr(" ms"));
+  ducking_release_ = new QSpinBox(ducking);
+  ducking_release_->setObjectName(QStringLiteral("musicDuckingRelease"));
+  ducking_release_->setRange(0, 5'000);
+  ducking_release_->setValue(400);
+  ducking_release_->setSuffix(tr(" ms"));
+  ducking_generate_ = new QPushButton(tr("Generate on selected music clip"), ducking);
+  ducking_generate_->setObjectName(QStringLiteral("generateMusicDuckingButton"));
+  duckingForm->addRow(tr("Dialogue track"), ducking_dialogue_track_);
+  duckingForm->addRow(tr("Threshold"), ducking_threshold_);
+  duckingForm->addRow(tr("Depth"), ducking_depth_);
+  duckingForm->addRow(tr("Attack"), ducking_attack_);
+  duckingForm->addRow(tr("Release"), ducking_release_);
+  duckingForm->addRow(QString{}, ducking_generate_);
+  layout->addWidget(ducking);
+  connect(ducking_generate_, &QPushButton::clicked, this,
+          &AudioMixerWidget::generateMusicDuckingRequested);
+
   auto* scroll = new QScrollArea(this);
   scroll->setObjectName(QStringLiteral("mixerScrollArea"));
   scroll->setFrameShape(QFrame::NoFrame);
@@ -2485,14 +2522,27 @@ void AudioMixerWidget::setTracks(const QVector<AudioTrackView>& tracks) {
   if (canUpdateStripsInPlace(tracks)) {
     if (tracks.isEmpty()) {
       tracks_ = tracks;
+      setMusicDuckingTracks({});
       return;
     }
     updateStripsInPlace(tracks);
     tracks_ = tracks;
+    QStringList names;
+    names.reserve(tracks.size());
+    for (const auto& track : tracks) {
+      names.push_back(track.displayName);
+    }
+    setMusicDuckingTracks(names);
     return;
   }
   rebuildStrips(tracks);
   tracks_ = tracks;
+  QStringList names;
+  names.reserve(tracks.size());
+  for (const auto& track : tracks) {
+    names.push_back(track.displayName);
+  }
+  setMusicDuckingTracks(names);
 }
 
 void AudioMixerWidget::setMeterLevels(const int trackIndex, const QVector<float>& peakDbfs) {
@@ -2686,6 +2736,39 @@ void AudioMixerWidget::setNormalizationTargetLufs(const double targetLufs) {
   }
   const QSignalBlocker blocker(normalization_target_);
   normalization_target_->setValue(std::clamp(targetLufs, -24.0, -9.0));
+}
+
+void AudioMixerWidget::setMusicDuckingTracks(const QStringList& trackNames) {
+  if (ducking_dialogue_track_ == nullptr) {
+    return;
+  }
+  const QSignalBlocker blocker(ducking_dialogue_track_);
+  ducking_dialogue_track_->clear();
+  for (int index = 0; index < trackNames.size(); ++index) {
+    ducking_dialogue_track_->addItem(trackNames.at(index), index);
+  }
+}
+
+double AudioMixerWidget::musicDuckingThresholdDb() const {
+  return ducking_threshold_ != nullptr ? ducking_threshold_->value() : -24.0;
+}
+
+double AudioMixerWidget::musicDuckingDepthDb() const {
+  return ducking_depth_ != nullptr ? ducking_depth_->value() : -12.0;
+}
+
+int AudioMixerWidget::musicDuckingAttackMs() const {
+  return ducking_attack_ != nullptr ? ducking_attack_->value() : 120;
+}
+
+int AudioMixerWidget::musicDuckingReleaseMs() const {
+  return ducking_release_ != nullptr ? ducking_release_->value() : 400;
+}
+
+int AudioMixerWidget::musicDuckingDialogueTrackIndex() const {
+  return ducking_dialogue_track_ != nullptr && ducking_dialogue_track_->currentIndex() >= 0
+             ? ducking_dialogue_track_->currentData().toInt()
+             : 0;
 }
 
 namespace {

@@ -354,6 +354,7 @@ private slots:
                                        const QString& parameterId, const QVariant& value);
   void analyzeLoudnessNormalization();
   void applyLoudnessNormalization();
+  void generateMusicDucking();
   void selectAudioOutputDevice(const QString& deviceId);
   void calibrateOutputLatency();
   void setNormalizationTarget(double targetLufs);

@@ -16,6 +16,7 @@
 #include "video_editor/audio_engine/output_latency_calibration.h"
 #include "video_editor/audio_engine/realtime_buffer_policy.h"
 #include "video_editor/audio_render/loudness_normalize.h"
+#include "video_editor/audio_render/music_ducking.h"
 #include "video_editor/audio_render/original_audio_registry.h"
 #include "video_editor/audio_render/timeline_audio_renderer.h"
 #include "video_editor/audio_render/track_dsp_chain.h"
@@ -1773,6 +1774,8 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::analyzeLoudnessNormalization);
   connect(window_.audioMixer(), &desktop_ui::AudioMixerWidget::normalizationApplyRequested, this,
           &EditorController::applyLoudnessNormalization);
+  connect(window_.audioMixer(), &desktop_ui::AudioMixerWidget::generateMusicDuckingRequested, this,
+          &EditorController::generateMusicDucking);
   connect(window_.audioMixer(), &desktop_ui::AudioMixerWidget::outputDeviceSelected, this,
           &EditorController::selectAudioOutputDevice);
   connect(window_.audioMixer(), &desktop_ui::AudioMixerWidget::calibrateOutputLatencyRequested, this,
@@ -9062,6 +9065,114 @@ void EditorController::applyLoudnessNormalization() {
   }
   normalization_review_.valid = false;
   window_.audioMixer()->setNormalizationStatus(tr("Normalization applied as one undoable edit."));
+}
+
+void EditorController::generateMusicDucking() {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr || editor_ == nullptr || !active_clip_id_.has_value()) {
+    explainUnavailable(window_, "editor_controller.cpp:generateMusicDucking",
+                       tr("Select a music clip before generating ducking"));
+    return;
+  }
+  const edit::Clip* music_clip = edit::findClip(*sequence, *active_clip_id_);
+  if (music_clip == nullptr || music_clip->kind != edit::ClipKind::Audio) {
+    window_.showTransientMessage(tr("Select an audio clip to duck under dialogue"));
+    return;
+  }
+  const int dialogue_index = window_.audioMixer()->musicDuckingDialogueTrackIndex();
+  if (dialogue_index < 0 ||
+      static_cast<std::size_t>(dialogue_index) >= sequence->tracks.size()) {
+    window_.showTransientMessage(tr("Choose a dialogue track for ducking"));
+    return;
+  }
+  const edit::Track& dialogue_track = sequence->tracks.at(static_cast<std::size_t>(dialogue_index));
+  if (dialogue_track.kind != edit::TrackKind::Audio) {
+    window_.showTransientMessage(tr("The selected ducking source must be an audio track"));
+    return;
+  }
+  const auto snapshot_result = editor_->snapshot(sequence->id, editor_->revision());
+  if (!snapshot_result) {
+    window_.showTransientMessage(tr("Could not analyze dialogue for ducking"));
+    return;
+  }
+  const auto snapshot = std::move(snapshot_result).value();
+  const std::int64_t start_sample =
+      music_clip->timeline_range.start
+          .rescaledTo(audio_render::kTimelineAudioSampleRate, edit::RoundingMode::NearestTiesEven)
+          .value();
+  const std::int64_t end_sample =
+      music_clip->timeline_range.end()
+          .rescaledTo(audio_render::kTimelineAudioSampleRate, edit::RoundingMode::NearestTiesEven)
+          .value();
+  if (end_sample <= start_sample) {
+    return;
+  }
+  constexpr std::size_t kBlockSamples = 2'400;
+  std::vector<float> dialogue_peaks;
+  const auto renderer = std::make_shared<audio_render::TimelineAudioRenderer>(audio_registry_);
+  for (std::int64_t sample = start_sample; sample < end_sample;
+       sample += static_cast<std::int64_t>(kBlockSamples)) {
+    const std::size_t count =
+        static_cast<std::size_t>(std::min<std::int64_t>(kBlockSamples, end_sample - sample));
+    const auto rendered = renderer->render(
+        snapshot, {.start_sample = sample, .sample_count = count});
+    if (!rendered) {
+      window_.showTransientMessage(tr("Could not render dialogue for ducking"));
+      return;
+    }
+    const auto meters = renderer->trackMetersAt(sample + static_cast<std::int64_t>(count) - 1);
+    float peak = -120.0F;
+    for (const auto& track_meter : meters.tracks) {
+      if (track_meter.track_id != dialogue_track.id) {
+        continue;
+      }
+      peak = std::max(peak, std::max(track_meter.peak[0], track_meter.peak[1]));
+    }
+    dialogue_peaks.push_back(20.0F * std::log10(std::max(peak, 1.0e-12F)));
+  }
+  audio_render::MusicDuckingOptions options;
+  options.threshold_dbfs = window_.audioMixer()->musicDuckingThresholdDb();
+  options.depth_db = window_.audioMixer()->musicDuckingDepthDb();
+  options.attack_samples =
+      static_cast<std::size_t>(window_.audioMixer()->musicDuckingAttackMs()) * 48U;
+  options.release_samples =
+      static_cast<std::size_t>(window_.audioMixer()->musicDuckingReleaseMs()) * 48U;
+  const auto keyframes = audio_render::generateMusicDuckingEnvelope(
+      dialogue_peaks, kBlockSamples, music_clip->timeline_range.duration, options);
+  if (keyframes.empty()) {
+    window_.showTransientMessage(tr("No ducking envelope was generated for this clip"));
+    return;
+  }
+  const std::string gesture = "music-ducking:" + edit::EntityId::generate().toString();
+  std::vector<edit::EditCommand> commands;
+  edit::Effect volume_effect = effectPreset(QStringLiteral("audio.volume"));
+  auto parameter = volume_effect.parameters.at("gain_db");
+  parameter.keyframes.clear();
+  for (const auto& keyframe : keyframes) {
+    parameter.keyframes.push_back(
+        {.time = keyframe.time, .value = keyframe.gain_db, .interpolation = edit::KeyframeInterpolation::Linear});
+  }
+  volume_effect.parameters["gain_db"] = parameter;
+  const auto existing = std::find_if(
+      music_clip->effects.begin(), music_clip->effects.end(),
+      [](const edit::Effect& effect) { return effect.enabled && effect.type == "audio.volume"; });
+  if (existing == music_clip->effects.end()) {
+    commands.push_back({.operation = edit::AddClipEffectCommand{.sequence_id = sequence->id,
+                                                                .clip_id = music_clip->id,
+                                                                .effect = volume_effect},
+                        .coalescing_key = gesture});
+  } else {
+    commands.push_back({.operation = edit::SetClipEffectParameterCommand{
+                                            .sequence_id = sequence->id,
+                                            .clip_id = music_clip->id,
+                                            .effect_id = existing->id,
+                                            .parameter = parameter},
+                        .coalescing_key = gesture});
+  }
+  if (applyBatch(std::move(commands), tr("Could not generate music ducking"))) {
+    refreshViews();
+    window_.showTransientMessage(tr("Generated editable music ducking on the selected clip"));
+  }
 }
 
 void EditorController::selectAudioOutputDevice(const QString& deviceId) {

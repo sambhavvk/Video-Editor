@@ -16,6 +16,7 @@ add_library(video_editor_audio_render
   src/silence_detector.cpp
   src/timeline_audio_renderer.cpp
   src/loudness_normalize.cpp
+  src/music_ducking.cpp
   src/track_dsp_chain.cpp)
 
 add_library(video_editor::audio_render ALIAS video_editor_audio_render)
