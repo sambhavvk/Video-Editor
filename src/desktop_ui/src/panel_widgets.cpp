@@ -1195,6 +1195,53 @@ InspectorWidget::InspectorWidget(QWidget* parent) : QWidget(parent) {
   linked_sync_group_->setVisible(false);
   editorLayout->addWidget(linked_sync_group_);
 
+  multicam_group_ = new QGroupBox(tr("Multicam group"), editor);
+  multicam_group_->setObjectName(QStringLiteral("inspectorMulticamGroup"));
+  auto* multicamLayout = new QVBoxLayout(multicam_group_);
+  multicam_status_ = new QLabel(multicam_group_);
+  multicam_status_->setObjectName(QStringLiteral("inspectorMulticamStatus"));
+  multicam_status_->setWordWrap(true);
+  multicamLayout->addWidget(multicam_status_);
+  auto* multicamForm = new QFormLayout();
+  multicam_active_angle_ = new QComboBox(multicam_group_);
+  multicam_active_angle_->setObjectName(QStringLiteral("inspectorMulticamActiveAngle"));
+  multicam_active_angle_->setAccessibleName(tr("Active multicam angle"));
+  multicamForm->addRow(tr("Active angle"), multicam_active_angle_);
+  multicam_audio_master_ = new QComboBox(multicam_group_);
+  multicam_audio_master_->setObjectName(QStringLiteral("inspectorMulticamAudioMaster"));
+  multicam_audio_master_->setAccessibleName(tr("Multicam audio master"));
+  multicamForm->addRow(tr("Audio master"), multicam_audio_master_);
+  multicamLayout->addLayout(multicamForm);
+  multicam_sync_playhead_ = new QPushButton(tr("Set sync point to playhead"), multicam_group_);
+  multicam_sync_playhead_->setObjectName(QStringLiteral("inspectorMulticamSyncPlayhead"));
+  connect(multicam_sync_playhead_, &QPushButton::clicked, this,
+          &InspectorWidget::multicamSyncToPlayheadRequested);
+  multicamLayout->addWidget(multicam_sync_playhead_);
+  multicam_resync_clips_ = new QPushButton(tr("Apply clip alignment"), multicam_group_);
+  multicam_resync_clips_->setObjectName(QStringLiteral("inspectorMulticamResyncClips"));
+  connect(multicam_resync_clips_, &QPushButton::clicked, this,
+          &InspectorWidget::multicamResyncClipsRequested);
+  multicamLayout->addWidget(multicam_resync_clips_);
+  multicam_remove_ = new QPushButton(tr("Remove multicam group"), multicam_group_);
+  multicam_remove_->setObjectName(QStringLiteral("inspectorMulticamRemove"));
+  connect(multicam_remove_, &QPushButton::clicked, this,
+          &InspectorWidget::removeMulticamGroupRequested);
+  multicamLayout->addWidget(multicam_remove_);
+  connect(multicam_active_angle_, &QComboBox::currentIndexChanged, this, [this](const int index) {
+    if (index < 0 || multicam_active_angle_ == nullptr) {
+      return;
+    }
+    emit multicamActiveAngleChanged(multicam_active_angle_->itemData(index).toString());
+  });
+  connect(multicam_audio_master_, &QComboBox::currentIndexChanged, this, [this](const int index) {
+    if (index < 0 || multicam_audio_master_ == nullptr) {
+      return;
+    }
+    emit multicamAudioMasterChanged(multicam_audio_master_->itemData(index).toString());
+  });
+  multicam_group_->setVisible(false);
+  editorLayout->addWidget(multicam_group_);
+
   auto* titleGroup = new QGroupBox(tr("Title"), editor);
   titleGroup->setObjectName(QStringLiteral("inspectorTitleGroup"));
   title_controls_ = titleGroup;
@@ -1904,10 +1951,51 @@ void InspectorWidget::setLinkedAvSync(const QString& statusText, const bool canR
   }
 }
 
+void InspectorWidget::setMulticamGroup(const MulticamGroupView& group) {
+  if (multicam_group_ == nullptr) {
+    return;
+  }
+  multicam_group_id_ = group.id;
+  multicam_group_->setVisible(true);
+  if (multicam_status_ != nullptr) {
+    QStringList lines;
+    lines.push_back(group.name);
+    for (const MulticamAngleView& angle : group.angles) {
+      lines.push_back(tr("%1 (%2): offset %3 frames")
+                          .arg(angle.label, angle.clipName)
+                          .arg(angle.syncOffsetFrames));
+    }
+    multicam_status_->setText(lines.join('\n'));
+  }
+  const auto populate = [](QComboBox* combo, const MulticamGroupView& value,
+                           const QString& selectedId) {
+    if (combo == nullptr) {
+      return;
+    }
+    QSignalBlocker blocker(combo);
+    combo->clear();
+    for (const MulticamAngleView& angle : value.angles) {
+      combo->addItem(angle.label, angle.id);
+    }
+    const int index = combo->findData(selectedId);
+    combo->setCurrentIndex(index >= 0 ? index : 0);
+  };
+  populate(multicam_active_angle_, group, group.activeAngleId);
+  populate(multicam_audio_master_, group, group.audioMasterAngleId);
+}
+
+void InspectorWidget::clearMulticamGroup() {
+  multicam_group_id_.clear();
+  if (multicam_group_ != nullptr) {
+    multicam_group_->setVisible(false);
+  }
+}
+
 void InspectorWidget::clearSelection() {
   setEffectParameters({});
   setSelectionName({});
   setLinkedAvSync({}, false);
+  clearMulticamGroup();
   clearAssetMetadata();
 }
 

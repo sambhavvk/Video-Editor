@@ -211,6 +211,7 @@ signals:
   void sequenceSettingsRequested();
   void duplicateSequenceRequested();
   void createAspectRatioVariantsRequested();
+  void createMulticamGroupRequested();
   void markerListJumpRequested(const QString& markerId);
   void trackNavActivated(const QString& trackId);
   void trackVisibilityPresetRequested(TrackVisibilityPreset preset);

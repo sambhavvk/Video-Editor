@@ -210,6 +210,8 @@ public slots:
   void setTitleControlsVisible(bool visible);
   void setSpeedControlsVisible(bool visible);
   void setLinkedAvSync(const QString& statusText, bool canResync);
+  void setMulticamGroup(const MulticamGroupView& group);
+  void clearMulticamGroup();
   void clearSelection();
 
 signals:
@@ -232,6 +234,11 @@ signals:
                                          const QPointF& outgoing);
   void deleteClipRequested();
   void resyncLinkedAvRequested();
+  void multicamSyncToPlayheadRequested();
+  void multicamResyncClipsRequested();
+  void multicamActiveAngleChanged(const QString& angleId);
+  void multicamAudioMasterChanged(const QString& angleId);
+  void removeMulticamGroupRequested();
   void pickWhiteBalanceRequested();
   void effectLutBrowseRequested(const QString& effectId, const QString& parameterId);
   void addTitleRequested();
@@ -250,6 +257,14 @@ private:
   QGroupBox* linked_sync_group_{nullptr};
   QLabel* linked_sync_status_{nullptr};
   QPushButton* resync_linked_av_{nullptr};
+  QGroupBox* multicam_group_{nullptr};
+  QLabel* multicam_status_{nullptr};
+  QComboBox* multicam_active_angle_{nullptr};
+  QComboBox* multicam_audio_master_{nullptr};
+  QPushButton* multicam_sync_playhead_{nullptr};
+  QPushButton* multicam_resync_clips_{nullptr};
+  QPushButton* multicam_remove_{nullptr};
+  QString multicam_group_id_;
   QGroupBox* asset_group_{nullptr};
   QLineEdit* asset_title_{nullptr};
   QLineEdit* asset_tags_{nullptr};

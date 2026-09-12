@@ -8,6 +8,7 @@ add_executable(video_editor_edit_model_tests
   precision_edit_test.cpp
   edit_points_test.cpp
   schema_v4_test.cpp
+  multicam_m01_test.cpp
   time_test.cpp
   title_transition_test.cpp
   track_audio_state_test.cpp

@@ -1220,6 +1220,9 @@ std::optional<std::uint32_t> projectSnapshotSchema(const store::JournalEntry& en
   if (entry.command_type == "project.snapshot.v5") {
     return 5U;
   }
+  if (entry.command_type == "project.snapshot.v6") {
+    return 6U;
+  }
   return std::nullopt;
 }
 
@@ -1604,6 +1607,18 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::unlinkSelectedClips);
   connect(window_.inspector(), &desktop_ui::InspectorWidget::resyncLinkedAvRequested, this,
           &EditorController::resyncLinkedAvSelection);
+  connect(window_.inspector(), &desktop_ui::InspectorWidget::multicamSyncToPlayheadRequested, this,
+          &EditorController::setMulticamSyncToPlayhead);
+  connect(window_.inspector(), &desktop_ui::InspectorWidget::multicamResyncClipsRequested, this,
+          &EditorController::resyncMulticamClips);
+  connect(window_.inspector(), &desktop_ui::InspectorWidget::multicamActiveAngleChanged, this,
+          &EditorController::setMulticamActiveAngle);
+  connect(window_.inspector(), &desktop_ui::InspectorWidget::multicamAudioMasterChanged, this,
+          &EditorController::setMulticamAudioMaster);
+  connect(window_.inspector(), &desktop_ui::InspectorWidget::removeMulticamGroupRequested, this,
+          &EditorController::removeActiveMulticamGroup);
+  connect(&window_, &desktop_ui::EditorWindow::createMulticamGroupRequested, this,
+          &EditorController::createMulticamGroupFromSelection);
   connect(&window_, &desktop_ui::EditorWindow::setClipEnabledRequested, this,
           [this](const bool enabled) {
             if (!active_clip_id_.has_value()) {
@@ -5050,6 +5065,190 @@ void EditorController::resyncLinkedAvSelection() {
     window_.showTransientMessage(tr("Linked clips realigned to the active clip"));
     refreshViews();
   }
+}
+
+void EditorController::createMulticamGroupFromSelection() {
+  const edit::Sequence* sequence = currentSequence();
+  if (sequence == nullptr) {
+    explainUnavailable(window_, "editor_controller.cpp:createMulticamGroupFromSelection",
+                       tr("Open a sequence before creating a multicam group"));
+    return;
+  }
+  const auto project = editor_->projectAt(editor_->revision());
+  if (project == nullptr) {
+    return;
+  }
+  std::vector<const edit::Clip*> selected_clips;
+  for (const edit::EntityId& clip_id : selectedClipIds()) {
+    const edit::Clip* clip = edit::findClip(*sequence, clip_id);
+    if (clip == nullptr || clip->kind != edit::ClipKind::Video) {
+      continue;
+    }
+    if (edit::findMulticamGroupForClip(*project, clip_id) != nullptr) {
+      window_.showTransientMessage(tr("Selected clips cannot already belong to a multicam group"));
+      return;
+    }
+    selected_clips.push_back(clip);
+  }
+  if (selected_clips.size() != 2) {
+    window_.showTransientMessage(tr("Select exactly two video clips to create a multicam group"));
+    return;
+  }
+  std::sort(selected_clips.begin(), selected_clips.end(),
+            [](const edit::Clip* lhs, const edit::Clip* rhs) { return lhs->id < rhs->id; });
+  edit::Time sync_reference = selected_clips.front()->timeline_range.start;
+  for (const edit::Clip* clip : selected_clips) {
+    sync_reference = std::min(sync_reference, clip->timeline_range.start);
+  }
+  edit::MulticamGroup group;
+  group.sequence_id = sequence->id;
+  group.name = sequence->name + " multicam";
+  group.sync_reference = sync_reference;
+  for (std::size_t index = 0; index < selected_clips.size(); ++index) {
+    edit::MulticamAngle angle;
+    angle.clip_id = selected_clips[index]->id;
+    angle.label = index == 0 ? "Angle 1" : "Angle 2";
+    angle.sync_offset = selected_clips[index]->timeline_range.start - sync_reference;
+    group.angles.push_back(angle);
+  }
+  group.active_angle_id = group.angles.front().id;
+  group.audio_master_angle_id = group.angles.front().id;
+  if (apply({.operation = edit::CreateMulticamGroupCommand{.group = std::move(group)}},
+            tr("Could not create multicam group"))) {
+    window_.showTransientMessage(tr("Multicam group created for two angles"));
+    refreshViews();
+  }
+}
+
+void EditorController::removeActiveMulticamGroup() {
+  const edit::Sequence* sequence = currentSequence();
+  const auto project = editor_->projectAt(editor_->revision());
+  if (sequence == nullptr || project == nullptr || !active_clip_id_.has_value()) {
+    explainUnavailable(window_, "editor_controller.cpp:removeActiveMulticamGroup",
+                       tr("Select a clip in a multicam group before removing it"));
+    return;
+  }
+  const edit::MulticamGroup* group = edit::findMulticamGroupForClip(*project, *active_clip_id_);
+  if (group == nullptr) {
+    window_.showTransientMessage(tr("The active clip is not part of a multicam group"));
+    return;
+  }
+  if (apply({.operation = edit::RemoveMulticamGroupCommand{.group_id = group->id}},
+            tr("Could not remove multicam group"))) {
+    window_.showTransientMessage(tr("Multicam group removed"));
+    refreshViews();
+  }
+}
+
+void EditorController::setMulticamSyncToPlayhead() {
+  const edit::Sequence* sequence = currentSequence();
+  const auto project = editor_->projectAt(editor_->revision());
+  if (sequence == nullptr || project == nullptr || !active_clip_id_.has_value()) {
+    return;
+  }
+  const edit::MulticamGroup* group = edit::findMulticamGroupForClip(*project, *active_clip_id_);
+  if (group == nullptr) {
+    return;
+  }
+  const edit::Time playhead = playheadTime();
+  std::vector<std::pair<edit::EntityId, edit::Time>> offsets;
+  offsets.reserve(group->angles.size());
+  for (const edit::MulticamAngle& angle : group->angles) {
+    const edit::Clip* clip = edit::findClip(*sequence, angle.clip_id);
+    if (clip == nullptr) {
+      continue;
+    }
+    offsets.emplace_back(angle.id, clip->timeline_range.start - playhead);
+  }
+  if (apply({.operation = edit::SetMulticamSyncCommand{.group_id = group->id,
+                                                       .sync_reference = playhead,
+                                                       .angle_offsets = std::move(offsets)}},
+            tr("Could not update multicam sync"))) {
+    window_.showTransientMessage(tr("Multicam sync point set to the playhead"));
+    refreshViews();
+  }
+}
+
+void EditorController::resyncMulticamClips() {
+  const edit::Sequence* sequence = currentSequence();
+  const auto project = editor_->projectAt(editor_->revision());
+  if (sequence == nullptr || project == nullptr || !active_clip_id_.has_value()) {
+    return;
+  }
+  const edit::MulticamGroup* group = edit::findMulticamGroupForClip(*project, *active_clip_id_);
+  if (group == nullptr) {
+    return;
+  }
+  std::vector<edit::EditCommand> commands;
+  const std::string gesture = "multicam-resync:" + edit::EntityId::generate().toString();
+  for (const edit::MulticamAngle& angle : group->angles) {
+    const edit::Clip* clip = edit::findClip(*sequence, angle.clip_id);
+    if (clip == nullptr) {
+      continue;
+    }
+    const edit::Time target_start = group->sync_reference + angle.sync_offset;
+    if (clip->timeline_range.start == target_start) {
+      continue;
+    }
+    const edit::Track* track = nullptr;
+    for (const edit::Track& candidate : sequence->tracks) {
+      if (std::any_of(candidate.clips.begin(), candidate.clips.end(),
+                      [&angle](const edit::Clip& item) { return item.id == angle.clip_id; })) {
+        track = &candidate;
+        break;
+      }
+    }
+    if (track == nullptr || track->locked) {
+      window_.showTransientMessage(tr("Cannot realign multicam clips on locked tracks"));
+      return;
+    }
+    commands.push_back(
+        {.operation = edit::MoveClipCommand{.sequence_id = sequence->id,
+                                            .clip_id = angle.clip_id,
+                                            .destination_track_id = track->id,
+                                            .new_start = target_start,
+                                            .mode = edit::InsertMode::RejectOverlap,
+                                            .include_linked = false},
+         .coalescing_key = gesture});
+  }
+  if (commands.empty()) {
+    window_.showTransientMessage(tr("Multicam clips already match the stored offsets"));
+    return;
+  }
+  if (applyBatch(std::move(commands), tr("Could not realign multicam clips"))) {
+    window_.showTransientMessage(tr("Multicam clips realigned to stored offsets"));
+    refreshViews();
+  }
+}
+
+void EditorController::setMulticamActiveAngle(const QString& angleIdText) {
+  const auto project = editor_->projectAt(editor_->revision());
+  const auto angle_id = parseId(angleIdText);
+  if (project == nullptr || !active_clip_id_.has_value() || !angle_id.has_value()) {
+    return;
+  }
+  const edit::MulticamGroup* group = edit::findMulticamGroupForClip(*project, *active_clip_id_);
+  if (group == nullptr) {
+    return;
+  }
+  (void)apply({.operation = edit::SetMulticamActiveAngleCommand{.group_id = group->id,
+                                                                .angle_id = *angle_id}},
+             tr("Could not set the active multicam angle"));
+}
+
+void EditorController::setMulticamAudioMaster(const QString& angleIdText) {
+  const auto project = editor_->projectAt(editor_->revision());
+  const auto angle_id = parseId(angleIdText);
+  if (project == nullptr || !active_clip_id_.has_value() || !angle_id.has_value()) {
+    return;
+  }
+  const edit::MulticamGroup* group = edit::findMulticamGroupForClip(*project, *active_clip_id_);
+  if (group == nullptr) {
+    return;
+  }
+  (void)apply({.operation = edit::SetMulticamAudioMasterCommand{.group_id = group->id,
+                                                                 .angle_id = *angle_id}},
+             tr("Could not set the multicam audio master"));
 }
 
 void EditorController::setClipEnabledFromTimeline(const QString& clipIdText, const bool enabled) {
@@ -9352,7 +9551,7 @@ void EditorController::persistSnapshot(const std::string_view reason) {
   const auto project = editor_->projectAt(editor_->revision());
   const project_codec::ProjectBytes bytes = project_codec::serialize_project(*project);
   const auto metadata = store_->metadata();
-  store_->append_command("project.snapshot.v5", std::span<const std::byte>(bytes),
+  store_->append_command("project.snapshot.v6", std::span<const std::byte>(bytes),
                          metadata.head_revision, project_codec::kCurrentSchemaVersion);
   store_->update_heartbeat();
   (void)reason;
@@ -10469,6 +10668,34 @@ void EditorController::refreshInspectorView() {
     }
   } else {
     window_.inspector()->setLinkedAvSync({}, false);
+  }
+
+  const auto project = editor_->projectAt(editor_->revision());
+  if (project != nullptr) {
+    const edit::MulticamGroup* group = edit::findMulticamGroupForClip(*project, clip->id);
+    if (group != nullptr) {
+      desktop_ui::MulticamGroupView view;
+      view.id = QString::fromStdString(group->id.toString());
+      view.name = QString::fromStdString(group->name);
+      view.activeAngleId = QString::fromStdString(group->active_angle_id.toString());
+      view.audioMasterAngleId = QString::fromStdString(group->audio_master_angle_id.toString());
+      for (const edit::MulticamAngle& angle : group->angles) {
+        desktop_ui::MulticamAngleView angle_view;
+        angle_view.id = QString::fromStdString(angle.id.toString());
+        angle_view.label = QString::fromStdString(angle.label);
+        const edit::Clip* angle_clip = edit::findClip(*sequence, angle.clip_id);
+        angle_view.clipName =
+            angle_clip == nullptr ? QString{} : QString::fromStdString(angle_clip->name);
+        angle_view.syncOffsetFrames = sequence->frame_rate.framesAt(
+            angle.sync_offset, edit::RoundingMode::NearestTiesEven);
+        view.angles.push_back(angle_view);
+      }
+      window_.inspector()->setMulticamGroup(view);
+    } else {
+      window_.inspector()->clearMulticamGroup();
+    }
+  } else {
+    window_.inspector()->clearMulticamGroup();
   }
   window_.inspector()->setClipCapabilities(clip->kind == edit::ClipKind::Video ||
                                                clip->kind == edit::ClipKind::Title,

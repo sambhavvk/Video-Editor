@@ -731,6 +731,30 @@ void encodeBin(const edit::MediaBin& value, wire::MediaBin* output, std::string_
   encodeSmartQuery(value.query, output->mutable_query());
 }
 
+void encodeMulticamAngle(const edit::MulticamAngle& value, wire::MulticamAngle* output,
+                         std::string_view path, IdRegistry& ids) {
+  encodeId(value.id, output->mutable_id(), childPath(path, "id"), &ids);
+  encodeId(value.clip_id, output->mutable_clip_id(), childPath(path, "clip_id"));
+  encodeTime(value.sync_offset, output->mutable_sync_offset());
+  output->set_label(value.label);
+}
+
+void encodeMulticamGroup(const edit::MulticamGroup& value, wire::MulticamGroup* output,
+                         std::string_view path, IdRegistry& ids) {
+  encodeId(value.id, output->mutable_id(), childPath(path, "id"), &ids);
+  encodeId(value.sequence_id, output->mutable_sequence_id(), childPath(path, "sequence_id"));
+  output->set_name(value.name);
+  for (std::size_t index = 0; index < value.angles.size(); ++index) {
+    encodeMulticamAngle(value.angles[index], output->add_angles(),
+                        indexedPath(path, "angles", index), ids);
+  }
+  encodeId(value.active_angle_id, output->mutable_active_angle_id(),
+           childPath(path, "active_angle_id"));
+  encodeId(value.audio_master_angle_id, output->mutable_audio_master_angle_id(),
+           childPath(path, "audio_master_angle_id"));
+  encodeTime(value.sync_reference, output->mutable_sync_reference());
+}
+
 void encodeProject(const edit::Project& value, wire::Project* output) {
   IdRegistry ids;
   encodeId(value.id, output->mutable_id(), "project.id", &ids);
@@ -745,6 +769,10 @@ void encodeProject(const edit::Project& value, wire::Project* output) {
   }
   for (std::size_t index = 0; index < value.bins.size(); ++index) {
     encodeBin(value.bins[index], output->add_bins(), indexedPath("project", "bins", index), ids);
+  }
+  for (std::size_t index = 0; index < value.multicam_groups.size(); ++index) {
+    encodeMulticamGroup(value.multicam_groups[index], output->add_multicam_groups(),
+                        indexedPath("project", "multicam_groups", index), ids);
   }
   encodeMetadata(value.metadata, output->mutable_metadata(), "project.metadata");
 }
@@ -1014,6 +1042,50 @@ void reject_v4_fields_in_declared_older(const wire::ProjectSnapshot& snapshot) {
       ++track_index;
     }
     ++sequence_index;
+  }
+}
+
+void reject_v5_fields_in_declared_older(const wire::ProjectSnapshot& snapshot) {
+  if (snapshot.schema_version() >= 5U) {
+    return;
+  }
+  std::size_t sequence_index = 0;
+  for (const auto& sequence : snapshot.project().sequences()) {
+    std::size_t track_index = 0;
+    for (const auto& track : sequence.tracks()) {
+      std::size_t clip_index = 0;
+      for (const auto& clip : track.clips()) {
+        const auto clip_path = indexedPath(indexedPath(indexedPath("project", "sequences", sequence_index),
+                                                      "tracks", track_index),
+                                           "clips", clip_index);
+        if (clip.has_enabled() && !clip.enabled()) {
+          fail(CodecErrorCode::InvalidField, childPath(clip_path, "enabled"),
+               "declared schema older than v5 cannot contain clip enabled fields");
+        }
+        if (clip.has_label_color()) {
+          fail(CodecErrorCode::InvalidField, childPath(clip_path, "label_color"),
+               "declared schema older than v5 cannot contain clip label color fields");
+        }
+        ++clip_index;
+      }
+      ++track_index;
+    }
+    if (sequence.has_start_time()) {
+      fail(CodecErrorCode::InvalidField,
+           childPath(indexedPath("project", "sequences", sequence_index), "start_time"),
+           "declared schema older than v5 cannot contain sequence start time fields");
+    }
+    ++sequence_index;
+  }
+}
+
+void reject_v6_fields_in_declared_older(const wire::ProjectSnapshot& snapshot) {
+  if (snapshot.schema_version() >= 6U) {
+    return;
+  }
+  if (!snapshot.project().multicam_groups().empty()) {
+    fail(CodecErrorCode::InvalidField, indexedPath("project", "multicam_groups", 0),
+         "declared schema older than v6 cannot contain multicam groups");
   }
 }
 
@@ -1708,6 +1780,44 @@ decodeMetadata(const google::protobuf::RepeatedPtrField<wire::StringEntry>& entr
   return result;
 }
 
+[[nodiscard]] edit::MulticamAngle decodeMulticamAngle(const wire::MulticamAngle& value,
+                                                      std::string_view path, IdRegistry& ids) {
+  requirePresent(value.has_id(), childPath(path, "id"));
+  requirePresent(value.has_clip_id(), childPath(path, "clip_id"));
+  requirePresent(value.has_sync_offset(), childPath(path, "sync_offset"));
+  edit::MulticamAngle result;
+  result.id = decodeId(value.id(), childPath(path, "id"), &ids);
+  result.clip_id = decodeId(value.clip_id(), childPath(path, "clip_id"));
+  result.sync_offset = decodeTime(value.sync_offset(), childPath(path, "sync_offset"));
+  result.label = value.label();
+  return result;
+}
+
+[[nodiscard]] edit::MulticamGroup decodeMulticamGroup(const wire::MulticamGroup& value,
+                                                      std::string_view path, IdRegistry& ids) {
+  requirePresent(value.has_id(), childPath(path, "id"));
+  requirePresent(value.has_sequence_id(), childPath(path, "sequence_id"));
+  requirePresent(value.has_active_angle_id(), childPath(path, "active_angle_id"));
+  requirePresent(value.has_audio_master_angle_id(), childPath(path, "audio_master_angle_id"));
+  requirePresent(value.has_sync_reference(), childPath(path, "sync_reference"));
+  edit::MulticamGroup result;
+  result.id = decodeId(value.id(), childPath(path, "id"), &ids);
+  result.sequence_id = decodeId(value.sequence_id(), childPath(path, "sequence_id"));
+  result.name = value.name();
+  std::size_t index = 0;
+  for (const auto& angle : value.angles()) {
+    result.angles.push_back(
+        decodeMulticamAngle(angle, indexedPath(path, "angles", index++), ids));
+  }
+  result.active_angle_id =
+      decodeId(value.active_angle_id(), childPath(path, "active_angle_id"));
+  result.audio_master_angle_id =
+      decodeId(value.audio_master_angle_id(), childPath(path, "audio_master_angle_id"));
+  result.sync_reference =
+      decodeTime(value.sync_reference(), childPath(path, "sync_reference"));
+  return result;
+}
+
 [[nodiscard]] edit::Project decodeProject(const wire::Project& value,
                                           const std::uint32_t declared_schema_version) {
   requirePresent(value.has_id(), "project.id");
@@ -1727,6 +1837,11 @@ decodeMetadata(const google::protobuf::RepeatedPtrField<wire::StringEntry>& entr
   index = 0;
   for (const auto& bin : value.bins()) {
     result.bins.push_back(decodeBin(bin, indexedPath("project", "bins", index++), ids));
+  }
+  index = 0;
+  for (const auto& group : value.multicam_groups()) {
+    result.multicam_groups.push_back(
+        decodeMulticamGroup(group, indexedPath("project", "multicam_groups", index++), ids));
   }
   result.metadata = decodeMetadata(value.metadata(), "project.metadata");
 
@@ -1815,6 +1930,8 @@ edit::Result<edit::Project, CodecError> deserialize_project(std::span<const std:
     reject_v2_fields_in_declared_v1(snapshot);
     reject_v3_fields_in_declared_older(snapshot);
     reject_v4_fields_in_declared_older(snapshot);
+    reject_v5_fields_in_declared_older(snapshot);
+    reject_v6_fields_in_declared_older(snapshot);
     if (const auto unknown = findUnknownField(snapshot, "snapshot")) {
       fail(CodecErrorCode::InvalidField, *unknown,
            "snapshot contains fields not defined by its declared schema version");

@@ -264,6 +264,12 @@ private slots:
   void pasteClipAttributes();
   void replaceClipMediaFromSource(const QString& clipId);
   void resyncLinkedAvSelection();
+  void createMulticamGroupFromSelection();
+  void removeActiveMulticamGroup();
+  void setMulticamSyncToPlayhead();
+  void resyncMulticamClips();
+  void setMulticamActiveAngle(const QString& angleId);
+  void setMulticamAudioMaster(const QString& angleId);
   void toggleLinkedSelection();
   void unlinkSelectedClips();
   void setClipEnabledFromTimeline(const QString& clipId, bool enabled);

@@ -344,6 +344,78 @@ constexpr int kMaximumAssetRating = 5;
   return std::nullopt;
 }
 
+[[nodiscard]] const MulticamAngle* findMulticamAngle(const MulticamGroup& group,
+                                                     EntityId angle_id) noexcept {
+  const auto found =
+      std::find_if(group.angles.begin(), group.angles.end(),
+                   [angle_id](const MulticamAngle& angle) { return angle.id == angle_id; });
+  return found == group.angles.end() ? nullptr : &*found;
+}
+
+[[nodiscard]] std::optional<EditError> validateMulticamGroup(const Project& project,
+                                                             const MulticamGroup& group) {
+  if (group.id.isNil()) {
+    return error(EditErrorCode::InvalidArgument, "multicam group id cannot be nil");
+  }
+  if (group.sequence_id.isNil()) {
+    return error(EditErrorCode::InvalidArgument, "multicam group sequence id cannot be nil");
+  }
+  const auto* sequence = findSequence(project, group.sequence_id);
+  if (sequence == nullptr) {
+    return error(EditErrorCode::EntityNotFound,
+                 "multicam group references a sequence that does not exist");
+  }
+  if (group.name.empty() || group.name.size() > kMaximumBinNameBytes || !validUtf8(group.name)) {
+    return error(EditErrorCode::InvalidArgument,
+                 "multicam group name must be non-empty valid UTF-8 and at most 256 bytes");
+  }
+  if (group.angles.size() != 2) {
+    return error(EditErrorCode::InvalidArgument, "multicam group must contain exactly two angles");
+  }
+  std::unordered_set<EntityId> angle_ids;
+  std::unordered_set<EntityId> clip_ids;
+  for (const auto& angle : group.angles) {
+    if (angle.id.isNil()) {
+      return error(EditErrorCode::InvalidArgument, "multicam angle id cannot be nil");
+    }
+    if (!angle_ids.insert(angle.id).second) {
+      return error(EditErrorCode::DuplicateId, "multicam group contains duplicate angle ids");
+    }
+    if (angle.clip_id.isNil()) {
+      return error(EditErrorCode::InvalidArgument, "multicam angle clip id cannot be nil");
+    }
+    if (!clip_ids.insert(angle.clip_id).second) {
+      return error(EditErrorCode::InvalidArgument,
+                   "multicam group cannot reference the same clip twice");
+    }
+    if (!validUtf8(angle.label)) {
+      return error(EditErrorCode::InvalidArgument, "multicam angle label must be valid UTF-8");
+    }
+    const auto* clip = findClip(*sequence, angle.clip_id);
+    if (clip == nullptr) {
+      return error(EditErrorCode::EntityNotFound,
+                   "multicam angle references a clip that is not in the group sequence");
+    }
+    if (clip->kind != ClipKind::Video) {
+      return error(EditErrorCode::InvalidTrackKind,
+                   "multicam angles must reference video clips");
+    }
+    if (findMulticamGroupForClip(project, angle.clip_id) != nullptr &&
+        findMulticamGroupForClip(project, angle.clip_id)->id != group.id) {
+      return error(EditErrorCode::AssetInUse, "clip already belongs to another multicam group");
+    }
+  }
+  if (findMulticamAngle(group, group.active_angle_id) == nullptr) {
+    return error(EditErrorCode::InvalidArgument,
+                 "multicam active angle id must reference an angle in the group");
+  }
+  if (findMulticamAngle(group, group.audio_master_angle_id) == nullptr) {
+    return error(EditErrorCode::InvalidArgument,
+                 "multicam audio master angle id must reference an angle in the group");
+  }
+  return std::nullopt;
+}
+
 [[nodiscard]] std::optional<EditError> validateTrackName(std::string_view name) {
   if (name.empty() || name.size() > kMaximumTrackNameBytes || !validUtf8(name)) {
     return error(EditErrorCode::InvalidArgument,
@@ -795,6 +867,21 @@ validateTransition(const Project& project, const Sequence& sequence, const Trans
       return error(EditErrorCode::DuplicateId, "project contains a duplicate or nil bin id");
     }
     if (const auto issue = validateBin(project, bin)) {
+      return issue;
+    }
+  }
+  for (const auto& group : project.multicam_groups) {
+    if (!addId(group.id)) {
+      return error(EditErrorCode::DuplicateId,
+                   "project contains a duplicate or nil multicam group id");
+    }
+    for (const auto& angle : group.angles) {
+      if (!addId(angle.id)) {
+        return error(EditErrorCode::DuplicateId,
+                     "project contains a duplicate or nil multicam angle id");
+      }
+    }
+    if (const auto issue = validateMulticamGroup(project, group)) {
       return issue;
     }
   }
@@ -2726,6 +2813,100 @@ struct PlannedClip final {
             location->clip->linked_group = command.linked_group;
             return std::nullopt;
           },
+          [&](const CreateMulticamGroupCommand& command) -> std::optional<EditError> {
+            if (findMulticamGroup(project, command.group.id) != nullptr) {
+              return error(EditErrorCode::DuplicateId,
+                           "a multicam group with the same id already exists");
+            }
+            if (const auto issue = validateMulticamGroup(project, command.group)) {
+              return issue;
+            }
+            for (const auto& angle : command.group.angles) {
+              if (findMulticamGroupForClip(project, angle.clip_id) != nullptr) {
+                return error(EditErrorCode::AssetInUse,
+                             "clip already belongs to another multicam group");
+              }
+            }
+            project.multicam_groups.push_back(command.group);
+            return std::nullopt;
+          },
+          [&](const RemoveMulticamGroupCommand& command) -> std::optional<EditError> {
+            if (command.group_id.isNil()) {
+              return error(EditErrorCode::InvalidArgument, "multicam group id cannot be nil");
+            }
+            const auto found = std::find_if(
+                project.multicam_groups.begin(), project.multicam_groups.end(),
+                [&](const MulticamGroup& group) { return group.id == command.group_id; });
+            if (found == project.multicam_groups.end()) {
+              return error(EditErrorCode::EntityNotFound, "multicam group was not found");
+            }
+            project.multicam_groups.erase(found);
+            return std::nullopt;
+          },
+          [&](const SetMulticamSyncCommand& command) -> std::optional<EditError> {
+            if (command.group_id.isNil()) {
+              return error(EditErrorCode::InvalidArgument, "multicam group id cannot be nil");
+            }
+            const auto found = std::find_if(
+                project.multicam_groups.begin(), project.multicam_groups.end(),
+                [&](const MulticamGroup& group) { return group.id == command.group_id; });
+            if (found == project.multicam_groups.end()) {
+              return error(EditErrorCode::EntityNotFound, "multicam group was not found");
+            }
+            MulticamGroup candidate = *found;
+            candidate.sync_reference = command.sync_reference;
+            for (const auto& [angle_id, offset] : command.angle_offsets) {
+              const auto angle = std::find_if(
+                  candidate.angles.begin(), candidate.angles.end(),
+                  [&](const MulticamAngle& entry) { return entry.id == angle_id; });
+              if (angle == candidate.angles.end()) {
+                return error(EditErrorCode::EntityNotFound,
+                             "multicam sync update references an unknown angle");
+              }
+              angle->sync_offset = offset;
+            }
+            if (const auto issue = validateMulticamGroup(project, candidate)) {
+              return issue;
+            }
+            *found = std::move(candidate);
+            return std::nullopt;
+          },
+          [&](const SetMulticamActiveAngleCommand& command) -> std::optional<EditError> {
+            if (command.group_id.isNil() || command.angle_id.isNil()) {
+              return error(EditErrorCode::InvalidArgument,
+                           "multicam group and angle ids cannot be nil");
+            }
+            const auto found = std::find_if(
+                project.multicam_groups.begin(), project.multicam_groups.end(),
+                [&](const MulticamGroup& group) { return group.id == command.group_id; });
+            if (found == project.multicam_groups.end()) {
+              return error(EditErrorCode::EntityNotFound, "multicam group was not found");
+            }
+            if (findMulticamAngle(*found, command.angle_id) == nullptr) {
+              return error(EditErrorCode::EntityNotFound,
+                           "multicam active angle was not found in the group");
+            }
+            found->active_angle_id = command.angle_id;
+            return std::nullopt;
+          },
+          [&](const SetMulticamAudioMasterCommand& command) -> std::optional<EditError> {
+            if (command.group_id.isNil() || command.angle_id.isNil()) {
+              return error(EditErrorCode::InvalidArgument,
+                           "multicam group and angle ids cannot be nil");
+            }
+            const auto found = std::find_if(
+                project.multicam_groups.begin(), project.multicam_groups.end(),
+                [&](const MulticamGroup& group) { return group.id == command.group_id; });
+            if (found == project.multicam_groups.end()) {
+              return error(EditErrorCode::EntityNotFound, "multicam group was not found");
+            }
+            if (findMulticamAngle(*found, command.angle_id) == nullptr) {
+              return error(EditErrorCode::EntityNotFound,
+                           "multicam audio master angle was not found in the group");
+            }
+            found->audio_master_angle_id = command.angle_id;
+            return std::nullopt;
+          },
           [&](const SetClipEnabledCommand& command) -> std::optional<EditError> {
             auto* sequence = mutableSequence(project, command.sequence_id);
             if (sequence == nullptr) {
@@ -2870,6 +3051,16 @@ std::string commandName(const EditCommand& command) {
           return "Unlink clip";
         if constexpr (std::is_same_v<T, SetClipEnabledCommand>)
           return "Set clip enabled";
+        if constexpr (std::is_same_v<T, CreateMulticamGroupCommand>)
+          return "Create multicam group";
+        if constexpr (std::is_same_v<T, RemoveMulticamGroupCommand>)
+          return "Remove multicam group";
+        if constexpr (std::is_same_v<T, SetMulticamSyncCommand>)
+          return "Set multicam sync";
+        if constexpr (std::is_same_v<T, SetMulticamActiveAngleCommand>)
+          return "Set multicam active angle";
+        if constexpr (std::is_same_v<T, SetMulticamAudioMasterCommand>)
+          return "Set multicam audio master";
         return "Edit";
       },
       command.operation);
@@ -2997,6 +3188,16 @@ std::string commandType(const EditCommand& command) {
           return "set_clip_linked_group";
         if constexpr (std::is_same_v<T, SetClipEnabledCommand>)
           return "set_clip_enabled";
+        if constexpr (std::is_same_v<T, CreateMulticamGroupCommand>)
+          return "create_multicam_group";
+        if constexpr (std::is_same_v<T, RemoveMulticamGroupCommand>)
+          return "remove_multicam_group";
+        if constexpr (std::is_same_v<T, SetMulticamSyncCommand>)
+          return "set_multicam_sync";
+        if constexpr (std::is_same_v<T, SetMulticamActiveAngleCommand>)
+          return "set_multicam_active_angle";
+        if constexpr (std::is_same_v<T, SetMulticamAudioMasterCommand>)
+          return "set_multicam_audio_master";
         return "unknown";
       },
       command.operation);

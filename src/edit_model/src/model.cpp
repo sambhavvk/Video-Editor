@@ -17,6 +17,25 @@ const MediaBin* findBin(const Project& project, EntityId id) noexcept {
   return found == project.bins.end() ? nullptr : &*found;
 }
 
+const MulticamGroup* findMulticamGroup(const Project& project, EntityId id) noexcept {
+  const auto found =
+      std::find_if(project.multicam_groups.begin(), project.multicam_groups.end(),
+                   [id](const MulticamGroup& group) { return group.id == id; });
+  return found == project.multicam_groups.end() ? nullptr : &*found;
+}
+
+const MulticamGroup* findMulticamGroupForClip(const Project& project,
+                                              EntityId clip_id) noexcept {
+  for (const auto& group : project.multicam_groups) {
+    for (const auto& angle : group.angles) {
+      if (angle.clip_id == clip_id) {
+        return &group;
+      }
+    }
+  }
+  return nullptr;
+}
+
 const Sequence* findSequence(const Project& project, EntityId id) noexcept {
   const auto found = std::find_if(project.sequences.begin(), project.sequences.end(),
                                   [id](const Sequence& sequence) { return sequence.id == id; });

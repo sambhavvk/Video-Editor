@@ -783,5 +783,96 @@ TEST(ProjectCodecTest, DeclaredVersionThreeSnapshotsStillDeserialize) {
   ASSERT_TRUE(decoded) << (decoded ? "" : decoded.error().message);
 }
 
+TEST(ProjectCodecTest, MulticamGroupsRoundTripInSchemaV6) {
+  edit::Project project = makeComplexProject();
+  edit::Asset second_asset = project.assets.front();
+  second_asset.id = edit::EntityId::generate();
+  second_asset.name = "B-roll.mov";
+  project.assets.push_back(second_asset);
+
+  edit::Clip second_clip;
+  second_clip.asset_id = second_asset.id;
+  second_clip.kind = edit::ClipKind::Video;
+  second_clip.name = "Cutaway";
+  second_clip.timeline_range =
+      edit::TimeRange(edit::Time(120'000, 30'000), edit::Time(180'000, 30'000));
+  second_clip.source_range =
+      edit::TimeRange(edit::Time(0, 30'000), edit::Time(180'000, 30'000));
+  edit::Track second_video;
+  second_video.kind = edit::TrackKind::Video;
+  second_video.name = "V2";
+  second_video.clips.push_back(second_clip);
+  project.sequences.front().tracks.push_back(second_video);
+
+  edit::MulticamAngle angle_a;
+  angle_a.clip_id = project.sequences.front().tracks.front().clips.front().id;
+  angle_a.label = "A";
+  edit::MulticamAngle angle_b;
+  angle_b.clip_id = second_clip.id;
+  angle_b.label = "B";
+  edit::MulticamGroup group;
+  group.sequence_id = project.sequences.front().id;
+  group.name = "Interview";
+  group.angles = {angle_a, angle_b};
+  group.active_angle_id = angle_a.id;
+  group.audio_master_angle_id = angle_a.id;
+  group.sync_reference = edit::Time(5, 1);
+  project.multicam_groups.push_back(group);
+
+  const auto bytes = serialize_project(project);
+  ASSERT_GE(bytes.size(), 4U);
+  EXPECT_EQ(bytes[1], std::byte{0x06});
+
+  auto decoded = deserialize_project(bytes);
+  ASSERT_TRUE(decoded) << (decoded ? "" : decoded.error().message);
+  ASSERT_EQ(decoded.value().multicam_groups.size(), 1U);
+  EXPECT_EQ(decoded.value().multicam_groups.front().name, "Interview");
+  EXPECT_EQ(decoded.value().multicam_groups.front().sync_reference, edit::Time(5, 1));
+}
+
+TEST(ProjectCodecTest, RejectsMulticamGroupsInDeclaredSchemaV5) {
+  edit::Project project = makeComplexProject();
+  edit::Asset second_asset = project.assets.front();
+  second_asset.id = edit::EntityId::generate();
+  project.assets.push_back(second_asset);
+  edit::Clip second_clip;
+  second_clip.asset_id = second_asset.id;
+  second_clip.kind = edit::ClipKind::Video;
+  second_clip.timeline_range =
+      edit::TimeRange(edit::Time(120'000, 30'000), edit::Time(180'000, 30'000));
+  second_clip.source_range =
+      edit::TimeRange(edit::Time(0, 30'000), edit::Time(180'000, 30'000));
+  edit::Track second_video;
+  second_video.kind = edit::TrackKind::Video;
+  second_video.clips.push_back(second_clip);
+  project.sequences.front().tracks.push_back(second_video);
+
+  edit::MulticamAngle angle_a;
+  angle_a.clip_id = project.sequences.front().tracks.front().clips.front().id;
+  edit::MulticamAngle angle_b;
+  angle_b.clip_id = second_clip.id;
+  edit::MulticamGroup group;
+  group.sequence_id = project.sequences.front().id;
+  group.name = "Interview";
+  group.angles = {angle_a, angle_b};
+  group.active_angle_id = angle_a.id;
+  group.audio_master_angle_id = angle_a.id;
+  project.multicam_groups.push_back(group);
+
+  const auto canonical = serialize_project(project);
+  video_editor::persistence::v1::ProjectSnapshot snapshot;
+  ASSERT_TRUE(snapshot.ParseFromArray(canonical.data(), static_cast<int>(canonical.size())));
+  snapshot.set_schema_version(5);
+  std::string bytes;
+  ASSERT_TRUE(snapshot.SerializeToString(&bytes));
+  ProjectBytes declared_v5;
+  declared_v5.reserve(bytes.size());
+  for (const char byte : bytes) {
+    declared_v5.push_back(static_cast<std::byte>(byte));
+  }
+  auto decoded = deserialize_project(declared_v5);
+  EXPECT_FALSE(decoded);
+}
+
 } // namespace
 } // namespace video_editor::project_codec

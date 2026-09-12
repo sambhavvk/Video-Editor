@@ -409,6 +409,12 @@ and one undo step; edits made after analysis make the review stale and require r
 Use **Timeline → Create Aspect-Ratio Copies…** to add independent landscape (16:9) and vertical
 (9:16) sequence copies with labeled start markers. Edits in one copy do not propagate to the other.
 
+Select exactly two video clips and choose **Timeline → Create Multicam Group…** to define a
+manually synchronized two-angle set. The inspector shows each angle’s offset, the active angle, and
+the audio master. **Set sync point to playhead** stores offsets against the current playhead;
+**Apply clip alignment** moves clips to those offsets. Groups persist in the project and undo as
+ordinary edits.
+
 ## Create an editing proxy
 
 4K long-GOP video is marked **Proxy recommended** and queued automatically after import or reopen

@@ -283,6 +283,21 @@ struct AssetMetadataView {
   int rating{0};
 };
 
+struct MulticamAngleView {
+  QString id;
+  QString label;
+  QString clipName;
+  qint64 syncOffsetFrames{0};
+};
+
+struct MulticamGroupView {
+  QString id;
+  QString name;
+  QVector<MulticamAngleView> angles;
+  QString activeAngleId;
+  QString audioMasterAngleId;
+};
+
 struct CacheEntryView {
   QString assetId;
   QString displayName;

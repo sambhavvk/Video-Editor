@@ -310,6 +310,23 @@ message MediaBin {
   SmartQuery query = 5;
 }
 
+message MulticamAngle {
+  EntityId id = 1;
+  EntityId clip_id = 2;
+  Time sync_offset = 3;
+  string label = 4;
+}
+
+message MulticamGroup {
+  EntityId id = 1;
+  EntityId sequence_id = 2;
+  string name = 3;
+  repeated MulticamAngle angles = 4;
+  EntityId active_angle_id = 5;
+  EntityId audio_master_angle_id = 6;
+  Time sync_reference = 7;
+}
+
 message Project {
   EntityId id = 1;
   string name = 2;
@@ -317,6 +334,7 @@ message Project {
   repeated Sequence sequences = 4;
   repeated StringEntry metadata = 5;
   repeated MediaBin bins = 6;
+  repeated MulticamGroup multicam_groups = 7;
 }
 
 message ProjectSnapshot {

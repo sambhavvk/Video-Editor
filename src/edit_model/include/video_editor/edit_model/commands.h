@@ -338,6 +338,25 @@ struct SetClipEnabledCommand final {
   EntityId clip_id;
   bool enabled{true};
 };
+struct CreateMulticamGroupCommand final {
+  MulticamGroup group;
+};
+struct RemoveMulticamGroupCommand final {
+  EntityId group_id;
+};
+struct SetMulticamSyncCommand final {
+  EntityId group_id;
+  Time sync_reference{};
+  std::vector<std::pair<EntityId, Time>> angle_offsets;
+};
+struct SetMulticamActiveAngleCommand final {
+  EntityId group_id;
+  EntityId angle_id;
+};
+struct SetMulticamAudioMasterCommand final {
+  EntityId group_id;
+  EntityId angle_id;
+};
 
 using EditOperation = std::variant<
     AddAssetCommand, RemoveAssetCommand, AddSequenceCommand, RemoveSequenceCommand, AddTrackCommand,
@@ -355,7 +374,8 @@ using EditOperation = std::variant<
     CreateBinCommand, RenameBinCommand, MoveBinCommand, RemoveBinCommand, SetAssetBinCommand,
     SetAssetMetadataCommand, SetSmartQueryCommand, ReplaceClipMediaCommand, SetClipNameCommand,
     SetClipLinkedGroupCommand, SetClipEnabledCommand, SetSequenceNameCommand,
-    SetSequenceStartTimeCommand>;
+    SetSequenceStartTimeCommand, CreateMulticamGroupCommand, RemoveMulticamGroupCommand,
+    SetMulticamSyncCommand, SetMulticamActiveAngleCommand, SetMulticamAudioMasterCommand>;
 
 struct EditCommand final {
   EditOperation operation;

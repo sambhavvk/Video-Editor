@@ -271,18 +271,43 @@ struct Sequence final {
   friend bool operator==(const Sequence&, const Sequence&) = default;
 };
 
+struct MulticamAngle final {
+  EntityId id{EntityId::generate()};
+  EntityId clip_id{};
+  // Timeline delta from the group sync reference to this angle's aligned clip start.
+  Time sync_offset{};
+  std::string label;
+  friend bool operator==(const MulticamAngle&, const MulticamAngle&) = default;
+};
+
+struct MulticamGroup final {
+  EntityId id{EntityId::generate()};
+  EntityId sequence_id{};
+  std::string name;
+  std::vector<MulticamAngle> angles;
+  EntityId active_angle_id{};
+  EntityId audio_master_angle_id{};
+  Time sync_reference{};
+  friend bool operator==(const MulticamGroup&, const MulticamGroup&) = default;
+};
+
 struct Project final {
   EntityId id{EntityId::generate()};
   std::string name{"Untitled project"};
   std::vector<Asset> assets;
   std::vector<Sequence> sequences;
   std::vector<MediaBin> bins;
+  std::vector<MulticamGroup> multicam_groups;
   std::map<std::string, std::string, std::less<>> metadata;
   friend bool operator==(const Project&, const Project&) = default;
 };
 
 [[nodiscard]] const Asset* findAsset(const Project& project, EntityId id) noexcept;
 [[nodiscard]] const MediaBin* findBin(const Project& project, EntityId id) noexcept;
+[[nodiscard]] const MulticamGroup* findMulticamGroup(const Project& project,
+                                                       EntityId id) noexcept;
+[[nodiscard]] const MulticamGroup* findMulticamGroupForClip(const Project& project,
+                                                            EntityId clip_id) noexcept;
 [[nodiscard]] const Sequence* findSequence(const Project& project, EntityId id) noexcept;
 [[nodiscard]] const Track* findTrack(const Sequence& sequence, EntityId id) noexcept;
 [[nodiscard]] const Clip* findClip(const Sequence& sequence, EntityId id) noexcept;
