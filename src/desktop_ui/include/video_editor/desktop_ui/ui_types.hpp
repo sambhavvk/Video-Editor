@@ -201,6 +201,9 @@ struct TimelineClipView {
   qint64 duration{0};
   QColor color{82, 126, 183};
   bool selected{false};
+  bool active{false};
+  bool linkedCompanion{false};
+  QString linkedGroupId;
   bool offline{false};
   bool proxy{false};
   bool enabled{true};

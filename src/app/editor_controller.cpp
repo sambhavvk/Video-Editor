@@ -376,6 +376,44 @@ using desktop_ui::MediaItemView;
 using desktop_ui::TimelineClipView;
 using desktop_ui::TimelineTrackView;
 
+[[nodiscard]] QString timelineEditFailureMessage(const QString& context,
+                                                 const edit::EditError& error) {
+  const QString model = QString::fromStdString(error.message);
+  if (error.code == edit::EditErrorCode::TrackLocked) {
+    if (model.contains(QStringLiteral("to a locked track"), Qt::CaseInsensitive)) {
+      return QCoreApplication::translate(
+          "EditorController",
+          "Cannot move to a locked track — unlock the destination track first.");
+    }
+    if (model.contains(QStringLiteral("from a locked track"), Qt::CaseInsensitive)) {
+      return QCoreApplication::translate(
+          "EditorController",
+          "Cannot move clips on a locked track — unlock the source track first.");
+    }
+    if (model.contains(QStringLiteral("trim"), Qt::CaseInsensitive)) {
+      return QCoreApplication::translate("EditorController",
+                                         "Cannot trim on a locked track — unlock the track first.");
+    }
+    if (model.contains(QStringLiteral("insert"), Qt::CaseInsensitive)) {
+      return QCoreApplication::translate(
+          "EditorController",
+          "Cannot insert on a locked track — unlock a targeted track first.");
+    }
+    return QCoreApplication::translate("EditorController",
+                                       "That edit is blocked because a track is locked.");
+  }
+  if (error.code == edit::EditErrorCode::Overlap) {
+    return QCoreApplication::translate(
+        "EditorController",
+        "That destination overlaps another clip — try ripple or overwrite, or choose a gap.");
+  }
+  if (model.contains(QStringLiteral("targeted"), Qt::CaseInsensitive)) {
+    return QCoreApplication::translate("EditorController",
+                                       "No unlocked targeted track accepts that edit.");
+  }
+  return QStringLiteral("%1: %2").arg(context, model);
+}
+
 constexpr qint64 kDefaultMediaCacheBudgetBytes = 100LL * 1024 * 1024 * 1024;
 constexpr int kCacheJobThumbnail = 0;
 constexpr int kCacheJobWaveform = 1;
@@ -1295,6 +1333,8 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::removeClipOpacityKeyframe);
   connect(window_.timeline(), &desktop_ui::TimelineWidget::clipFreezeFrameRequested, this,
           &EditorController::freezeFrameFromTimeline);
+  connect(window_.timeline(), &desktop_ui::TimelineWidget::editDestinationRejected, this,
+          [this](const QString& message) { window_.showTransientMessage(message); });
   connect(window_.timeline(), &desktop_ui::TimelineWidget::followPlayheadDisabled, this, [this] {
     if (auto* action = window_.action(QStringLiteral("toggleFollowPlayhead"))) {
       action->setChecked(false);
@@ -4668,6 +4708,7 @@ void EditorController::toggleLinkedSelection() {
   }
   window_.showTransientMessage(linked_selection_enabled_ ? tr("Linked selection on")
                                                          : tr("Linked selection off"));
+  refreshTimelineView();
 }
 
 void EditorController::unlinkSelectedClips() {
@@ -8644,8 +8685,7 @@ bool EditorController::apply(edit::EditCommand command, const QString& failureCo
   const auto result = editor_->apply(std::move(command), editor_->revision());
   if (!result) {
     SessionEventLog::instance().log_backend("apply", "failure op=" + operation);
-    window_.showTransientMessage(QStringLiteral("%1: %2").arg(
-        failureContext, QString::fromStdString(result.error().message)));
+    window_.showTransientMessage(timelineEditFailureMessage(failureContext, result.error()));
     return false;
   }
   stopAudioPlayback();
@@ -8690,8 +8730,7 @@ bool EditorController::applyBatch(std::vector<edit::EditCommand> commands,
     SessionEventLog::instance().log_backend(
         "applyBatch", "failure count=" + std::to_string(command_count) + " error=" +
                           result.error().message);
-    window_.showTransientMessage(QStringLiteral("%1: %2").arg(
-        failureContext, QString::fromStdString(result.error().message)));
+    window_.showTransientMessage(timelineEditFailureMessage(failureContext, result.error()));
     refreshViews();
     return false;
   }
@@ -9292,6 +9331,16 @@ void EditorController::refreshTimelineView() {
   }
   timeline_time_scale_ = timelineTimeScale(*sequence);
   pruneTimelineSelection(*sequence);
+  std::unordered_set<edit::EntityId> selected_linked_groups;
+  if (linked_selection_enabled_) {
+    for (const auto& track : sequence->tracks) {
+      for (const auto& clip : track.clips) {
+        if (selected_clip_ids_.contains(clip.id) && clip.linked_group.has_value()) {
+          selected_linked_groups.insert(*clip.linked_group);
+        }
+      }
+    }
+  }
   QVector<TimelineTrackView> tracks;
   QVector<TimelineClipView> clips;
   QVector<desktop_ui::TimelineMarkerView> markers;
@@ -9332,6 +9381,14 @@ void EditorController::refreshTimelineView() {
                           ? QVector<desktop_ui::WaveformBucketView>{}
                           : waveform->second,
       };
+      view.active = active_clip_id_.has_value() && clip.id == *active_clip_id_;
+      if (clip.linked_group.has_value()) {
+        view.linkedGroupId = QString::fromStdString(clip.linked_group->toString());
+        if (linked_selection_enabled_ && !view.selected &&
+            selected_linked_groups.contains(*clip.linked_group)) {
+          view.linkedCompanion = true;
+        }
+      }
       if (track.kind == edit::TrackKind::Audio) {
         view.envelopeKind = desktop_ui::TimelineClipView::EnvelopeKind::Volume;
         view.envelopeStatic = clip.audio_gain_db;
@@ -9438,6 +9495,7 @@ void EditorController::refreshTimelineView() {
                                            static_cast<qint64>(timeline_time_scale_) * 10);
   window_.setTimelineView(duration, timeline_time_scale_, std::move(tracks), std::move(clips),
                           std::move(markers), std::move(gaps));
+  window_.timeline()->setLinkedSelectionEnabled(linked_selection_enabled_);
   QVector<desktop_ui::TransitionView> transitions;
   transitions.reserve(static_cast<qsizetype>(sequence->transitions.size()));
   track_index = 0;

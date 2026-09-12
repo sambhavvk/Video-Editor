@@ -38,6 +38,13 @@ constexpr QColor kMutedText{139, 145, 157};
 constexpr QColor kPlayhead{244, 89, 93};
 constexpr QColor kSnapGuide{94, 214, 194};
 constexpr QColor kEditPreview{230, 238, 255, 105};
+constexpr QColor kEditPreviewRejected{220, 90, 90, 120};
+constexpr QColor kSelectionAccent{238, 243, 252, 185};
+constexpr QColor kActiveClipAccent{238, 183, 72, 220};
+constexpr QColor kLinkedCompanionAccent{94, 214, 194, 205};
+constexpr QColor kTargetTrackAccent{94, 214, 194, 70};
+constexpr QColor kLockedTrackOverlay{196, 88, 88, 34};
+constexpr QColor kUntargetedTrackDim{12, 14, 18, 95};
 constexpr double kVolumeDbMin = -60.0;
 constexpr double kVolumeDbMax = 12.0;
 constexpr int kEnvelopeHitSlop = 6;
@@ -98,6 +105,38 @@ QColor trackTint(TrackKind kind) {
     return QColor{48, 42, 34};
   }
   return kCanvas;
+}
+
+void paintLockedTrackOverlay(QPainter& painter, const QRect& body) {
+  painter.fillRect(body, kLockedTrackOverlay);
+  painter.setPen(QPen{QColor{196, 88, 88, 48}, 1});
+  for (int x = body.left() - body.height(); x < body.right(); x += 10) {
+    painter.drawLine(x, body.bottom(), x + body.height(), body.top());
+  }
+}
+
+void paintClipSelectionChrome(QPainter& painter, const QPainterPath& shape, const QRect& rect,
+                              const TimelineClipView& clip) {
+  if (clip.linkedCompanion && !clip.selected) {
+    painter.setPen(QPen{kLinkedCompanionAccent, 2, Qt::DashLine});
+    painter.setBrush(Qt::NoBrush);
+    painter.drawPath(shape);
+  }
+  if (clip.selected) {
+    painter.setPen(QPen{clip.active ? kActiveClipAccent : QColor{236, 242, 255},
+                        clip.active ? 2.5 : 2});
+    painter.setBrush(Qt::NoBrush);
+    painter.drawPath(shape);
+    painter.setPen(QPen{kSelectionAccent, 2});
+    painter.drawLine(rect.left() + 2, rect.top() + 6, rect.left() + 2, rect.bottom() - 6);
+    painter.drawLine(rect.right() - 2, rect.top() + 6, rect.right() - 2, rect.bottom() - 6);
+  }
+  if (clip.active) {
+    painter.fillRect(rect.left() + 4, rect.top() + 2, std::max(0, rect.width() - 8), 3,
+                     kActiveClipAccent);
+    painter.fillRect(rect.left() + 4, rect.bottom() - 5, std::max(0, rect.width() - 8), 3,
+                     kActiveClipAccent);
+  }
 }
 
 } // namespace
@@ -497,27 +536,68 @@ void TimelineWidget::setTrackHeight(int height) {
   viewport()->update();
 }
 
+void TimelineWidget::setLinkedSelectionEnabled(const bool enabled) {
+  if (linked_selection_enabled_ == enabled) {
+    return;
+  }
+  linked_selection_enabled_ = enabled;
+  syncClipSelectionChrome();
+  viewport()->update();
+}
+
+bool TimelineWidget::moveDestinationIsValid(const int trackIndex) const {
+  if (trackIndex < 0 || trackIndex >= tracks_.size()) {
+    return false;
+  }
+  const auto& track = tracks_.at(trackIndex);
+  return !track.locked;
+}
+
+void TimelineWidget::reportEditDestinationRejected(const QString& message) {
+  emit editDestinationRejected(message);
+}
+
+void TimelineWidget::syncClipSelectionChrome() {
+  QStringList selectedGroups;
+  if (linked_selection_enabled_) {
+    for (const auto& clip : clips_) {
+      if (clip.selected && !clip.linkedGroupId.isEmpty() &&
+          !selectedGroups.contains(clip.linkedGroupId)) {
+        selectedGroups.push_back(clip.linkedGroupId);
+      }
+    }
+  }
+  for (auto& clip : clips_) {
+    clip.active = !active_clip_id_.isEmpty() && clip.id == active_clip_id_;
+    clip.linkedCompanion = linked_selection_enabled_ && !clip.selected &&
+                           !clip.linkedGroupId.isEmpty() &&
+                           selectedGroups.contains(clip.linkedGroupId);
+  }
+}
+
 void TimelineWidget::nudgeActiveClipByFrames(int frameCount, EditIntent intent) {
   const auto ids = selectedClipIds();
   if (frameCount == 0) {
     return;
   }
+  const auto index = activeClipIndex();
+  if (index >= 0) {
+    const auto& clip = clips_.at(index);
+    if (clip.trackIndex < 0 || clip.trackIndex >= tracks_.size() ||
+        tracks_.at(clip.trackIndex).locked) {
+      reportEditDestinationRejected(
+          tr("That track is locked — unlock it before nudging clips here."));
+      return;
+    }
+  }
   emit frameNudgeRequested(ids, frameCount, intent);
-  if (ids.isEmpty()) {
+  if (ids.isEmpty() || index < 0) {
     return;
   }
 
   // Compatibility preview for old controller integrations. New integrations use
   // frameNudgeRequested so conversion stays exact in the edit model.
-  const auto index = activeClipIndex();
-  if (index < 0) {
-    return;
-  }
   const auto& clip = clips_.at(index);
-  if (clip.trackIndex < 0 || clip.trackIndex >= tracks_.size() ||
-      tracks_.at(clip.trackIndex).locked) {
-    return;
-  }
 
   const auto frameDuration = roundedFrameDuration();
   qint64 requestedDelta = 0;
@@ -563,9 +643,22 @@ void TimelineWidget::paintEvent(QPaintEvent* event) {
 
   if (!tracks_.isEmpty()) {
     for (int index = firstTrack; index <= lastTrack; ++index) {
+      const auto& track = tracks_.at(index);
       const auto y = ruler_height_ + index * track_height_ - scrollY;
       const QRect body{timelineLeft, y, viewport()->width() - timelineLeft, track_height_};
-      painter.fillRect(body, trackTint(tracks_.at(index).kind));
+      auto tint = trackTint(track.kind);
+      if (!track.targeted) {
+        tint = tint.darker(112);
+      }
+      painter.fillRect(body, tint);
+      if (track.locked) {
+        paintLockedTrackOverlay(painter, body);
+      } else if (!track.targeted) {
+        painter.fillRect(body, kUntargetedTrackDim);
+      }
+      if (track.targeted && !track.locked) {
+        painter.fillRect(QRect{timelineLeft, y, 3, track_height_}, kTargetTrackAccent);
+      }
       painter.setPen(kDivider);
       painter.drawLine(body.bottomLeft(), body.bottomRight());
     }
@@ -641,7 +734,7 @@ void TimelineWidget::paintEvent(QPaintEvent* event) {
       fill = fill.darker(145);
     }
     painter.fillPath(shape, fill);
-    painter.setPen(clip.selected ? QColor{236, 242, 255} : fill.lighter(128));
+    painter.setPen(clip.selected || clip.active ? QColor{236, 242, 255} : fill.lighter(128));
     painter.drawPath(shape);
 
     painter.save();
@@ -759,11 +852,7 @@ void TimelineWidget::paintEvent(QPaintEvent* event) {
     }
     painter.restore();
 
-    if (clip.selected || clip.id == active_clip_id_) {
-      painter.setPen(QPen{QColor{238, 243, 252, 185}, 2});
-      painter.drawLine(rect.left() + 2, rect.top() + 6, rect.left() + 2, rect.bottom() - 6);
-      painter.drawLine(rect.right() - 2, rect.top() + 6, rect.right() - 2, rect.bottom() - 6);
-    }
+    paintClipSelectionChrome(painter, shape, rect, clip);
   }
 
   for (const auto& transition : transitions_) {
@@ -890,8 +979,13 @@ void TimelineWidget::paintEvent(QPaintEvent* event) {
     }
     const auto previewRect = clipRect(previewClip);
     if (previewRect.intersects(viewport()->rect())) {
-      painter.fillRect(previewRect, kEditPreview);
-      painter.setPen(QPen{QColor{238, 243, 252}, 1, Qt::DashLine});
+      const bool rejected =
+          clip_gesture_.mode == EditMode::Move &&
+          (clip_gesture_.sourceTrackLocked ||
+           !moveDestinationIsValid(clip_gesture_.destinationTrackIndex));
+      painter.fillRect(previewRect, rejected ? kEditPreviewRejected : kEditPreview);
+      painter.setPen(QPen{rejected ? QColor{244, 120, 120} : QColor{238, 243, 252}, 1,
+                          Qt::DashLine});
       painter.drawRoundedRect(previewRect, 4, 4);
     }
   }
@@ -906,7 +1000,14 @@ void TimelineWidget::paintEvent(QPaintEvent* event) {
     const auto& track = tracks_.at(index);
     const auto y = ruler_height_ + index * track_height_ - scrollY;
     const QRect header{0, y, header_width_, track_height_};
-    painter.fillRect(header, index % 2 == 0 ? kHeader : QColor{34, 37, 43});
+    const QColor headerFill =
+        track.locked ? QColor{44, 36, 38}
+        : track.targeted ? (index % 2 == 0 ? QColor{33, 38, 42} : QColor{31, 36, 40})
+                         : (index % 2 == 0 ? kHeader : QColor{34, 37, 43});
+    painter.fillRect(header, headerFill);
+    if (track.targeted && !track.locked) {
+      painter.fillRect(QRect{0, y, 3, track_height_}, kTargetTrackAccent);
+    }
     painter.setPen(kDivider);
     painter.drawLine(header.bottomLeft(), header.bottomRight());
     painter.setPen(track.locked ? kMutedText : kText);
@@ -1060,9 +1161,13 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
       const auto clipIndex = clipAt(position);
       if (clipIndex >= 0) {
         const auto& clip = clips_.at(clipIndex);
-        if (clip.trackIndex >= 0 && clip.trackIndex < tracks_.size() &&
-            !tracks_.at(clip.trackIndex).locked) {
-          emit clipCutAtRequested(clip.id, cutTime);
+        if (clip.trackIndex >= 0 && clip.trackIndex < tracks_.size()) {
+          if (tracks_.at(clip.trackIndex).locked) {
+            reportEditDestinationRejected(
+                tr("That track is locked — unlock it before splitting clips here."));
+          } else {
+            emit clipCutAtRequested(clip.id, cutTime);
+          }
         }
       }
     }
@@ -1175,6 +1280,13 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
                           tracks_.at(trackIndex).locked;
       const auto envelopeHit = hitRegion == ClipHitRegion::Envelope ||
                                hitRegion == ClipHitRegion::EnvelopeKeyframe;
+      if (locked && (tool_mode_ == ToolMode::Pen || envelopeHit)) {
+        reportEditDestinationRejected(
+            tr("That track is locked — unlock it before editing envelopes here."));
+        viewport()->update();
+        event->accept();
+        return;
+      }
       if (!locked &&
           (tool_mode_ == ToolMode::Pen || envelopeHit) &&
           clips_.at(clipIndex).envelopeKind != TimelineClipView::EnvelopeKind::None) {
@@ -1209,11 +1321,21 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event) {
                                 tool_mode_ == ToolMode::OverwriteTrim ||
                                 tool_mode_ == ToolMode::Roll;
       const auto requiresBody = tool_mode_ == ToolMode::Slip || tool_mode_ == ToolMode::Slide;
-      if (trackIndex >= 0 && trackIndex < tracks_.size() && !tracks_.at(trackIndex).locked &&
+      const auto onEditHandle = hitRegion == ClipHitRegion::Body ||
+                                hitRegion == ClipHitRegion::TrimIn ||
+                                hitRegion == ClipHitRegion::TrimOut;
+      const auto gestureAllowed =
+          trackIndex >= 0 && trackIndex < tracks_.size() &&
           (!requiresEdge ||
            (hitRegion == ClipHitRegion::TrimIn || hitRegion == ClipHitRegion::TrimOut)) &&
-          (!requiresBody || hitRegion == ClipHitRegion::Body)) {
+          (!requiresBody || hitRegion == ClipHitRegion::Body);
+      if (gestureAllowed && !locked) {
         beginClipGesture(clipIndex, position, hitRegion);
+      } else if (locked && tool_mode_ == ToolMode::Select && onEditHandle) {
+        beginClipGesture(clipIndex, position, hitRegion);
+      } else if (locked && (requiresEdge || requiresBody)) {
+        reportEditDestinationRejected(
+            tr("That track is locked — unlock it before editing clips here."));
       }
       viewport()->update();
       event->accept();
@@ -1955,6 +2077,7 @@ void TimelineWidget::selectClip(int clipIndex, Qt::KeyboardModifiers modifiers) 
   }
   active_marker_id_.clear();
   active_gap_key_.clear();
+  syncClipSelectionChrome();
   emit clipSelectionChanged(selectedClipIds(), active_clip_id_);
 }
 
@@ -1997,6 +2120,7 @@ void TimelineWidget::selectForwardFromClip(int clipIndex, bool includeTracksBelo
   }
   active_marker_id_.clear();
   active_gap_key_.clear();
+  syncClipSelectionChrome();
   emit clipSelectionChanged(selectedClipIds(), active_clip_id_);
 }
 
@@ -2016,6 +2140,7 @@ void TimelineWidget::selectMarker(int markerIndex) {
   active_marker_id_ = markers_.at(markerIndex).id;
   active_gap_key_.clear();
   active_clip_id_.clear();
+  syncClipSelectionChrome();
   emit markerSelectionChanged(active_marker_id_);
   emit clipSelectionChanged({}, {});
 }
@@ -2036,6 +2161,7 @@ void TimelineWidget::selectGap(int gapIndex) {
   active_gap_key_ = gaps_.at(gapIndex).key;
   active_marker_id_.clear();
   active_clip_id_.clear();
+  syncClipSelectionChrome();
   emit gapSelectionChanged(active_gap_key_);
   emit clipSelectionChanged({}, {});
 }
@@ -2099,6 +2225,9 @@ void TimelineWidget::beginClipGesture(int clipIndex, const QPoint& position,
   clip_gesture_.originalDuration = clip.duration;
   clip_gesture_.originalTrackIndex = clip.trackIndex;
   clip_gesture_.destinationTrackIndex = clip.trackIndex;
+  clip_gesture_.sourceTrackLocked =
+      clip.trackIndex < 0 || clip.trackIndex >= tracks_.size() ||
+      tracks_.at(clip.trackIndex).locked;
   clip_gesture_.mode = gestureMode(hitRegion);
   clip_gesture_.clipIds = selectedClipIds();
   const auto mods = QApplication::keyboardModifiers();
@@ -2403,6 +2532,20 @@ void TimelineWidget::updateClipGesture(const QPoint& position, Qt::KeyboardModif
   }
   clip_gesture_.durationDelta = targetDuration - clip_gesture_.originalDuration;
   clip_gesture_.intent = editIntent(modifiers);
+  const bool destinationLocked =
+      clip_gesture_.mode == EditMode::Move &&
+      !moveDestinationIsValid(clip_gesture_.destinationTrackIndex);
+  if (clip_gesture_.sourceTrackLocked || destinationLocked) {
+    if (!clip_gesture_.destinationRejectedReported) {
+      reportEditDestinationRejected(
+          clip_gesture_.sourceTrackLocked && !destinationLocked
+              ? tr("That track is locked — unlock it before editing clips here.")
+              : tr("That track is locked — unlock it before moving clips here."));
+      clip_gesture_.destinationRejectedReported = true;
+    }
+  } else {
+    clip_gesture_.destinationRejectedReported = false;
+  }
   const auto& clip = clips_.at(clip_gesture_.clipIndex);
   emit clipEditPreview(clip.id, clip_gesture_.destinationTrackIndex, clip_gesture_.startDelta,
                        clip_gesture_.durationDelta, clip_gesture_.mode, clip_gesture_.intent,
@@ -2461,6 +2604,20 @@ void TimelineWidget::finishClipGesture(const QPoint& position, Qt::KeyboardModif
     }
     emit clipVolumeKeyframeUpserted(clipId, completed.envelopeKeyframeId,
                                     completed.envelopeLocalTime, completed.envelopeKeyValue);
+    return;
+  }
+  const bool destinationLocked =
+      completed.mode == EditMode::Move && !completed.editingFade &&
+      !moveDestinationIsValid(completed.destinationTrackIndex);
+  if (completed.sourceTrackLocked || destinationLocked) {
+    if (!completed.destinationRejectedReported) {
+      reportEditDestinationRejected(
+          completed.sourceTrackLocked && !destinationLocked
+              ? tr("That track is locked — unlock it before editing clips here.")
+              : tr("That track is locked — unlock it before moving clips here."));
+    }
+    emit clipEditCanceled(clipId);
+    emit clipBatchEditCanceled(completed.clipIds);
     return;
   }
   if (completed.editingFade) {

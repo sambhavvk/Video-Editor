@@ -89,6 +89,8 @@ private slots:
   void timelineOpacityEnvelopeAndPenTool();
   void inspectorColorWheelsRoundTrip();
   void timelineRollUsesTheControllerBoundaryConvention();
+  void timelineRejectsLockedTrackEditsWithMessage();
+  void timelineShowsLinkedCompanionSelection();
   void timelineMarkerSnappingExcludesTheDraggedMarker();
   void timelineRefreshCancelsMarkerGesturesAndUsesAuthoritativeSelection();
   void timelineCanCreateTracksWithoutAnExistingTrack();
@@ -1965,6 +1967,96 @@ void EditorWindowTest::programOutputDisplayMenuDoesNotCrashWithOneScreen() {
   window.setProgramOutputScreen(nullptr);
   QCoreApplication::processEvents();
   QVERIFY(window.programOutputViewer() == nullptr);
+}
+
+void EditorWindowTest::timelineRejectsLockedTrackEditsWithMessage() {
+  TimelineWidget timeline;
+  timeline.resize(900, 260);
+  timeline.setTimeline(
+      10'000, 1'000,
+      {{QStringLiteral("video-1"), QStringLiteral("Video 1"), TrackKind::Video, false, false,
+        false, true, true},
+       {QStringLiteral("video-2"), QStringLiteral("Video 2"), TrackKind::Video, false, false, true,
+        true, true}},
+      {{QStringLiteral("clip-a"), QStringLiteral("Clip A"), 0, 1'000, 2'000},
+       {QStringLiteral("clip-b"), QStringLiteral("Clip B"), 1, 1'000, 2'000}});
+  timeline.setPixelsPerSecond(100.0);
+  timeline.show();
+  QCoreApplication::processEvents();
+
+  QSignalSpy rejected(&timeline, &TimelineWidget::editDestinationRejected);
+  QSignalSpy commits(&timeline, &TimelineWidget::clipBatchEditCommitted);
+  QSignalSpy canceled(&timeline, &TimelineWidget::clipBatchEditCanceled);
+  timeline.setToolMode(TimelineWidget::ToolMode::Razor);
+  QTest::mouseClick(timeline.viewport(), Qt::LeftButton, Qt::NoModifier, {350, 118});
+  QCOMPARE(rejected.count(), 1);
+  QVERIFY(rejected.at(0).at(0).toString().contains(QStringLiteral("locked")));
+
+  rejected.clear();
+  timeline.setToolMode(TimelineWidget::ToolMode::Select);
+  sendPointer(timeline, QEvent::MouseButtonPress, {350, 118}, Qt::LeftButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseButtonRelease, {350, 118}, Qt::LeftButton, Qt::NoButton);
+  QCOMPARE(rejected.count(), 0);
+  QVERIFY(timeline.clips().at(1).selected);
+  QVERIFY(timeline.clips().at(1).active);
+
+  rejected.clear();
+  commits.clear();
+  QSignalSpy nudgeCommits(&timeline, &TimelineWidget::clipEditCommitted);
+  timeline.nudgeActiveClipByFrames(1);
+  QCOMPARE(rejected.count(), 1);
+  QCOMPARE(rejected.at(0).at(0).toString(),
+           QStringLiteral("That track is locked — unlock it before nudging clips here."));
+  QCOMPARE(nudgeCommits.count(), 0);
+
+  rejected.clear();
+  sendPointer(timeline, QEvent::MouseButtonPress, {350, 60}, Qt::LeftButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseMove, {430, 118}, Qt::NoButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseButtonRelease, {430, 118}, Qt::LeftButton, Qt::NoButton);
+  QCOMPARE(rejected.count(), 1);
+  QVERIFY(rejected.at(0).at(0).toString().contains(QStringLiteral("locked")));
+  QCOMPARE(commits.count(), 0);
+  QCOMPARE(canceled.count(), 1);
+}
+
+void EditorWindowTest::timelineShowsLinkedCompanionSelection() {
+  TimelineWidget timeline;
+  timeline.resize(900, 260);
+  timeline.setLinkedSelectionEnabled(true);
+  timeline.setTimeline(
+      10'000, 1'000,
+      {{QStringLiteral("video-1"), QStringLiteral("Video 1"), TrackKind::Video},
+       {QStringLiteral("audio-1"), QStringLiteral("Audio 1"), TrackKind::Audio}},
+      {{QStringLiteral("clip-v"), QStringLiteral("Video"), 0, 1'000, 2'000, QColor{82, 126, 183},
+        true, true, false, QStringLiteral("group-1")},
+       {QStringLiteral("clip-a"), QStringLiteral("Audio"), 1, 1'000, 2'000, QColor{82, 126, 183},
+        false, false, true, QStringLiteral("group-1")}});
+  timeline.setPixelsPerSecond(100.0);
+  timeline.show();
+  QCoreApplication::processEvents();
+
+  const auto& video = timeline.clips().at(0);
+  const auto& audio = timeline.clips().at(1);
+  QVERIFY(video.selected);
+  QVERIFY(video.active);
+  QVERIFY(!video.linkedCompanion);
+  QVERIFY(!audio.selected);
+  QVERIFY(!audio.active);
+  QVERIFY(audio.linkedCompanion);
+  QCOMPARE(audio.linkedGroupId, QStringLiteral("group-1"));
+
+  timeline.setLinkedSelectionEnabled(false);
+  QVERIFY(!timeline.clips().at(1).linkedCompanion);
+
+  timeline.setLinkedSelectionEnabled(true);
+  sendPointer(timeline, QEvent::MouseButtonPress, {350, 118}, Qt::LeftButton, Qt::LeftButton);
+  sendPointer(timeline, QEvent::MouseButtonRelease, {350, 118}, Qt::LeftButton, Qt::NoButton);
+  QVERIFY(timeline.clips().at(1).selected);
+  QVERIFY(timeline.clips().at(1).active);
+  QVERIFY(!timeline.clips().at(1).linkedCompanion);
+  QVERIFY(!timeline.clips().at(0).selected);
+  QVERIFY(!timeline.clips().at(0).active);
+  QVERIFY(timeline.clips().at(0).linkedCompanion);
 }
 
 QTEST_MAIN(EditorWindowTest)

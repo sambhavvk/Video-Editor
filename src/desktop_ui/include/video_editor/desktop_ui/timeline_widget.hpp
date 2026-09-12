@@ -174,6 +174,10 @@ public slots:
   [[nodiscard]] int trackHeight() const noexcept {
     return track_height_;
   }
+  void setLinkedSelectionEnabled(bool enabled);
+  [[nodiscard]] bool linkedSelectionEnabled() const noexcept {
+    return linked_selection_enabled_;
+  }
   void nudgeActiveClipByFrames(int frameCount, EditIntent intent = EditIntent::Normal);
 
 signals:
@@ -241,6 +245,7 @@ signals:
   void trackVisibilityToggled(const QString& trackId, bool visible);
   void trackTargetToggled(const QString& trackId, bool targeted);
   void trackRemoveRequested(const QString& trackId);
+  void editDestinationRejected(const QString& message);
 
 protected:
   void paintEvent(QPaintEvent* event) override;
@@ -303,6 +308,9 @@ private:
   [[nodiscard]] double envelopeValueForY(const QRect& band, const TimelineClipView& clip,
                                          int viewportY) const;
   [[nodiscard]] int envelopeKeyframeAt(int clipIndex, const QPoint& position) const;
+  [[nodiscard]] bool moveDestinationIsValid(int trackIndex) const;
+  void reportEditDestinationRejected(const QString& message);
+  void syncClipSelectionChrome();
 
   QVector<TimelineTrackView> tracks_;
   QVector<TimelineClipView> clips_;
@@ -337,6 +345,7 @@ private:
   QString active_marker_id_;
   QString active_gap_key_;
   ToolMode tool_mode_{ToolMode::Select};
+  bool linked_selection_enabled_{true};
 
   struct PanGesture {
     bool pointerDown{false};
@@ -381,6 +390,8 @@ private:
     double envelopeKeyValue{0.0};
     double envelopeStaticValue{0.0};
     TimelineClipView::EnvelopeKind envelopeKind{TimelineClipView::EnvelopeKind::None};
+    bool sourceTrackLocked{false};
+    bool destinationRejectedReported{false};
   };
   ClipGesture clip_gesture_;
 

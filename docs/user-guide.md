@@ -124,10 +124,13 @@ Audio clips draw a waveform on the timeline when the cache has generated one.
 ## Edit the timeline
 
 Click a clip to replace the selection. **Ctrl+click** toggles one clip and **Shift+click** selects the
-deterministic range from the selection anchor. Dragging any selected clip moves the selection as
-one atomic edit; only the dragged active clip may change tracks, while the others retain their
-tracks. A pointer gesture displays a transient preview and commits one revision when released.
-Press **Escape** during a drag to cancel it. Dragging near a viewport edge auto-scrolls.
+deterministic range from the selection anchor. The active edit target shows gold bars; other selected
+clips use a bright outline; linked audio/video partners show a teal dashed outline when linked
+selection is on. Dragging any selected clip moves the selection as one atomic edit; only the dragged
+active clip may change tracks, while the others retain their tracks. A pointer gesture displays a
+transient preview and commits one revision when released. Moving onto a locked track shows a red
+preview and a status-bar explanation instead of committing. Press **Escape** during a drag to cancel
+it. Dragging near a viewport edge auto-scrolls.
 
 Snapping is resolved by the exact edit model, not a separate visual approximation. It considers the
 playhead, marker boundaries, other clip edges, and the sequence frame grid with deterministic tie
@@ -159,6 +162,7 @@ active tool, including razor, pen, hand, zoom, ripple/overwrite trim, roll, slip
 Control requests ripple intent and Alt requests overwrite intent for compatible Select-tool
 gestures. Invalid destinations, overlaps, missing source handles, non-adjacent precision edits, and
 locked selected/linked participants reject the complete batch and restore the authoritative view.
+The status bar explains locked-track, overlap, and targeting failures in plain language.
 
 Right-click a clip for **Properties** (select and raise the Inspector), **Cut here** (split at the
 clicked position), **Delete**, or **Ripple Delete**.
@@ -180,12 +184,14 @@ Other editing operations:
 ### Tracks, markers, and gaps
 
 Track headers show lock, output visibility, and target state with text/icons in addition to color.
-Click those controls to toggle them. Right-click a track header for Add Video/Audio Track, Rename,
-Move Up/Down, Lock, Visible, Target, and Remove. **Insert** adds a video track and **Shift+Insert**
-adds an audio track. **Ctrl+Up/Down**
+Targeted rows also show a teal left rail; locked rows show a hatched overlay; untargeted rows are
+slightly dimmed. Click those controls to toggle them. Right-click a track header for Add Video/Audio
+Track, Rename, Move Up/Down, Lock, Visible, Target, and Remove. **Insert** adds a video track and
+**Shift+Insert** adds an audio track. **Ctrl+Up/Down**
 reorders the active track. With a track header active, **L**, **V**, and **T** toggle lock,
-visibility, and targeting. Locked tracks reject structural edits. Hidden video tracks do not
-contribute to preview or export. Targeted, unlocked compatible tracks receive media insertion.
+visibility, and targeting. Locked tracks reject structural edits with a direct status-bar message.
+Hidden video tracks do not contribute to preview or export. Targeted, unlocked compatible tracks
+receive media insertion.
 
 Double-click the ruler or press **M** to add a color-coded marker. Drag a ranged marker's right
 edge to set duration. The marker list below the timeline shows all markers in time order;
