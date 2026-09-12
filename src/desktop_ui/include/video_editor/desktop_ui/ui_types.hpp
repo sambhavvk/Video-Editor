@@ -102,6 +102,14 @@ struct MediaItemView {
   QStringList tags;
   QString notes;
   int rating{0};
+  QString scene;
+  QString shot;
+  QString take;
+  QString camera;
+  QString reel;
+  QString audioRoll;
+  QString sourceTimecode;
+  bool preferredTake{false};
   QImage thumbnail;
   bool offline{false};
   bool contentChanged{false};
@@ -123,6 +131,18 @@ struct MediaBinView {
   bool smartHasVideo{false};
   bool smartHasAudioFilter{false};
   bool smartHasAudio{false};
+  QString smartSceneEquals;
+  QString smartShotEquals;
+  QString smartTakeEquals;
+  bool smartPreferredTakeOnly{false};
+};
+
+struct SavedMediaViewItem {
+  QString id;
+  QString name;
+  QStringList visibleColumns;
+  QString searchText;
+  bool active{false};
 };
 
 struct TimelineTrackView {
@@ -281,6 +301,14 @@ struct AssetMetadataView {
   QStringList tags;
   QString notes;
   int rating{0};
+  QString scene;
+  QString shot;
+  QString take;
+  QString camera;
+  QString reel;
+  QString audioRoll;
+  QString sourceTimecode;
+  bool preferredTake{false};
 };
 
 struct MulticamAngleView {

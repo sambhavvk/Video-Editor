@@ -20,6 +20,7 @@ class QGroupBox;
 class QLabel;
 class QLineEdit;
 class QListWidget;
+class QMenu;
 class QPlainTextEdit;
 class QProgressBar;
 class QPushButton;
@@ -45,9 +46,14 @@ public:
 
   void setBins(const QVector<MediaBinView>& bins);
   void setItems(const QVector<MediaItemView>& items);
+  void setSavedViews(const QVector<SavedMediaViewItem>& views);
+  void setVisibleColumns(const QStringList& columns);
+  void applySearchText(const QString& query);
   [[nodiscard]] const QVector<MediaItemView>& items() const noexcept {
     return items_;
   }
+  [[nodiscard]] QString currentSearchText() const;
+  [[nodiscard]] QStringList currentVisibleColumns() const;
 
 protected:
   bool eventFilter(QObject* watched, QEvent* event) override;
@@ -67,6 +73,8 @@ signals:
   void setAssetBinRequested(const QString& assetId, const QString& binId);
   void revealInFilesRequested(const QString& mediaId);
   void hoverScrubRequested(const QString& mediaId, double normalizedPosition);
+  void savedViewSelected(const QString& viewId);
+  void saveCurrentViewRequested(const QString& name);
 
 private slots:
   void applyFilter(const QString& query);
@@ -92,8 +100,16 @@ private:
   QStackedWidget* content_{nullptr};
   QTableWidget* table_{nullptr};
   QListWidget* icon_view_{nullptr};
+  void rebuildColumnMenu();
+  void applyVisibleColumns();
+
+  QComboBox* saved_view_combo_{nullptr};
+  QToolButton* columns_button_{nullptr};
+  QMenu* columns_menu_{nullptr};
   QVector<MediaBinView> bins_;
   QVector<MediaItemView> items_;
+  QVector<SavedMediaViewItem> saved_views_;
+  QStringList visible_columns_;
   bool icon_view_mode_{false};
 };
 
@@ -276,6 +292,14 @@ private:
   QLineEdit* asset_tags_{nullptr};
   QPlainTextEdit* asset_notes_{nullptr};
   QSpinBox* asset_rating_{nullptr};
+  QLineEdit* asset_scene_{nullptr};
+  QLineEdit* asset_shot_{nullptr};
+  QLineEdit* asset_take_{nullptr};
+  QLineEdit* asset_camera_{nullptr};
+  QLineEdit* asset_reel_{nullptr};
+  QLineEdit* asset_audio_roll_{nullptr};
+  QLineEdit* asset_source_timecode_{nullptr};
+  QCheckBox* asset_preferred_take_{nullptr};
   AssetMetadataView asset_metadata_{};
   QStackedWidget* content_{nullptr};
   QFormLayout* transform_form_{nullptr};

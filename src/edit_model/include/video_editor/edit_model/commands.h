@@ -312,6 +312,16 @@ struct SetAssetMetadataCommand final {
   std::vector<std::string> tags;
   std::string notes;
   int rating{0};
+  ProductionMetadata production;
+};
+struct UpsertSavedMediaViewCommand final {
+  SavedMediaView view;
+};
+struct RemoveSavedMediaViewCommand final {
+  EntityId view_id;
+};
+struct SetActiveMediaViewCommand final {
+  std::optional<EntityId> view_id;
 };
 struct SetSmartQueryCommand final {
   EntityId bin_id;
@@ -387,7 +397,9 @@ using EditOperation = std::variant<
     AddTrackEffectCommand, RemoveTrackEffectCommand, SetTrackEffectParameterCommand,
     ApplyCaptionChangeSetCommand, ApplyTimelineCutChangeSetCommand, RelinkAssetCommand,
     CreateBinCommand, RenameBinCommand, MoveBinCommand, RemoveBinCommand, SetAssetBinCommand,
-    SetAssetMetadataCommand, SetSmartQueryCommand, ReplaceClipMediaCommand, SetClipNameCommand,
+    SetAssetMetadataCommand, SetSmartQueryCommand, UpsertSavedMediaViewCommand,
+    RemoveSavedMediaViewCommand, SetActiveMediaViewCommand, ReplaceClipMediaCommand,
+    SetClipNameCommand,
     SetClipLinkedGroupCommand, SetClipEnabledCommand, SetSequenceNameCommand,
     SetSequenceStartTimeCommand, CreateMulticamGroupCommand, RemoveMulticamGroupCommand,
     SetMulticamSyncCommand, SetMulticamActiveAngleCommand, SetMulticamAudioMasterCommand,

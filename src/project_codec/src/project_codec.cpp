@@ -476,6 +476,30 @@ void encodeAsset(const edit::Asset& value, wire::Asset* output, std::string_view
   if (value.rating != 0) {
     output->set_rating(value.rating);
   }
+  if (!value.production.scene.empty()) {
+    output->set_production_scene(value.production.scene);
+  }
+  if (!value.production.shot.empty()) {
+    output->set_production_shot(value.production.shot);
+  }
+  if (!value.production.take.empty()) {
+    output->set_production_take(value.production.take);
+  }
+  if (!value.production.camera.empty()) {
+    output->set_production_camera(value.production.camera);
+  }
+  if (!value.production.reel.empty()) {
+    output->set_production_reel(value.production.reel);
+  }
+  if (!value.production.audio_roll.empty()) {
+    output->set_production_audio_roll(value.production.audio_roll);
+  }
+  if (!value.production.source_timecode.empty()) {
+    output->set_production_source_timecode(value.production.source_timecode);
+  }
+  if (value.production.preferred_take) {
+    output->set_production_preferred_take(true);
+  }
 }
 
 void encodeClip(const edit::Clip& value, wire::Clip* output, std::string_view path,
@@ -718,6 +742,28 @@ void encodeSmartQuery(const edit::SmartQuery& value, wire::SmartQuery* output) {
   if (value.name_contains.has_value()) {
     output->set_name_contains(*value.name_contains);
   }
+  if (value.scene_equals.has_value()) {
+    output->set_scene_equals(*value.scene_equals);
+  }
+  if (value.shot_equals.has_value()) {
+    output->set_shot_equals(*value.shot_equals);
+  }
+  if (value.take_equals.has_value()) {
+    output->set_take_equals(*value.take_equals);
+  }
+  if (value.preferred_take_only.has_value()) {
+    output->set_preferred_take_only(*value.preferred_take_only);
+  }
+}
+
+void encodeSavedMediaView(const edit::SavedMediaView& value, wire::SavedMediaView* output,
+                          std::string_view path, IdRegistry& ids) {
+  encodeId(value.id, output->mutable_id(), childPath(path, "id"), &ids);
+  output->set_name(value.name);
+  for (const auto& column : value.visible_columns) {
+    output->add_visible_columns(column);
+  }
+  encodeSmartQuery(value.search, output->mutable_search());
 }
 
 void encodeBin(const edit::MediaBin& value, wire::MediaBin* output, std::string_view path,
@@ -784,6 +830,14 @@ void encodeProject(const edit::Project& value, wire::Project* output) {
   for (std::size_t index = 0; index < value.multicam_groups.size(); ++index) {
     encodeMulticamGroup(value.multicam_groups[index], output->add_multicam_groups(),
                         indexedPath("project", "multicam_groups", index), ids);
+  }
+  for (std::size_t index = 0; index < value.saved_media_views.size(); ++index) {
+    encodeSavedMediaView(value.saved_media_views[index], output->add_saved_media_views(),
+                         indexedPath("project", "saved_media_views", index), ids);
+  }
+  if (value.active_media_view_id) {
+    encodeId(*value.active_media_view_id, output->mutable_active_media_view_id(),
+             "project.active_media_view_id");
   }
   encodeMetadata(value.metadata, output->mutable_metadata(), "project.metadata");
 }
@@ -1097,6 +1151,82 @@ void reject_v6_fields_in_declared_older(const wire::ProjectSnapshot& snapshot) {
   if (!snapshot.project().multicam_groups().empty()) {
     fail(CodecErrorCode::InvalidField, indexedPath("project", "multicam_groups", 0),
          "declared schema older than v6 cannot contain multicam groups");
+  }
+}
+
+void reject_v7_fields_in_declared_older(const wire::ProjectSnapshot& snapshot) {
+  if (snapshot.schema_version() >= 7U) {
+    return;
+  }
+  std::size_t asset_index = 0;
+  for (const auto& asset : snapshot.project().assets()) {
+    const auto asset_path = indexedPath("project", "assets", asset_index++);
+    if (asset.has_production_scene()) {
+      fail(CodecErrorCode::InvalidField, childPath(asset_path, "production_scene"),
+           "declared schema older than v7 cannot contain production metadata");
+    }
+    if (asset.has_production_shot()) {
+      fail(CodecErrorCode::InvalidField, childPath(asset_path, "production_shot"),
+           "declared schema older than v7 cannot contain production metadata");
+    }
+    if (asset.has_production_take()) {
+      fail(CodecErrorCode::InvalidField, childPath(asset_path, "production_take"),
+           "declared schema older than v7 cannot contain production metadata");
+    }
+    if (asset.has_production_camera()) {
+      fail(CodecErrorCode::InvalidField, childPath(asset_path, "production_camera"),
+           "declared schema older than v7 cannot contain production metadata");
+    }
+    if (asset.has_production_reel()) {
+      fail(CodecErrorCode::InvalidField, childPath(asset_path, "production_reel"),
+           "declared schema older than v7 cannot contain production metadata");
+    }
+    if (asset.has_production_audio_roll()) {
+      fail(CodecErrorCode::InvalidField, childPath(asset_path, "production_audio_roll"),
+           "declared schema older than v7 cannot contain production metadata");
+    }
+    if (asset.has_production_source_timecode()) {
+      fail(CodecErrorCode::InvalidField, childPath(asset_path, "production_source_timecode"),
+           "declared schema older than v7 cannot contain production metadata");
+    }
+    if (asset.has_production_preferred_take()) {
+      fail(CodecErrorCode::InvalidField, childPath(asset_path, "production_preferred_take"),
+           "declared schema older than v7 cannot contain production metadata");
+    }
+  }
+  if (!snapshot.project().saved_media_views().empty()) {
+    fail(CodecErrorCode::InvalidField, indexedPath("project", "saved_media_views", 0),
+         "declared schema older than v7 cannot contain saved media views");
+  }
+  if (snapshot.project().has_active_media_view_id()) {
+    fail(CodecErrorCode::InvalidField, "project.active_media_view_id",
+         "declared schema older than v7 cannot contain an active media view");
+  }
+  std::size_t bin_index = 0;
+  for (const auto& bin : snapshot.project().bins()) {
+    if (!bin.has_query()) {
+      ++bin_index;
+      continue;
+    }
+    const auto& query = bin.query();
+    const auto query_path =
+        childPath(indexedPath("project", "bins", bin_index++), "query");
+    if (query.has_scene_equals()) {
+      fail(CodecErrorCode::InvalidField, childPath(query_path, "scene_equals"),
+           "declared schema older than v7 cannot contain production smart queries");
+    }
+    if (query.has_shot_equals()) {
+      fail(CodecErrorCode::InvalidField, childPath(query_path, "shot_equals"),
+           "declared schema older than v7 cannot contain production smart queries");
+    }
+    if (query.has_take_equals()) {
+      fail(CodecErrorCode::InvalidField, childPath(query_path, "take_equals"),
+           "declared schema older than v7 cannot contain production smart queries");
+    }
+    if (query.has_preferred_take_only()) {
+      fail(CodecErrorCode::InvalidField, childPath(query_path, "preferred_take_only"),
+           "declared schema older than v7 cannot contain production smart queries");
+    }
   }
 }
 
@@ -1453,6 +1583,30 @@ decodeMetadata(const google::protobuf::RepeatedPtrField<wire::StringEntry>& entr
   if (value.has_rating()) {
     result.rating = value.rating();
   }
+  if (value.has_production_scene()) {
+    result.production.scene = value.production_scene();
+  }
+  if (value.has_production_shot()) {
+    result.production.shot = value.production_shot();
+  }
+  if (value.has_production_take()) {
+    result.production.take = value.production_take();
+  }
+  if (value.has_production_camera()) {
+    result.production.camera = value.production_camera();
+  }
+  if (value.has_production_reel()) {
+    result.production.reel = value.production_reel();
+  }
+  if (value.has_production_audio_roll()) {
+    result.production.audio_roll = value.production_audio_roll();
+  }
+  if (value.has_production_source_timecode()) {
+    result.production.source_timecode = value.production_source_timecode();
+  }
+  if (value.has_production_preferred_take()) {
+    result.production.preferred_take = value.production_preferred_take();
+  }
   return result;
 }
 
@@ -1772,6 +1926,33 @@ decodeMetadata(const google::protobuf::RepeatedPtrField<wire::StringEntry>& entr
   if (value.has_name_contains()) {
     result.name_contains = value.name_contains();
   }
+  if (value.has_scene_equals()) {
+    result.scene_equals = value.scene_equals();
+  }
+  if (value.has_shot_equals()) {
+    result.shot_equals = value.shot_equals();
+  }
+  if (value.has_take_equals()) {
+    result.take_equals = value.take_equals();
+  }
+  if (value.has_preferred_take_only()) {
+    result.preferred_take_only = value.preferred_take_only();
+  }
+  return result;
+}
+
+[[nodiscard]] edit::SavedMediaView decodeSavedMediaView(const wire::SavedMediaView& value,
+                                                        std::string_view path, IdRegistry& ids) {
+  requirePresent(value.has_id(), childPath(path, "id"));
+  edit::SavedMediaView result;
+  result.id = decodeId(value.id(), childPath(path, "id"), &ids);
+  result.name = value.name();
+  for (const auto& column : value.visible_columns()) {
+    result.visible_columns.push_back(column);
+  }
+  if (value.has_search()) {
+    result.search = decodeSmartQuery(value.search());
+  }
   return result;
 }
 
@@ -1871,6 +2052,15 @@ decodeMetadata(const google::protobuf::RepeatedPtrField<wire::StringEntry>& entr
     result.multicam_groups.push_back(
         decodeMulticamGroup(group, indexedPath("project", "multicam_groups", index++), ids));
   }
+  index = 0;
+  for (const auto& view : value.saved_media_views()) {
+    result.saved_media_views.push_back(
+        decodeSavedMediaView(view, indexedPath("project", "saved_media_views", index++), ids));
+  }
+  if (value.has_active_media_view_id()) {
+    result.active_media_view_id =
+        decodeId(value.active_media_view_id(), "project.active_media_view_id");
+  }
   result.metadata = decodeMetadata(value.metadata(), "project.metadata");
 
   try {
@@ -1960,6 +2150,7 @@ edit::Result<edit::Project, CodecError> deserialize_project(std::span<const std:
     reject_v4_fields_in_declared_older(snapshot);
     reject_v5_fields_in_declared_older(snapshot);
     reject_v6_fields_in_declared_older(snapshot);
+    reject_v7_fields_in_declared_older(snapshot);
     if (const auto unknown = findUnknownField(snapshot, "snapshot")) {
       fail(CodecErrorCode::InvalidField, *unknown,
            "snapshot contains fields not defined by its declared schema version");

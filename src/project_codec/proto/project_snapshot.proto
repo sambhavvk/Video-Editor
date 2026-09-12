@@ -133,6 +133,14 @@ message Asset {
   repeated string tags = 16;
   optional string notes = 17;
   optional int32 rating = 18;
+  optional string production_scene = 19;
+  optional string production_shot = 20;
+  optional string production_take = 21;
+  optional string production_camera = 22;
+  optional string production_reel = 23;
+  optional string production_audio_roll = 24;
+  optional string production_source_timecode = 25;
+  optional bool production_preferred_take = 26;
 }
 
 enum TrackKind {
@@ -300,6 +308,17 @@ message SmartQuery {
   optional bool has_video = 4;
   optional bool has_audio = 5;
   optional string name_contains = 6;
+  optional string scene_equals = 7;
+  optional string shot_equals = 8;
+  optional string take_equals = 9;
+  optional bool preferred_take_only = 10;
+}
+
+message SavedMediaView {
+  EntityId id = 1;
+  string name = 2;
+  repeated string visible_columns = 3;
+  SmartQuery search = 4;
 }
 
 message MediaBin {
@@ -342,6 +361,8 @@ message Project {
   repeated StringEntry metadata = 5;
   repeated MediaBin bins = 6;
   repeated MulticamGroup multicam_groups = 7;
+  repeated SavedMediaView saved_media_views = 8;
+  optional EntityId active_media_view_id = 9;
 }
 
 message ProjectSnapshot {

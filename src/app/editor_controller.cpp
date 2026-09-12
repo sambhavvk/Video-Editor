@@ -1998,6 +1998,10 @@ EditorController::EditorController(desktop_ui::EditorWindow& window, QObject* pa
           &EditorController::removeBin);
   connect(window_.mediaBin(), &desktop_ui::MediaBinWidget::setAssetBinRequested, this,
           &EditorController::setAssetBin);
+  connect(window_.mediaBin(), &desktop_ui::MediaBinWidget::savedViewSelected, this,
+          &EditorController::selectSavedMediaView);
+  connect(window_.mediaBin(), &desktop_ui::MediaBinWidget::saveCurrentViewRequested, this,
+          &EditorController::saveCurrentMediaView);
   connect(&window_, &desktop_ui::EditorWindow::mediaSelectionChanged, this,
           &EditorController::selectMedia);
   connect(&window_, &desktop_ui::EditorWindow::assetMetadataEdited, this,
@@ -10568,10 +10572,44 @@ void EditorController::refreshMediaView() {
         view.smartHasAudioFilter = true;
         view.smartHasAudio = *bin.query.has_audio;
       }
+      if (bin.query.scene_equals.has_value()) {
+        view.smartSceneEquals = QString::fromStdString(*bin.query.scene_equals);
+      }
+      if (bin.query.shot_equals.has_value()) {
+        view.smartShotEquals = QString::fromStdString(*bin.query.shot_equals);
+      }
+      if (bin.query.take_equals.has_value()) {
+        view.smartTakeEquals = QString::fromStdString(*bin.query.take_equals);
+      }
+      if (bin.query.preferred_take_only.has_value() && *bin.query.preferred_take_only) {
+        view.smartPreferredTakeOnly = true;
+      }
     }
     bins.push_back(std::move(view));
   }
   window_.setMediaBins(bins);
+
+  QVector<desktop_ui::SavedMediaViewItem> saved_views;
+  saved_views.reserve(static_cast<qsizetype>(project->saved_media_views.size()));
+  for (const edit::SavedMediaView& view : project->saved_media_views) {
+    desktop_ui::SavedMediaViewItem item;
+    item.id = QString::fromStdString(view.id.toString());
+    item.name = QString::fromStdString(view.name);
+    for (const std::string& column : view.visible_columns) {
+      item.visibleColumns.push_back(QString::fromStdString(column));
+    }
+    if (view.search.name_contains.has_value()) {
+      item.searchText = QString::fromStdString(*view.search.name_contains);
+    } else if (view.search.scene_equals.has_value()) {
+      item.searchText = QString::fromStdString(*view.search.scene_equals);
+    }
+    item.active = project->active_media_view_id.has_value() &&
+                  *project->active_media_view_id == view.id;
+    saved_views.push_back(std::move(item));
+  }
+  if (window_.mediaBin() != nullptr) {
+    window_.mediaBin()->setSavedViews(saved_views);
+  }
 
   QVector<MediaItemView> items;
   items.reserve(static_cast<qsizetype>(project->assets.size()));
@@ -10622,6 +10660,14 @@ void EditorController::refreshMediaView() {
         .tags = std::move(tags),
         .notes = QString::fromStdString(asset.notes),
         .rating = asset.rating,
+        .scene = QString::fromStdString(asset.production.scene),
+        .shot = QString::fromStdString(asset.production.shot),
+        .take = QString::fromStdString(asset.production.take),
+        .camera = QString::fromStdString(asset.production.camera),
+        .reel = QString::fromStdString(asset.production.reel),
+        .audioRoll = QString::fromStdString(asset.production.audio_roll),
+        .sourceTimecode = QString::fromStdString(asset.production.source_timecode),
+        .preferredTake = asset.production.preferred_take,
         .thumbnail = thumbnail == media_thumbnails_.end() ? QImage{} : thumbnail->second,
         .offline = record == nullptr || record->availability == assets::AssetAvailability::Missing,
         .contentChanged =
@@ -12806,7 +12852,16 @@ void EditorController::presentAssetMetadata(const QString& assetId) {
     for (const std::string& tag : asset->tags) {
       view.tags.push_back(QString::fromStdString(tag));
     }
-    if (!view.title.isEmpty() || !view.notes.isEmpty() || view.rating != 0 || !view.tags.isEmpty()) {
+    view.scene = QString::fromStdString(asset->production.scene);
+    view.shot = QString::fromStdString(asset->production.shot);
+    view.take = QString::fromStdString(asset->production.take);
+    view.camera = QString::fromStdString(asset->production.camera);
+    view.reel = QString::fromStdString(asset->production.reel);
+    view.audioRoll = QString::fromStdString(asset->production.audio_roll);
+    view.sourceTimecode = QString::fromStdString(asset->production.source_timecode);
+    view.preferredTake = asset->production.preferred_take;
+    if (!view.title.isEmpty() || !view.notes.isEmpty() || view.rating != 0 || !view.tags.isEmpty() ||
+        !view.scene.isEmpty() || !view.shot.isEmpty() || !view.take.isEmpty()) {
       window_.inspector()->setAssetMetadata(view);
       return;
     }
@@ -12843,6 +12898,14 @@ void EditorController::saveAssetMetadata(const desktop_ui::AssetMetadataView& me
   command.display_title = metadata.title.toStdString();
   command.notes = metadata.notes.toStdString();
   command.rating = metadata.rating;
+  command.production.scene = metadata.scene.toStdString();
+  command.production.shot = metadata.shot.toStdString();
+  command.production.take = metadata.take.toStdString();
+  command.production.camera = metadata.camera.toStdString();
+  command.production.reel = metadata.reel.toStdString();
+  command.production.audio_roll = metadata.audioRoll.toStdString();
+  command.production.source_timecode = metadata.sourceTimecode.toStdString();
+  command.production.preferred_take = metadata.preferredTake;
   command.tags.reserve(static_cast<std::size_t>(metadata.tags.size()));
   for (const QString& tag : metadata.tags) {
     command.tags.push_back(tag.toStdString());
@@ -12942,6 +13005,42 @@ void EditorController::removeBin(const QString& binId) {
   edit::RemoveBinCommand command;
   command.bin_id = *parsed_bin_id;
   (void)apply(edit::EditCommand{.operation = command}, tr("Could not remove media bin"));
+}
+
+void EditorController::selectSavedMediaView(const QString& viewId) {
+  if (viewId.isEmpty()) {
+    return;
+  }
+  const auto parsed = edit::EntityId::parse(viewId.toStdString());
+  if (!parsed.has_value()) {
+    return;
+  }
+  edit::SetActiveMediaViewCommand command;
+  command.view_id = *parsed;
+  (void)apply(edit::EditCommand{.operation = command}, tr("Could not activate media view"));
+}
+
+void EditorController::saveCurrentMediaView(const QString& name) {
+  if (name.isEmpty() || window_.mediaBin() == nullptr) {
+    return;
+  }
+  edit::SavedMediaView view;
+  view.name = name.toStdString();
+  const QString trimmed = window_.mediaBin()->currentSearchText().trimmed();
+  if (!trimmed.isEmpty()) {
+    view.search.name_contains = trimmed.toStdString();
+  }
+  for (const QString& column : window_.mediaBin()->currentVisibleColumns()) {
+    view.visible_columns.push_back(column.toStdString());
+  }
+  if (!apply(edit::EditCommand{.operation = edit::UpsertSavedMediaViewCommand{.view = view}},
+             tr("Could not save media view"))) {
+    return;
+  }
+  edit::SetActiveMediaViewCommand activate;
+  activate.view_id = view.id;
+  (void)apply(edit::EditCommand{.operation = activate}, tr("Could not activate media view"));
+  refreshMediaView();
 }
 
 void EditorController::setAssetBin(const QString& assetId, const QString& binId) {

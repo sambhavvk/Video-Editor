@@ -521,6 +521,8 @@ private:
   void renameBin(const QString& binId, const QString& name);
   void removeBin(const QString& binId);
   void setAssetBin(const QString& assetId, const QString& binId);
+  void selectSavedMediaView(const QString& viewId);
+  void saveCurrentMediaView(const QString& name);
   void migrateCacheMetadataToProject();
   void showMediaCacheBrowser();
   void showRestorePointsDialog();

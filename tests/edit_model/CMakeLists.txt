@@ -11,6 +11,7 @@ add_executable(video_editor_edit_model_tests
   multicam_m01_test.cpp
   multicam_m02_test.cpp
   multicam_m03_test.cpp
+  f01_production_metadata_test.cpp
   time_test.cpp
   title_transition_test.cpp
   track_audio_state_test.cpp

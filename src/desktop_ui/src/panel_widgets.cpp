@@ -166,6 +166,21 @@ bool assetMatchesSmartBin(const MediaItemView& item, const MediaBinView& bin) {
       return false;
     }
   }
+  if (!bin.smartSceneEquals.isEmpty() &&
+      item.scene.compare(bin.smartSceneEquals, Qt::CaseInsensitive) != 0) {
+    return false;
+  }
+  if (!bin.smartShotEquals.isEmpty() &&
+      item.shot.compare(bin.smartShotEquals, Qt::CaseInsensitive) != 0) {
+    return false;
+  }
+  if (!bin.smartTakeEquals.isEmpty() &&
+      item.take.compare(bin.smartTakeEquals, Qt::CaseInsensitive) != 0) {
+    return false;
+  }
+  if (bin.smartPreferredTakeOnly && !item.preferredTake) {
+    return false;
+  }
   return true;
 }
 
@@ -179,6 +194,21 @@ MediaBinWidget::MediaBinWidget(QWidget* parent) : QWidget(parent) {
   layout->setSpacing(8);
 
   auto* tools = new QHBoxLayout;
+  saved_view_combo_ = new QComboBox(this);
+  saved_view_combo_->setObjectName(QStringLiteral("mediaSavedViewCombo"));
+  saved_view_combo_->setAccessibleName(tr("Saved media views"));
+  saved_view_combo_->setMinimumWidth(120);
+  tools->addWidget(saved_view_combo_);
+
+  columns_button_ = new QToolButton(this);
+  columns_button_->setObjectName(QStringLiteral("mediaColumnsButton"));
+  columns_button_->setAccessibleName(tr("Media columns"));
+  columns_button_->setText(tr("Columns"));
+  columns_button_->setPopupMode(QToolButton::InstantPopup);
+  columns_menu_ = new QMenu(columns_button_);
+  columns_button_->setMenu(columns_menu_);
+  tools->addWidget(columns_button_);
+
   search_ = new QLineEdit(this);
   search_->setObjectName(QStringLiteral("mediaSearch"));
   search_->setAccessibleName(tr("Search media"));
@@ -288,6 +318,26 @@ MediaBinWidget::MediaBinWidget(QWidget* parent) : QWidget(parent) {
   connect(view_mode_, &QToolButton::toggled, this, &MediaBinWidget::toggleViewMode);
   connect(emptyImport, &QPushButton::clicked, this, &MediaBinWidget::importRequested);
   connect(search_, &QLineEdit::textChanged, this, &MediaBinWidget::applyFilter);
+  connect(saved_view_combo_, &QComboBox::currentIndexChanged, this, [this](const int index) {
+    if (index < 0 || saved_view_combo_ == nullptr) {
+      return;
+    }
+    const QString view_id = saved_view_combo_->itemData(index).toString();
+    if (view_id.isEmpty()) {
+      return;
+    }
+    const auto found =
+        std::find_if(saved_views_.cbegin(), saved_views_.cend(),
+                     [&view_id](const SavedMediaViewItem& view) { return view.id == view_id; });
+    if (found == saved_views_.cend()) {
+      return;
+    }
+    setVisibleColumns(found->visibleColumns);
+    if (search_ != nullptr) {
+      search_->setText(found->searchText);
+    }
+    emit savedViewSelected(view_id);
+  });
   connect(bin_tree_, &QTreeWidget::itemSelectionChanged, this,
           &MediaBinWidget::handleBinSelectionChanged);
   connect(bin_tree_, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& point) {
@@ -393,7 +443,96 @@ MediaBinWidget::MediaBinWidget(QWidget* parent) : QWidget(parent) {
     menu.exec(icon_view_->viewport()->mapToGlobal(point));
   });
   icon_view_->viewport()->installEventFilter(this);
+  visible_columns_ = {QStringLiteral("duration"), QStringLiteral("format"),
+                      QStringLiteral("status")};
+  rebuildColumnMenu();
   rebuildTree();
+}
+
+void MediaBinWidget::rebuildColumnMenu() {
+  if (columns_menu_ == nullptr) {
+    return;
+  }
+  columns_menu_->clear();
+  const auto add_toggle = [this](const QString& id, const QString& label) {
+    auto* action = columns_menu_->addAction(label);
+    action->setCheckable(true);
+    action->setChecked(visible_columns_.contains(id));
+    action->setData(id);
+    connect(action, &QAction::toggled, this, [this, id](const bool checked) {
+      if (checked) {
+        if (!visible_columns_.contains(id)) {
+          visible_columns_.push_back(id);
+        }
+      } else {
+        visible_columns_.removeAll(id);
+      }
+      applyVisibleColumns();
+    });
+  };
+  add_toggle(QStringLiteral("scene"), tr("Scene"));
+  add_toggle(QStringLiteral("shot"), tr("Shot"));
+  add_toggle(QStringLiteral("take"), tr("Take"));
+  add_toggle(QStringLiteral("camera"), tr("Camera"));
+  add_toggle(QStringLiteral("reel"), tr("Reel"));
+  add_toggle(QStringLiteral("audio_roll"), tr("Audio roll"));
+  add_toggle(QStringLiteral("source_timecode"), tr("Source TC"));
+  add_toggle(QStringLiteral("preferred_take"), tr("Preferred"));
+  columns_menu_->addSeparator();
+  auto* save_view = columns_menu_->addAction(tr("Save current view…"));
+  connect(save_view, &QAction::triggered, this, [this] {
+    bool ok = false;
+    const QString name =
+        QInputDialog::getText(this, tr("Save media view"), tr("View name"), QLineEdit::Normal,
+                              QString{}, &ok);
+    if (ok && !name.trimmed().isEmpty()) {
+      emit saveCurrentViewRequested(name.trimmed());
+    }
+  });
+}
+
+void MediaBinWidget::applyVisibleColumns() {
+  rebuildTable();
+  applyFilter(search_ == nullptr ? QString{} : search_->text());
+}
+
+void MediaBinWidget::setSavedViews(const QVector<SavedMediaViewItem>& views) {
+  saved_views_ = views;
+  if (saved_view_combo_ == nullptr) {
+    return;
+  }
+  const QSignalBlocker blocker(saved_view_combo_);
+  saved_view_combo_->clear();
+  saved_view_combo_->addItem(tr("Default"), QString{});
+  for (const auto& view : saved_views_) {
+    saved_view_combo_->addItem(view.name, view.id);
+  }
+  for (int index = 0; index < saved_views_.size(); ++index) {
+    if (saved_views_.at(index).active) {
+      saved_view_combo_->setCurrentIndex(index + 1);
+      break;
+    }
+  }
+}
+
+void MediaBinWidget::setVisibleColumns(const QStringList& columns) {
+  visible_columns_ = columns;
+  rebuildColumnMenu();
+  applyVisibleColumns();
+}
+
+void MediaBinWidget::applySearchText(const QString& query) {
+  if (search_ != nullptr) {
+    search_->setText(query);
+  }
+}
+
+QString MediaBinWidget::currentSearchText() const {
+  return search_ == nullptr ? QString{} : search_->text();
+}
+
+QStringList MediaBinWidget::currentVisibleColumns() const {
+  return visible_columns_;
 }
 
 bool MediaBinWidget::eventFilter(QObject* watched, QEvent* event) {
@@ -520,6 +659,15 @@ bool MediaBinWidget::itemMatchesSearch(const MediaItemView& item, const QString&
   if (trimmed.toInt() > 0 && item.rating == trimmed.toInt()) {
     return true;
   }
+  if (item.scene.contains(trimmed, Qt::CaseInsensitive) ||
+      item.shot.contains(trimmed, Qt::CaseInsensitive) ||
+      item.take.contains(trimmed, Qt::CaseInsensitive) ||
+      item.camera.contains(trimmed, Qt::CaseInsensitive) ||
+      item.reel.contains(trimmed, Qt::CaseInsensitive) ||
+      item.audioRoll.contains(trimmed, Qt::CaseInsensitive) ||
+      item.sourceTimecode.contains(trimmed, Qt::CaseInsensitive)) {
+    return true;
+  }
   for (const QString& tag : item.tags) {
     if (tag.contains(trimmed, Qt::CaseInsensitive)) {
       return true;
@@ -591,7 +739,54 @@ QString MediaBinWidget::mediaIdAtRow(const int row) const {
 }
 
 void MediaBinWidget::rebuildTable() {
+  const auto column_label = [](const QString& id) -> QString {
+    if (id == QStringLiteral("scene")) {
+      return QObject::tr("Scene");
+    }
+    if (id == QStringLiteral("shot")) {
+      return QObject::tr("Shot");
+    }
+    if (id == QStringLiteral("take")) {
+      return QObject::tr("Take");
+    }
+    if (id == QStringLiteral("camera")) {
+      return QObject::tr("Camera");
+    }
+    if (id == QStringLiteral("reel")) {
+      return QObject::tr("Reel");
+    }
+    if (id == QStringLiteral("audio_roll")) {
+      return QObject::tr("Audio roll");
+    }
+    if (id == QStringLiteral("source_timecode")) {
+      return QObject::tr("Source TC");
+    }
+    if (id == QStringLiteral("preferred_take")) {
+      return QObject::tr("Preferred");
+    }
+    if (id == QStringLiteral("duration")) {
+      return QObject::tr("Duration");
+    }
+    if (id == QStringLiteral("format")) {
+      return QObject::tr("Format");
+    }
+    return QObject::tr("Status");
+  };
+
+  QStringList headers{QString{}, tr("Name")};
+  for (const QString& column : visible_columns_) {
+    headers.push_back(column_label(column));
+  }
   table_->setSortingEnabled(false);
+  table_->setColumnCount(headers.size());
+  table_->setHorizontalHeaderLabels(headers);
+  table_->horizontalHeader()->setSectionResizeMode(kMediaIconColumn, QHeaderView::Fixed);
+  table_->setColumnWidth(kMediaIconColumn, 48);
+  table_->horizontalHeader()->setSectionResizeMode(kMediaNameColumn, QHeaderView::Stretch);
+  for (int column = 2; column < headers.size(); ++column) {
+    table_->horizontalHeader()->setSectionResizeMode(column, QHeaderView::ResizeToContents);
+  }
+
   table_->setRowCount(items_.size());
   for (int row = 0; row < items_.size(); ++row) {
     const auto& item = items_.at(row);
@@ -609,38 +804,60 @@ void MediaBinWidget::rebuildTable() {
     name->setData(Qt::UserRole, item.id);
     name->setToolTip(item.filePath);
     table_->setItem(row, kMediaNameColumn, name);
-    table_->setItem(row, 2, new QTableWidgetItem(item.durationText));
-    auto* format_item = new QTableWidgetItem(item.formatText);
-    if (!item.colorInterpretation.isEmpty()) {
-      format_item->setToolTip(item.colorInterpretation);
-    }
-    table_->setItem(row, kMediaFormatColumn, format_item);
 
-    QString status_text;
-    QColor status_color{164, 193, 168};
-    if (item.offline) {
-      status_text = tr("Offline");
-      status_color = QColor{235, 126, 126};
-    } else if (item.contentChanged) {
-      status_text = tr("Changed");
-      status_color = QColor{225, 183, 98};
-    } else if (item.proxyGenerating) {
-      status_text = tr("Creating proxy…");
-    } else if (item.proxyAvailable) {
-      status_text = tr("Proxy ready");
-    } else if (item.proxyRecommended) {
-      status_text = tr("Proxy recommended");
-      status_color = QColor{225, 183, 98};
-    } else {
-      status_text = tr("Original");
+    int column_index = 2;
+    for (const QString& column : visible_columns_) {
+      QString text;
+      if (column == QStringLiteral("scene")) {
+        text = item.scene;
+      } else if (column == QStringLiteral("shot")) {
+        text = item.shot;
+      } else if (column == QStringLiteral("take")) {
+        text = item.take;
+      } else if (column == QStringLiteral("camera")) {
+        text = item.camera;
+      } else if (column == QStringLiteral("reel")) {
+        text = item.reel;
+      } else if (column == QStringLiteral("audio_roll")) {
+        text = item.audioRoll;
+      } else if (column == QStringLiteral("source_timecode")) {
+        text = item.sourceTimecode;
+      } else if (column == QStringLiteral("preferred_take")) {
+        text = item.preferredTake ? tr("Yes") : QString{};
+      } else if (column == QStringLiteral("duration")) {
+        text = item.durationText;
+      } else if (column == QStringLiteral("format")) {
+        text = item.formatText;
+      } else if (column == QStringLiteral("status")) {
+        if (item.offline) {
+          text = tr("Offline");
+        } else if (item.contentChanged) {
+          text = tr("Changed");
+        } else if (item.proxyGenerating) {
+          text = tr("Creating proxy…");
+        } else if (item.proxyAvailable) {
+          text = tr("Proxy ready");
+        } else if (item.proxyRecommended) {
+          text = tr("Proxy recommended");
+        } else {
+          text = tr("Original");
+        }
+      }
+      auto* cell = new QTableWidgetItem(text);
+      if (column == QStringLiteral("format") && !item.colorInterpretation.isEmpty()) {
+        cell->setToolTip(item.colorInterpretation);
+      }
+      if (column == QStringLiteral("status")) {
+        QColor status_color{164, 193, 168};
+        if (item.offline) {
+          status_color = QColor{235, 126, 126};
+        } else if (item.contentChanged || item.proxyRecommended) {
+          status_color = QColor{225, 183, 98};
+        }
+        cell->setForeground(status_color);
+      }
+      table_->setItem(row, column_index++, cell);
     }
-    auto* status = new QTableWidgetItem(status_text);
-    status->setForeground(status_color);
-    if (item.proxyRecommended && !item.proxyAvailable && !item.proxyGenerating &&
-        !item.contentChanged) {
-      status->setToolTip(tr("Right-click this item to create a smoother editing proxy"));
-    }
-    table_->setItem(row, kMediaStatusColumn, status);
   }
   table_->setSortingEnabled(true);
   rebuildIconView();
@@ -1109,6 +1326,30 @@ InspectorWidget::InspectorWidget(QWidget* parent) : QWidget(parent) {
   asset_rating_->setRange(0, 5);
   asset_rating_->setKeyboardTracking(false);
   assetForm->addRow(tr("Rating"), asset_rating_);
+  asset_scene_ = new QLineEdit(asset_group_);
+  asset_scene_->setObjectName(QStringLiteral("inspector.assetScene"));
+  assetForm->addRow(tr("Scene"), asset_scene_);
+  asset_shot_ = new QLineEdit(asset_group_);
+  asset_shot_->setObjectName(QStringLiteral("inspector.assetShot"));
+  assetForm->addRow(tr("Shot"), asset_shot_);
+  asset_take_ = new QLineEdit(asset_group_);
+  asset_take_->setObjectName(QStringLiteral("inspector.assetTake"));
+  assetForm->addRow(tr("Take"), asset_take_);
+  asset_camera_ = new QLineEdit(asset_group_);
+  asset_camera_->setObjectName(QStringLiteral("inspector.assetCamera"));
+  assetForm->addRow(tr("Camera"), asset_camera_);
+  asset_reel_ = new QLineEdit(asset_group_);
+  asset_reel_->setObjectName(QStringLiteral("inspector.assetReel"));
+  assetForm->addRow(tr("Reel"), asset_reel_);
+  asset_audio_roll_ = new QLineEdit(asset_group_);
+  asset_audio_roll_->setObjectName(QStringLiteral("inspector.assetAudioRoll"));
+  assetForm->addRow(tr("Audio roll"), asset_audio_roll_);
+  asset_source_timecode_ = new QLineEdit(asset_group_);
+  asset_source_timecode_->setObjectName(QStringLiteral("inspector.assetSourceTimecode"));
+  assetForm->addRow(tr("Source TC"), asset_source_timecode_);
+  asset_preferred_take_ = new QCheckBox(tr("Preferred take"), asset_group_);
+  asset_preferred_take_->setObjectName(QStringLiteral("inspector.assetPreferredTake"));
+  assetForm->addRow(QString{}, asset_preferred_take_);
   setTabOrder(asset_title_, asset_tags_);
   setTabOrder(asset_tags_, asset_notes_);
   setTabOrder(asset_notes_, asset_rating_);
@@ -1116,6 +1357,15 @@ InspectorWidget::InspectorWidget(QWidget* parent) : QWidget(parent) {
   connect(asset_tags_, &QLineEdit::textEdited, this, &InspectorWidget::publishAssetMetadata);
   connect(asset_notes_, &QPlainTextEdit::textChanged, this, &InspectorWidget::publishAssetMetadata);
   connect(asset_rating_, &QSpinBox::valueChanged, this, &InspectorWidget::publishAssetMetadata);
+  connect(asset_scene_, &QLineEdit::textEdited, this, &InspectorWidget::publishAssetMetadata);
+  connect(asset_shot_, &QLineEdit::textEdited, this, &InspectorWidget::publishAssetMetadata);
+  connect(asset_take_, &QLineEdit::textEdited, this, &InspectorWidget::publishAssetMetadata);
+  connect(asset_camera_, &QLineEdit::textEdited, this, &InspectorWidget::publishAssetMetadata);
+  connect(asset_reel_, &QLineEdit::textEdited, this, &InspectorWidget::publishAssetMetadata);
+  connect(asset_audio_roll_, &QLineEdit::textEdited, this, &InspectorWidget::publishAssetMetadata);
+  connect(asset_source_timecode_, &QLineEdit::textEdited, this,
+          &InspectorWidget::publishAssetMetadata);
+  connect(asset_preferred_take_, &QCheckBox::toggled, this, &InspectorWidget::publishAssetMetadata);
   asset_group_->setVisible(false);
   asset_group_->setEnabled(false);
   layout->addWidget(asset_group_);
@@ -1597,10 +1847,26 @@ void InspectorWidget::setAssetMetadata(const AssetMetadataView& metadata) {
   const QSignalBlocker tagsBlocker(asset_tags_);
   const QSignalBlocker notesBlocker(asset_notes_);
   const QSignalBlocker ratingBlocker(asset_rating_);
+  const QSignalBlocker sceneBlocker(asset_scene_);
+  const QSignalBlocker shotBlocker(asset_shot_);
+  const QSignalBlocker takeBlocker(asset_take_);
+  const QSignalBlocker cameraBlocker(asset_camera_);
+  const QSignalBlocker reelBlocker(asset_reel_);
+  const QSignalBlocker audioRollBlocker(asset_audio_roll_);
+  const QSignalBlocker sourceTcBlocker(asset_source_timecode_);
+  const QSignalBlocker preferredBlocker(asset_preferred_take_);
   asset_title_->setText(metadata.title);
   asset_tags_->setText(metadata.tags.join(QStringLiteral(", ")));
   asset_notes_->setPlainText(metadata.notes);
   asset_rating_->setValue(std::clamp(metadata.rating, 0, 5));
+  asset_scene_->setText(metadata.scene);
+  asset_shot_->setText(metadata.shot);
+  asset_take_->setText(metadata.take);
+  asset_camera_->setText(metadata.camera);
+  asset_reel_->setText(metadata.reel);
+  asset_audio_roll_->setText(metadata.audioRoll);
+  asset_source_timecode_->setText(metadata.sourceTimecode);
+  asset_preferred_take_->setChecked(metadata.preferredTake);
   const bool has_asset = !metadata.assetId.isEmpty();
   asset_group_->setVisible(has_asset);
   asset_group_->setEnabled(has_asset);
@@ -1619,6 +1885,14 @@ void InspectorWidget::publishAssetMetadata() {
   view.tags = splitCommaSeparatedTags(asset_tags_->text());
   view.notes = asset_notes_->toPlainText();
   view.rating = asset_rating_->value();
+  view.scene = asset_scene_->text();
+  view.shot = asset_shot_->text();
+  view.take = asset_take_->text();
+  view.camera = asset_camera_->text();
+  view.reel = asset_reel_->text();
+  view.audioRoll = asset_audio_roll_->text();
+  view.sourceTimecode = asset_source_timecode_->text();
+  view.preferredTake = asset_preferred_take_->isChecked();
   asset_metadata_ = view;
   emit assetMetadataEdited(view);
 }

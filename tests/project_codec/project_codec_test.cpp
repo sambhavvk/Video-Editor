@@ -874,5 +874,35 @@ TEST(ProjectCodecTest, RejectsMulticamGroupsInDeclaredSchemaV5) {
   EXPECT_FALSE(decoded);
 }
 
+TEST(ProjectCodecTest, F01ProductionMetadataAndSavedViewsRoundTrip) {
+  edit::Project project;
+  edit::Asset asset;
+  asset.name = "take_a.mov";
+  asset.source_uri = "memory://take_a";
+  asset.duration = edit::Time(48, 1);
+  asset.has_video = true;
+  asset.width = 1920;
+  asset.height = 1080;
+  asset.production.scene = "4";
+  asset.production.shot = "2";
+  asset.production.take = "1";
+  asset.production.preferred_take = true;
+  project.assets.push_back(asset);
+
+  edit::SavedMediaView view;
+  view.name = "Scene 4";
+  view.visible_columns = {"scene", "shot", "take"};
+  view.search.scene_equals = "4";
+  project.saved_media_views.push_back(view);
+  project.active_media_view_id = view.id;
+
+  const auto bytes = serialize_project(project);
+  auto decoded = deserialize_project(bytes);
+  ASSERT_TRUE(decoded);
+  EXPECT_EQ(decoded.value().assets.front().production.scene, "4");
+  EXPECT_EQ(decoded.value().saved_media_views.front().name, "Scene 4");
+  EXPECT_EQ(decoded.value().active_media_view_id, view.id);
+}
+
 } // namespace
 } // namespace video_editor::project_codec

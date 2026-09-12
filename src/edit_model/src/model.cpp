@@ -2,8 +2,70 @@
 #include "video_editor/edit_model/model.h"
 
 #include <algorithm>
+#include <cctype>
 
 namespace video_editor::edit {
+namespace {
+
+[[nodiscard]] bool iequals(std::string_view left, std::string_view right) noexcept {
+  if (left.size() != right.size()) {
+    return false;
+  }
+  for (std::size_t index = 0; index < left.size(); ++index) {
+    if (std::tolower(static_cast<unsigned char>(left[index])) !=
+        std::tolower(static_cast<unsigned char>(right[index]))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+} // namespace
+
+bool assetMatchesSmartQuery(const Asset& asset, const SmartQuery& query) noexcept {
+  for (const auto& tag : query.tags) {
+    const auto found = std::find_if(asset.tags.begin(), asset.tags.end(),
+                                    [&tag](const std::string& candidate) {
+                                      return iequals(candidate, tag);
+                                    });
+    if (found == asset.tags.end()) {
+      return false;
+    }
+  }
+  if (query.min_rating.has_value() && asset.rating < *query.min_rating) {
+    return false;
+  }
+  if (query.notes_contains.has_value() &&
+      asset.notes.find(*query.notes_contains) == std::string::npos) {
+    return false;
+  }
+  if (query.name_contains.has_value()) {
+    const auto& haystack = asset.display_title.empty() ? asset.name : asset.display_title;
+    if (haystack.find(*query.name_contains) == std::string::npos) {
+      return false;
+    }
+  }
+  if (query.has_video.has_value() && asset.has_video != *query.has_video) {
+    return false;
+  }
+  if (query.has_audio.has_value() && asset.has_audio != *query.has_audio) {
+    return false;
+  }
+  if (query.scene_equals.has_value() && !iequals(asset.production.scene, *query.scene_equals)) {
+    return false;
+  }
+  if (query.shot_equals.has_value() && !iequals(asset.production.shot, *query.shot_equals)) {
+    return false;
+  }
+  if (query.take_equals.has_value() && !iequals(asset.production.take, *query.take_equals)) {
+    return false;
+  }
+  if (query.preferred_take_only.has_value() && *query.preferred_take_only &&
+      !asset.production.preferred_take) {
+    return false;
+  }
+  return true;
+}
 
 const Asset* findAsset(const Project& project, EntityId id) noexcept {
   const auto found = std::find_if(project.assets.begin(), project.assets.end(),

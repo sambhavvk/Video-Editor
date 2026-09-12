@@ -102,7 +102,31 @@ struct SmartQuery final {
   std::optional<bool> has_video;
   std::optional<bool> has_audio;
   std::optional<std::string> name_contains;
+  std::optional<std::string> scene_equals;
+  std::optional<std::string> shot_equals;
+  std::optional<std::string> take_equals;
+  std::optional<bool> preferred_take_only;
   friend bool operator==(const SmartQuery&, const SmartQuery&) = default;
+};
+
+struct ProductionMetadata final {
+  std::string scene;
+  std::string shot;
+  std::string take;
+  std::string camera;
+  std::string reel;
+  std::string audio_roll;
+  std::string source_timecode;
+  bool preferred_take{false};
+  friend bool operator==(const ProductionMetadata&, const ProductionMetadata&) = default;
+};
+
+struct SavedMediaView final {
+  EntityId id{EntityId::generate()};
+  std::string name;
+  std::vector<std::string> visible_columns;
+  SmartQuery search;
+  friend bool operator==(const SavedMediaView&, const SavedMediaView&) = default;
 };
 
 struct MediaBin final {
@@ -133,6 +157,7 @@ struct Asset final {
   std::vector<std::string> tags;
   std::string notes;
   int rating{0};
+  ProductionMetadata production;
   friend bool operator==(const Asset&, const Asset&) = default;
 };
 
@@ -306,9 +331,13 @@ struct Project final {
   std::vector<Sequence> sequences;
   std::vector<MediaBin> bins;
   std::vector<MulticamGroup> multicam_groups;
+  std::vector<SavedMediaView> saved_media_views;
+  std::optional<EntityId> active_media_view_id;
   std::map<std::string, std::string, std::less<>> metadata;
   friend bool operator==(const Project&, const Project&) = default;
 };
+
+[[nodiscard]] bool assetMatchesSmartQuery(const Asset& asset, const SmartQuery& query) noexcept;
 
 [[nodiscard]] const Asset* findAsset(const Project& project, EntityId id) noexcept;
 [[nodiscard]] const MediaBin* findBin(const Project& project, EntityId id) noexcept;

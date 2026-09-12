@@ -312,9 +312,23 @@ constexpr int kMaximumAssetRating = 5;
   return std::nullopt;
 }
 
+[[nodiscard]] std::optional<EditError> validateProductionMetadata(
+    const ProductionMetadata& production) {
+  if (!validUtf8(production.scene) || !validUtf8(production.shot) ||
+      !validUtf8(production.take) || !validUtf8(production.camera) ||
+      !validUtf8(production.reel) || !validUtf8(production.audio_roll) ||
+      !validUtf8(production.source_timecode)) {
+    return error(EditErrorCode::InvalidArgument, "production metadata must be valid UTF-8");
+  }
+  return std::nullopt;
+}
+
 [[nodiscard]] std::optional<EditError> validateAssetMetadata(const Asset& asset) {
   if (!validUtf8(asset.display_title) || !validUtf8(asset.notes)) {
     return error(EditErrorCode::InvalidArgument, "asset metadata must be valid UTF-8");
+  }
+  if (const auto issue = validateProductionMetadata(asset.production)) {
+    return issue;
   }
   if (asset.rating < 0 || asset.rating > kMaximumAssetRating) {
     return error(EditErrorCode::InvalidArgument, "asset rating must be between 0 and 5");
@@ -926,6 +940,36 @@ validateTransition(const Project& project, const Sequence& sequence, const Trans
     }
     if (const auto issue = validateMulticamGroup(project, group)) {
       return issue;
+    }
+  }
+  for (const auto& view : project.saved_media_views) {
+    if (!addId(view.id)) {
+      return error(EditErrorCode::DuplicateId,
+                   "project contains a duplicate or nil saved media view id");
+    }
+    if (view.name.empty() || !validUtf8(view.name)) {
+      return error(EditErrorCode::InvalidArgument,
+                   "saved media view name must be non-empty UTF-8");
+    }
+    for (const auto& column : view.visible_columns) {
+      if (!validUtf8(column)) {
+        return error(EditErrorCode::InvalidArgument,
+                     "saved media view columns must be valid UTF-8");
+      }
+    }
+  }
+  if (project.active_media_view_id.has_value()) {
+    if (project.active_media_view_id->isNil()) {
+      return error(EditErrorCode::InvalidArgument, "active media view id cannot be nil");
+    }
+    const auto found =
+        std::find_if(project.saved_media_views.begin(), project.saved_media_views.end(),
+                     [&](const SavedMediaView& view) {
+                       return view.id == *project.active_media_view_id;
+                     });
+    if (found == project.saved_media_views.end()) {
+      return error(EditErrorCode::EntityNotFound,
+                   "active media view references a view that does not exist");
     }
   }
   for (const auto& sequence : project.sequences) {
@@ -2794,9 +2838,61 @@ struct PlannedClip final {
             found->tags = command.tags;
             found->notes = command.notes;
             found->rating = command.rating;
+            found->production = command.production;
             if (const auto issue = validateAssetMetadata(*found)) {
               return issue;
             }
+            return std::nullopt;
+          },
+          [&](const UpsertSavedMediaViewCommand& command) -> std::optional<EditError> {
+            if (command.view.id.isNil()) {
+              return error(EditErrorCode::InvalidArgument, "saved media view id cannot be nil");
+            }
+            if (command.view.name.empty() || !validUtf8(command.view.name)) {
+              return error(EditErrorCode::InvalidArgument,
+                           "saved media view name must be non-empty UTF-8");
+            }
+            const auto found =
+                std::find_if(project.saved_media_views.begin(), project.saved_media_views.end(),
+                             [&](const SavedMediaView& view) { return view.id == command.view.id; });
+            if (found == project.saved_media_views.end()) {
+              project.saved_media_views.push_back(command.view);
+            } else {
+              *found = command.view;
+            }
+            return std::nullopt;
+          },
+          [&](const RemoveSavedMediaViewCommand& command) -> std::optional<EditError> {
+            if (command.view_id.isNil()) {
+              return error(EditErrorCode::InvalidArgument, "saved media view id cannot be nil");
+            }
+            const auto found =
+                std::find_if(project.saved_media_views.begin(), project.saved_media_views.end(),
+                             [&](const SavedMediaView& view) { return view.id == command.view_id; });
+            if (found == project.saved_media_views.end()) {
+              return error(EditErrorCode::EntityNotFound, "saved media view was not found");
+            }
+            project.saved_media_views.erase(found);
+            if (project.active_media_view_id == command.view_id) {
+              project.active_media_view_id.reset();
+            }
+            return std::nullopt;
+          },
+          [&](const SetActiveMediaViewCommand& command) -> std::optional<EditError> {
+            if (command.view_id.has_value()) {
+              if (command.view_id->isNil()) {
+                return error(EditErrorCode::InvalidArgument, "active media view id cannot be nil");
+              }
+              const auto found =
+                  std::find_if(project.saved_media_views.begin(), project.saved_media_views.end(),
+                               [&](const SavedMediaView& view) {
+                                 return view.id == *command.view_id;
+                               });
+              if (found == project.saved_media_views.end()) {
+                return error(EditErrorCode::EntityNotFound, "saved media view was not found");
+              }
+            }
+            project.active_media_view_id = command.view_id;
             return std::nullopt;
           },
           [&](const SetSmartQueryCommand& command) -> std::optional<EditError> {
@@ -3201,6 +3297,12 @@ std::string commandName(const EditCommand& command) {
           return "Set asset metadata";
         if constexpr (std::is_same_v<T, SetSmartQueryCommand>)
           return "Set smart query";
+        if constexpr (std::is_same_v<T, UpsertSavedMediaViewCommand>)
+          return "Save media view";
+        if constexpr (std::is_same_v<T, RemoveSavedMediaViewCommand>)
+          return "Remove media view";
+        if constexpr (std::is_same_v<T, SetActiveMediaViewCommand>)
+          return "Set active media view";
         if constexpr (std::is_same_v<T, ReplaceClipMediaCommand>)
           return "Replace clip media";
         if constexpr (std::is_same_v<T, SetClipNameCommand>)
@@ -3344,6 +3446,12 @@ std::string commandType(const EditCommand& command) {
           return "set_asset_metadata";
         if constexpr (std::is_same_v<T, SetSmartQueryCommand>)
           return "set_smart_query";
+        if constexpr (std::is_same_v<T, UpsertSavedMediaViewCommand>)
+          return "upsert_saved_media_view";
+        if constexpr (std::is_same_v<T, RemoveSavedMediaViewCommand>)
+          return "remove_saved_media_view";
+        if constexpr (std::is_same_v<T, SetActiveMediaViewCommand>)
+          return "set_active_media_view";
         if constexpr (std::is_same_v<T, ReplaceClipMediaCommand>)
           return "replace_clip_media";
         if constexpr (std::is_same_v<T, SetClipNameCommand>)
