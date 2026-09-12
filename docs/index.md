@@ -50,6 +50,8 @@ Choose a starting point:
 - [Baseline workflow verification](quality/baseline-workflow-verification.md) — B01 evidence for
   import, source trim, timeline edit, save/reopen, captions, and export, plus later-chunk
   classification.
+- [FOSS component register](quality/foss-component-register.md) — selected libraries, codecs,
+  fonts, model assets, licenses, and blocked/deferred items.
 
 ## Source API references
 

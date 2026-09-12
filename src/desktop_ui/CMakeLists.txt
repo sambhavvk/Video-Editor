@@ -8,7 +8,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     project(video_editor_desktop_ui_standalone VERSION 0.1.0 LANGUAGES CXX)
 endif()
 
-find_package(Qt6 6.11 REQUIRED COMPONENTS Core Gui Widgets)
+if(NOT DEFINED VIDEO_EDITOR_QT_VERSION)
+    include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/DependencyVersions.cmake")
+endif()
+find_package(Qt6 ${VIDEO_EDITOR_QT_VERSION} EXACT REQUIRED COMPONENTS Core Gui Widgets)
 
 add_library(video_editor_desktop_ui STATIC
     include/video_editor/desktop_ui/cache_browser_dialog.hpp

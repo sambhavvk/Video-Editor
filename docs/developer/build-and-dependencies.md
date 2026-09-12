@@ -13,7 +13,7 @@ not an official distribution bundle.
 
 | Dependency | Contract |
 | --- | --- |
-| Qt | 6.11.1 exact; Core, Concurrent, Gui, Widgets, Network |
+| Qt | 6.11.2 exact; Core, Concurrent, Gui, Widgets, Network |
 | FFmpeg | 9.0.1 exact; libavformat/libavcodec 63.1.101, libavutil 61.1.101, libswresample 7.1.101, libswscale 10.1.101 |
 | libplacebo | 7.360.1 exact; optional capability-gated D3D11/Vulkan backend with a truthful stub |
 | miniaudio | 0.11.25 exact header; optional physical output adapter with a manual callback fallback |
@@ -148,7 +148,7 @@ From a Developer PowerShell with `clang-cl` and Ninja on `PATH`:
 
 ```powershell
 cmake --preset windows-dev `
-  -DCMAKE_PREFIX_PATH="C:\deps\prefix;C:\Qt\6.11.1\msvc2022_64"
+  -DCMAKE_PREFIX_PATH="C:\deps\prefix;C:\Qt\6.11.2\msvc2022_64"
 cmake --build --preset windows-dev
 ctest --preset windows-dev
 ```

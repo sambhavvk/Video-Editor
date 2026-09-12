@@ -65,7 +65,7 @@ Validated on current glibc x86-64 distros. You need **CMake 3.30+**, Ninja, a C+
 
 The source expects **exact** versions for several libraries (see
 [build and dependencies](docs/developer/build-and-dependencies.md)). At this revision they are
-Qt **6.11.1**, FFmpeg **9.0.1**, libplacebo **7.360.1**, libebur128 **1.2.6**, Protobuf **35.1**,
+Qt **6.11.2**, FFmpeg **9.0.1**, libplacebo **7.360.1**, libebur128 **1.2.6**, Protobuf **35.1**,
 and miniaudio **0.11.25** (fetched automatically during configure if the header is missing).
 
 ### 1. System packages
@@ -90,7 +90,7 @@ sudo apt install -y \
   libvulkan-dev mesa-vulkan-drivers vulkan-tools
 ```
 
-Then provide Qt 6.11.1, FFmpeg 9.0.1, and the other pinned libraries from a local prefix if the
+Then provide Qt 6.11.2, FFmpeg 9.0.1, and the other pinned libraries from a local prefix if the
 distro packages are not those exact versions.
 
 **Fedora**
@@ -134,7 +134,7 @@ cmake --build --preset release -j"$(nproc)"
 If Qt or FFmpeg live in a custom prefix:
 
 ```bash
-export CMAKE_PREFIX_PATH="/absolute/path/to/Qt/6.11.1/gcc_64:/absolute/path/to/deps"
+export CMAKE_PREFIX_PATH="/absolute/path/to/Qt/6.11.2/gcc_64:/absolute/path/to/deps"
 export PKG_CONFIG_PATH="$CMAKE_PREFIX_PATH/lib/pkgconfig:$CMAKE_PREFIX_PATH/lib64/pkgconfig"
 cmake --preset dev -DCMAKE_PREFIX_PATH="$CMAKE_PREFIX_PATH"
 ```

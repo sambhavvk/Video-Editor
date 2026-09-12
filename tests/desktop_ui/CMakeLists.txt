@@ -16,7 +16,10 @@ if(NOT TARGET video_editor_desktop_ui)
     )
 endif()
 
-find_package(Qt6 6.11 REQUIRED COMPONENTS Test Widgets)
+if(NOT DEFINED VIDEO_EDITOR_QT_VERSION)
+    include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/DependencyVersions.cmake")
+endif()
+find_package(Qt6 ${VIDEO_EDITOR_QT_VERSION} EXACT REQUIRED COMPONENTS Test Widgets)
 find_package(GTest CONFIG REQUIRED)
 
 add_executable(video_editor_desktop_ui_tests
