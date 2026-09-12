@@ -1045,8 +1045,8 @@ void EditorControllerTest::importsSearchesAndExportsCaptions() {
   auto* table = window.findChild<QTableWidget*>(QStringLiteral("captionsTable"));
   QVERIFY(table != nullptr);
   QCOMPARE(table->rowCount(), 1);
-  QCOMPARE(table->item(0, 1)->text(), QStringLiteral("Make every frame count"));
-  table->item(0, 1)->setText(QStringLiteral("Make every cut count"));
+  QCOMPARE(table->item(0, 2)->text(), QStringLiteral("Make every frame count"));
+  table->item(0, 2)->setText(QStringLiteral("Make every cut count"));
   QTRY_COMPARE(controller.editor()
                    .projectAt(controller.editor().revision())
                    ->sequences.front()

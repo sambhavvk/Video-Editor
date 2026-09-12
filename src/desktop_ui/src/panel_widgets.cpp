@@ -41,8 +41,10 @@
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QStandardItem>
-#include <QStandardItemModel>
-#include <QStyle>
+#include <QStyledItemDelegate>
+#include <QStyleOptionViewItem>
+#include <QTextDocument>
+#include <QAbstractTextDocumentLayout>
 #include <QSplitter>
 #include <QTableWidget>
 #include <QToolButton>
@@ -2686,6 +2688,56 @@ void AudioMixerWidget::setNormalizationTargetLufs(const double targetLufs) {
   normalization_target_->setValue(std::clamp(targetLufs, -24.0, -9.0));
 }
 
+namespace {
+
+constexpr double kUncertainWordProbability = 0.75;
+
+class TranscriptCaptionDelegate final : public QStyledItemDelegate {
+public:
+  explicit TranscriptCaptionDelegate(QObject* parent = nullptr) : QStyledItemDelegate(parent) {}
+
+  void paint(QPainter* painter, const QStyleOptionViewItem& option,
+             const QModelIndex& index) const override {
+    if (index.data(Qt::UserRole + 2).toString().isEmpty()) {
+      QStyledItemDelegate::paint(painter, option, index);
+      return;
+    }
+    QStyleOptionViewItem styled = option;
+    initStyleOption(&styled, index);
+    styled.text.clear();
+    QStyledItemDelegate::paint(painter, styled, index);
+
+    QTextDocument document;
+    document.setHtml(index.data(Qt::UserRole + 2).toString());
+    document.setTextWidth(option.rect.width() - 8);
+    painter->save();
+    painter->translate(option.rect.topLeft() + QPoint(4, 4));
+    document.drawContents(painter);
+    painter->restore();
+  }
+
+  [[nodiscard]] QSize sizeHint(const QStyleOptionViewItem& option,
+                               const QModelIndex& index) const override {
+    if (index.data(Qt::UserRole + 2).toString().isEmpty()) {
+      return QStyledItemDelegate::sizeHint(option, index);
+    }
+    QTextDocument document;
+    document.setHtml(index.data(Qt::UserRole + 2).toString());
+    document.setTextWidth(option.rect.width() > 0 ? option.rect.width() - 8 : 240);
+    return QSize(option.rect.width(), static_cast<int>(document.size().height()) + 8);
+  }
+};
+
+[[nodiscard]] QString escapeHtml(const QString& text) {
+  QString escaped = text;
+  escaped.replace('&', QStringLiteral("&amp;"));
+  escaped.replace('<', QStringLiteral("&lt;"));
+  escaped.replace('>', QStringLiteral("&gt;"));
+  return escaped;
+}
+
+} // namespace
+
 CaptionsPanelWidget::CaptionsPanelWidget(QWidget* parent) : QWidget(parent) {
   setObjectName(QStringLiteral("captionsPanel"));
   setAccessibleName(tr("Captions and transcript"));
@@ -2699,6 +2751,12 @@ CaptionsPanelWidget::CaptionsPanelWidget(QWidget* parent) : QWidget(parent) {
   search_->setPlaceholderText(tr("Search transcript…"));
   search_->setClearButtonEnabled(true);
   layout->addWidget(search_);
+  spelling_hint_ = makeMutedLabel(
+      tr("Edit caption text to fix spelling only; timeline cuts stay in Review suggestions below."),
+      this);
+  spelling_hint_->setObjectName(QStringLiteral("captionSpellingHint"));
+  spelling_hint_->setWordWrap(true);
+  layout->addWidget(spelling_hint_);
 
   auto* transcription = new QGroupBox(tr("Local transcription"), this);
   transcription->setObjectName(QStringLiteral("transcriptionOptionsGroup"));
@@ -2809,11 +2867,13 @@ CaptionsPanelWidget::CaptionsPanelWidget(QWidget* parent) : QWidget(parent) {
   table_ = new QTableWidget(tablePage);
   table_->setObjectName(QStringLiteral("captionsTable"));
   table_->setAccessibleName(tr("Caption segments"));
-  table_->setColumnCount(3);
-  table_->setHorizontalHeaderLabels({tr("Time"), tr("Caption"), tr("Confidence")});
+  table_->setColumnCount(4);
+  table_->setHorizontalHeaderLabels({tr("Time"), tr("Speaker"), tr("Caption"), tr("Confidence")});
   table_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
-  table_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
-  table_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+  table_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+  table_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+  table_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+  table_->setItemDelegateForColumn(2, new TranscriptCaptionDelegate(table_));
   table_->verticalHeader()->hide();
   table_->setSelectionBehavior(QAbstractItemView::SelectRows);
   table_->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -2989,6 +3049,8 @@ CaptionsPanelWidget::CaptionsPanelWidget(QWidget* parent) : QWidget(parent) {
     updateWordList(currentRow);
     if (currentRow >= 0 && currentRow < rows_.size()) {
       updateStyleControls(rows_.at(currentRow).style);
+      emit captionActivated(currentRow);
+      emit captionIdActivated(rows_.at(currentRow).id, rows_.at(currentRow).start);
     }
   });
   connect(words_, &QListWidget::itemActivated, this, [this](QListWidgetItem* item) {
@@ -3002,7 +3064,7 @@ CaptionsPanelWidget::CaptionsPanelWidget(QWidget* parent) : QWidget(parent) {
                          item->data(Qt::UserRole + 1).toLongLong());
   });
   connect(table_, &QTableWidget::cellChanged, this, [this](const int row, const int column) {
-    if (column == 1 && table_->item(row, column) != nullptr) {
+    if (column == 2 && table_->item(row, column) != nullptr) {
       emit captionTextEdited(row, table_->item(row, column)->text());
     }
   });
@@ -3076,21 +3138,6 @@ void CaptionsPanelWidget::setCaptionRows(const QVector<CaptionRowView>& rows) {
     selectedId = item->data(Qt::UserRole).toString();
   }
   rows_ = rows;
-  const QSignalBlocker blocker(table_);
-  table_->setRowCount(rows_.size());
-  for (int row = 0; row < rows_.size(); ++row) {
-    const auto& view = rows_.at(row);
-    auto* time = new QTableWidgetItem(view.timecode);
-    time->setFlags(time->flags() & ~Qt::ItemIsEditable);
-    time->setData(Qt::UserRole, view.id);
-    table_->setItem(row, 0, time);
-    table_->setItem(row, 1, new QTableWidgetItem(view.text));
-    auto* confidence = new QTableWidgetItem(
-        view.suggested ? tr("Suggested · %1%").arg(view.confidence * 100.0, 0, 'f', 0)
-                       : tr("Edited"));
-    confidence->setFlags(confidence->flags() & ~Qt::ItemIsEditable);
-    table_->setItem(row, 2, confidence);
-  }
   content_->setCurrentIndex(rows_.isEmpty() ? 0 : 1);
   int selectedRow = -1;
   for (int row = 0; row < rows_.size(); ++row) {
@@ -3099,14 +3146,150 @@ void CaptionsPanelWidget::setCaptionRows(const QVector<CaptionRowView>& rows) {
       break;
     }
   }
-  if (selectedRow < 0 && !rows_.isEmpty())
+  if (selectedRow < 0 && !rows_.isEmpty()) {
     selectedRow = 0;
-  if (selectedRow >= 0)
+  }
+  refreshTranscriptTable();
+  if (selectedRow >= 0) {
+    const QSignalBlocker blocker(table_);
     table_->setCurrentCell(selectedRow, 0);
+  }
   updateWordList(selectedRow);
   if (selectedRow >= 0) {
     updateStyleControls(rows_.at(selectedRow).style);
   }
+  scrollToActiveRow();
+}
+
+void CaptionsPanelWidget::setTranscriptPlayhead(const qint64 position) {
+  if (transcript_playhead_ == position && !rows_.isEmpty()) {
+    return;
+  }
+  transcript_playhead_ = position;
+  for (auto& row : rows_) {
+    row.playheadActive = position >= row.start && position < row.end;
+    row.activeWordId.clear();
+    if (row.playheadActive) {
+      for (const auto& word : row.words) {
+        if (position >= word.start && position < word.end) {
+          row.activeWordId = word.id;
+          break;
+        }
+      }
+    }
+  }
+  refreshTranscriptTable();
+  scrollToActiveRow();
+  const int currentRow = table_->currentRow();
+  if (currentRow >= 0) {
+    updateWordList(currentRow);
+  }
+}
+
+void CaptionsPanelWidget::refreshTranscriptTable() {
+  const QSignalBlocker blocker(table_);
+  table_->setRowCount(rows_.size());
+  for (int row = 0; row < rows_.size(); ++row) {
+    const auto& view = rows_.at(row);
+    auto* time = new QTableWidgetItem(view.timecode);
+    time->setFlags(time->flags() & ~Qt::ItemIsEditable);
+    time->setData(Qt::UserRole, view.id);
+    if (view.playheadActive) {
+      time->setBackground(QBrush(QColor(48, 96, 160, 64)));
+    }
+    table_->setItem(row, 0, time);
+
+    auto* speaker = new QTableWidgetItem(view.speakerLabel);
+    speaker->setFlags(speaker->flags() & ~Qt::ItemIsEditable);
+    speaker->setToolTip(view.speakerLabel.isEmpty()
+                            ? tr("No speaker label in this cue")
+                            : tr("Speaker label from import or WebVTT voice tag"));
+    if (view.playheadActive) {
+      speaker->setBackground(QBrush(QColor(48, 96, 160, 64)));
+    }
+    table_->setItem(row, 1, speaker);
+
+    auto* caption = new QTableWidgetItem(view.text);
+    caption->setData(Qt::UserRole + 2, captionHtml(view));
+    caption->setToolTip(tr("Spelling edits change text only and never remove footage."));
+    if (view.playheadActive) {
+      caption->setBackground(QBrush(QColor(48, 96, 160, 64)));
+    }
+    table_->setItem(row, 2, caption);
+
+    const QString confidenceText =
+        view.suggested ? tr("Suggested · %1%").arg(view.confidence * 100.0, 0, 'f', 0)
+        : view.searchHighlights.isEmpty() ? tr("Edited")
+                                          : tr("%1 match(es)").arg(view.searchHighlights.size());
+    auto* confidence = new QTableWidgetItem(confidenceText);
+    confidence->setFlags(confidence->flags() & ~Qt::ItemIsEditable);
+    if (view.playheadActive) {
+      confidence->setBackground(QBrush(QColor(48, 96, 160, 64)));
+    }
+    table_->setItem(row, 3, confidence);
+  }
+  table_->resizeRowsToContents();
+}
+
+void CaptionsPanelWidget::scrollToActiveRow() {
+  for (int row = 0; row < rows_.size(); ++row) {
+    if (!rows_.at(row).playheadActive) {
+      continue;
+    }
+    table_->scrollToItem(table_->item(row, 0), QAbstractItemView::PositionAtCenter);
+    return;
+  }
+}
+
+QString CaptionsPanelWidget::captionHtml(const CaptionRowView& row) {
+  if (row.searchHighlights.isEmpty()) {
+    return {};
+  }
+  const QByteArray utf8 = row.text.toUtf8();
+  struct Segment {
+    qsizetype start{0};
+    qsizetype length{0};
+    bool highlighted{false};
+  };
+  QVector<Segment> segments;
+  segments.reserve(row.searchHighlights.size() * 2 + 1);
+  qsizetype cursor = 0;
+  auto sortedHighlights = row.searchHighlights;
+  std::sort(sortedHighlights.begin(), sortedHighlights.end(),
+            [](const TranscriptSearchHighlightView& left,
+               const TranscriptSearchHighlightView& right) {
+              return left.byteOffset < right.byteOffset;
+            });
+  for (const auto& highlight : sortedHighlights) {
+    if (highlight.byteOffset < cursor || highlight.byteLength <= 0 ||
+        highlight.byteOffset + highlight.byteLength > utf8.size()) {
+      continue;
+    }
+    if (highlight.byteOffset > cursor) {
+      segments.push_back({cursor, highlight.byteOffset - cursor, false});
+    }
+    segments.push_back({highlight.byteOffset, highlight.byteLength, true});
+    cursor = highlight.byteOffset + highlight.byteLength;
+  }
+  if (cursor < utf8.size()) {
+    segments.push_back({cursor, utf8.size() - cursor, false});
+  }
+  QString html;
+  for (const auto& segment : segments) {
+    const QString piece =
+        escapeHtml(QString::fromUtf8(utf8.constData() + segment.start, segment.length));
+    if (segment.highlighted) {
+      html += QStringLiteral("<span style=\"background-color:#f5c542;color:#111;\">") + piece +
+              QStringLiteral("</span>");
+    } else {
+      html += piece;
+    }
+  }
+  return html;
+}
+
+QString CaptionsPanelWidget::uncertainWordLabel(const CaptionWordView& word) {
+  return word.uncertain ? tr("%1  ·  uncertain").arg(word.text) : word.text;
 }
 
 void CaptionsPanelWidget::setTranscriptionState(const TranscriptionState state,
@@ -3175,15 +3358,24 @@ void CaptionsPanelWidget::updateWordList(const int row) {
   words_->clear();
   if (row < 0 || row >= rows_.size())
     return;
-  for (const auto& word : rows_.at(row).words) {
+  const auto& rowView = rows_.at(row);
+  for (const auto& word : rowView.words) {
     auto* item = new QListWidgetItem(tr("%1  ·  %2–%3 s  ·  %4%")
-                                         .arg(word.text)
+                                         .arg(uncertainWordLabel(word))
                                          .arg(static_cast<double>(word.start) / 48'000.0, 0, 'f', 3)
                                          .arg(static_cast<double>(word.end) / 48'000.0, 0, 'f', 3)
                                          .arg(word.probability * 100.0, 0, 'f', 0),
                                      words_);
     item->setData(Qt::UserRole, word.id);
     item->setData(Qt::UserRole + 1, word.start);
+    if (word.uncertain) {
+      item->setForeground(QBrush(QColor(220, 120, 40)));
+      item->setToolTip(tr("Low-confidence word; verify before cutting."));
+    }
+    if (!rowView.activeWordId.isEmpty() && word.id == rowView.activeWordId) {
+      item->setBackground(QBrush(QColor(48, 96, 160, 96)));
+      words_->setCurrentItem(item);
+    }
   }
 }
 

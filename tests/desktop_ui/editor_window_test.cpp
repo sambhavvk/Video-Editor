@@ -1125,8 +1125,8 @@ void EditorWindowTest::captionsPanelEmitsEditableCueActions() {
                           {QStringLiteral("Original")});
   QCOMPARE(edited.count(), 0);
   QVERIFY(!(table->item(0, 0)->flags() & Qt::ItemIsEditable));
-  QVERIFY(table->item(0, 1)->flags() & Qt::ItemIsEditable);
-  table->item(0, 1)->setText(QStringLiteral("Updated caption"));
+  QVERIFY(table->item(0, 2)->flags() & Qt::ItemIsEditable);
+  table->item(0, 2)->setText(QStringLiteral("Updated caption"));
   QCOMPARE(edited.count(), 1);
   QCOMPARE(edited.at(0).at(0).toInt(), 0);
   QCOMPARE(edited.at(0).at(1).toString(), QStringLiteral("Updated caption"));

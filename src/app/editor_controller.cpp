@@ -138,6 +138,21 @@ void explainUnavailable(desktop_ui::EditorWindow& window, const char* location,
   debugAgentLog("A", location, "user feedback", message.toStdString());
   window.showTransientMessage(message);
 }
+
+[[nodiscard]] QString speakerLabelFromCaption(const edit::Caption& caption) {
+  const std::string& identity = caption.provenance.model_identity;
+  if (identity.rfind("speaker:", 0) == 0 && identity.size() > 8) {
+    return QString::fromStdString(identity.substr(8));
+  }
+  static const QRegularExpression voiceTag(QStringLiteral(R"(<v\s+([^>]+)>)"));
+  const QRegularExpressionMatch match = voiceTag.match(QString::fromStdString(caption.text));
+  if (match.hasMatch()) {
+    return match.captured(1).trimmed();
+  }
+  return {};
+}
+
+constexpr double kUncertainWordProbability = 0.75;
 // #endregion
 
 QSettings& windowSettings(desktop_ui::EditorWindow& window) {
@@ -5777,6 +5792,7 @@ void EditorController::seek(const qint64 position) {
   }
   window_.timeline()->setPlayhead(timelineValue(playheadTime()));
   requestPreview();
+  window_.captionsPanel()->setTranscriptPlayhead(playhead_);
 }
 
 void EditorController::setPlaybackRate(const double rate) {
@@ -6058,6 +6074,7 @@ void EditorController::advancePlayback() {
   }
   window_.timeline()->setPlayhead(timelineValue(playheadTime()));
   requestPreview(PreviewRequestPolicy::Coalesce);
+  window_.captionsPanel()->setTranscriptPlayhead(playhead_);
   if ((playback_rate_ > 0.0 && playhead_ >= end) || (playback_rate_ < 0.0 && playhead_ <= 0)) {
     stopProgramTransport();
     play_around_end_.reset();
@@ -6155,6 +6172,7 @@ void EditorController::updateCaptionText(const int visibleRow, const QString& te
     return;
   }
   caption.text = normalized.toStdString();
+  caption.provenance.source = edit::CaptionWordSource::UserEdited;
   (void)apply(
       edit::EditCommand{.operation = edit::UpdateCaptionCommand{.sequence_id = sequence->id,
                                                                 .caption = std::move(caption)},
@@ -10352,9 +10370,11 @@ void EditorController::refreshCaptionView() {
   visible_caption_indices_.clear();
   if (sequence == nullptr) {
     window_.captionsPanel()->setCaptionRows(QVector<desktop_ui::CaptionRowView>{});
+    window_.captionsPanel()->setTranscriptPlayhead(playhead_);
     return;
   }
 
+  std::map<std::size_t, QVector<desktop_ui::TranscriptSearchHighlightView>> highlights_by_cue;
   if (caption_search_.isEmpty()) {
     visible_caption_indices_.reserve(sequence->captions.size());
     for (std::size_t index = 0; index < sequence->captions.size(); ++index) {
@@ -10369,6 +10389,9 @@ void EditorController::refreshCaptionView() {
         if (visible_caption_indices_.empty() || visible_caption_indices_.back() != hit.cue_index) {
           visible_caption_indices_.push_back(hit.cue_index);
         }
+        highlights_by_cue[hit.cue_index].push_back(
+            {.byteOffset = static_cast<qsizetype>(hit.byte_offset),
+             .byteLength = static_cast<qsizetype>(hit.byte_length)});
       }
     }
   }
@@ -10387,8 +10410,11 @@ void EditorController::refreshCaptionView() {
                    timecodeText(toUiTime(caption.range.end()), sequence->frame_rate);
     row.text = QString::fromStdString(caption.text);
     row.language = QString::fromStdString(caption.language);
+    row.speakerLabel = speakerLabelFromCaption(caption);
     row.start = toUiTime(caption.range.start);
     row.end = toUiTime(caption.range.end());
+    row.searchHighlights = highlights_by_cue[index];
+    row.playheadActive = playhead_ >= row.start && playhead_ < row.end;
     row.style.fontFamily = QString::fromStdString(caption.style.font_family);
     row.style.fontSize = caption.style.font_size;
     row.style.textColor = QColor::fromRgbF(static_cast<float>(caption.style.text_color.red),
@@ -10416,15 +10442,22 @@ void EditorController::refreshCaptionView() {
                          static_cast<float>(caption.style.outline_color.blue),
                          static_cast<float>(caption.style.outline_color.alpha));
     for (const auto& word : caption.words) {
-      row.words.push_back({.id = QString::fromStdString(word.id.toString()),
-                           .text = QString::fromStdString(word.text),
-                           .start = toUiTime(word.range.start),
-                           .end = toUiTime(word.range.end()),
-                           .probability = word.probability});
+      desktop_ui::CaptionWordView wordView{
+          .id = QString::fromStdString(word.id.toString()),
+          .text = QString::fromStdString(word.text),
+          .start = toUiTime(word.range.start),
+          .end = toUiTime(word.range.end()),
+          .probability = word.probability,
+          .uncertain = word.probability < kUncertainWordProbability};
+      if (row.playheadActive && playhead_ >= wordView.start && playhead_ < wordView.end) {
+        row.activeWordId = wordView.id;
+      }
+      row.words.push_back(std::move(wordView));
     }
     rows.push_back(std::move(row));
   }
   window_.captionsPanel()->setCaptionRows(rows);
+  window_.captionsPanel()->setTranscriptPlayhead(playhead_);
 }
 
 void EditorController::rebuildPlaybackRegistry() {

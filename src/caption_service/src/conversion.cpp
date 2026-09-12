@@ -12,6 +12,8 @@ edit::Caption toEditCaption(const CaptionCue& cue, std::string language,
   if (cue.identifier) {
     if (const auto identifier = edit::EntityId::parse(*cue.identifier)) {
       caption.id = *identifier;
+    } else {
+      caption.provenance.model_identity = "speaker:" + *cue.identifier;
     }
   }
   caption.range = cue.range;

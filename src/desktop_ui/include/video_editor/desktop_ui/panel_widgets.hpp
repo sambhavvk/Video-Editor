@@ -382,6 +382,7 @@ public:
 
   void setCaptionRows(const QStringList& timecodes, const QStringList& text);
   void setCaptionRows(const QVector<CaptionRowView>& rows);
+  void setTranscriptPlayhead(qint64 position);
   void setTranscriptionState(TranscriptionState state, const QString& message = {},
                              int percent = 0);
   void setModelDownloadState(const ModelDownloadView& state);
@@ -415,6 +416,10 @@ signals:
 
 private:
   void updateWordList(int row);
+  void refreshTranscriptTable();
+  void scrollToActiveRow();
+  [[nodiscard]] static QString captionHtml(const CaptionRowView& row);
+  [[nodiscard]] static QString uncertainWordLabel(const CaptionWordView& word);
   void updateStyleControls(const CaptionStyleView& style);
   CaptionStyleView styleFromControls() const;
   TranscriptionOptionsView optionsFromControls() const;
@@ -449,8 +454,10 @@ private:
   QListWidget* review_{nullptr};
   QPushButton* apply_review_{nullptr};
   QPushButton* discard_review_{nullptr};
+  QLabel* spelling_hint_{nullptr};
   QVector<CaptionRowView> rows_;
   QVector<CaptionProposalView> proposals_;
+  qint64 transcript_playhead_{0};
   TranscriptionState transcription_state_{TranscriptionState::Idle};
   QString model_id_{QStringLiteral("base")};
   QColor text_color_value_{Qt::white};

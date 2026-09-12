@@ -318,12 +318,18 @@ struct EffectParameterView {
 // Caption/transcription views deliberately contain only presentation values.
 // The controller converts these to edit-model entities after validating the
 // captured revision; the widget never mutates the project directly.
+struct TranscriptSearchHighlightView final {
+  qsizetype byteOffset{0};
+  qsizetype byteLength{0};
+};
+
 struct CaptionWordView final {
   QString id;
   QString text;
   qint64 start{0};
   qint64 end{0};
   double probability{1.0};
+  bool uncertain{false};
 };
 
 struct CaptionStyleView final {
@@ -345,12 +351,16 @@ struct CaptionRowView final {
   QString timecode;
   QString text;
   QString language;
+  QString speakerLabel;
   qint64 start{0};
   qint64 end{0};
   QVector<CaptionWordView> words;
+  QVector<TranscriptSearchHighlightView> searchHighlights;
   CaptionStyleView style{};
   double confidence{1.0};
   bool suggested{false};
+  bool playheadActive{false};
+  QString activeWordId;
 };
 
 enum class TranscriptionState {
